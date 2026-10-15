@@ -21,7 +21,8 @@ export default function App() {
   const view = useStore((s) => s.view);
   const tool = useStore((s) => s.tool);
   const exportOpen = useStore((s) => s.exportOpen);
-  const [left, setLeft] = useState(() => window.innerWidth > 900);
+  const left = useStore((s) => s.leftOpen);
+  const setLeft = useStore((s) => s.setLeftOpen);
   const [right, setRight] = useState(() => window.innerWidth > 700);
 
   useEffect(() => {

@@ -51,6 +51,8 @@ interface State {
   fitRequest: number;
   brush: BrushSettings;
   leftTab: LeftTab;
+  /** Left panel visibility (collapsed by default on narrow screens). */
+  leftOpen: boolean;
   rightTab: RightTab;
   textEditing: ID | null;
   /** Element awaiting a thread target (text frame link mode). */
@@ -77,6 +79,7 @@ interface State {
   requestFit: () => void;
   setBrush: (b: Partial<BrushSettings>) => void;
   setLeftTab: (t: LeftTab) => void;
+  setLeftOpen: (open: boolean) => void;
   setRightTab: (t: RightTab) => void;
   setTextEditing: (id: ID | null) => void;
   setLinking: (id: ID | null) => void;
@@ -109,6 +112,7 @@ export const useStore = create<State>((set, get) => ({
   fitRequest: 0,
   brush: { type: 'watercolor', size: 18, opacity: 0.85, color: '#2b4a8f', flow: 0.7, hardness: 0.5, grain: 0.5, wetness: 0.6, angle: 30, stabilizer: 0.35, pressure: true },
   leftTab: 'pages',
+  leftOpen: typeof window === 'undefined' ? true : window.innerWidth > 900,
   rightTab: 'element',
   textEditing: null,
   linking: null,
@@ -157,6 +161,7 @@ export const useStore = create<State>((set, get) => ({
   requestFit: () => set({ fitRequest: get().fitRequest + 1 }),
   setBrush: (b) => set({ brush: { ...get().brush, ...b } }),
   setLeftTab: (leftTab) => set({ leftTab }),
+  setLeftOpen: (leftOpen) => set({ leftOpen }),
   setRightTab: (rightTab) => set({ rightTab }),
   setTextEditing: (textEditing) => set({ textEditing }),
   setLinking: (linking) => set({ linking }),

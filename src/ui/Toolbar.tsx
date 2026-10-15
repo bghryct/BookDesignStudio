@@ -55,7 +55,7 @@ export function Toolbar() {
         type="button"
         title="Element library — designs by Cleves, Diehl, Munari, Crouwel, Martens, Schrofer, Tschichold, Bringhurst, Bosshard, Müller-Brockmann, Hochuli, Unger, Caflisch, Sato"
         aria-label="Element library"
-        onClick={() => useStore.getState().setLeftTab('library')}
+        onClick={() => { const st = useStore.getState(); st.setLeftTab('library'); st.setLeftOpen(true); }}
         className="mb-1 inline-flex h-8 w-8 items-center justify-center rounded-[6px] text-gold hover:bg-ink-700"
       >
         <Library size={16} />
