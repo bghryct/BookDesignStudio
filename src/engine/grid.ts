@@ -13,6 +13,8 @@ export interface GridGeometry {
   side: PageSide;
   block: Rect;
   cols: { x: number; w: number }[];
+  /** Bosshard's second column system (empty when off). */
+  cols2: { x: number; w: number }[];
   rows: { y: number; h: number }[];
   baselines: number[];
   microX: number[];
@@ -105,6 +107,9 @@ export function computeGrid(spec: BookSpec, side: PageSide): GridGeometry {
   // Columns are mirrored on left pages so column 1 is always at the binding.
   const cols = Array.from({ length: ncol }, (_, i) => ({ x: block.x + i * (colW + g.gutter), w: colW }));
   const rows = Array.from({ length: nrow }, (_, i) => ({ y: block.y + i * (rowH + g.rowGutter), h: rowH }));
+  const n2 = Math.max(0, Math.round(g.secondaryColumns ?? 0));
+  const col2W = n2 > 0 ? (block.w - g.gutter * (n2 - 1)) / n2 : 0;
+  const cols2 = n2 > 0 ? Array.from({ length: n2 }, (_, i) => ({ x: block.x + i * (col2W + g.gutter), w: col2W })) : [];
 
   const baselines: number[] = [];
   if (g.baseline > 0.5) {
@@ -122,12 +127,13 @@ export function computeGrid(spec: BookSpec, side: PageSide): GridGeometry {
 
   const snapX = [0, spec.trimW, spec.trimW / 2, block.x, block.x + block.w];
   for (const c of cols) snapX.push(c.x, c.x + c.w);
+  for (const c of cols2) snapX.push(c.x, c.x + c.w);
   snapX.push(...microX);
   const snapY = [0, spec.trimH, spec.trimH / 2, block.y, block.y + block.h];
   for (const r of rows) snapY.push(r.y, r.y + r.h);
   snapY.push(...microY);
 
-  return { w: spec.trimW, h: spec.trimH, side, block, cols, rows, baselines, microX, microY, snapX, snapY };
+  return { w: spec.trimW, h: spec.trimH, side, block, cols, cols2, rows, baselines, microX, microY, snapX, snapY };
 }
 
 /**

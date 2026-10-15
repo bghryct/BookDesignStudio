@@ -14,6 +14,7 @@ import { textBlock, type PageSide } from '../engine/grid';
 import type { GenContext } from '../engine/generators/context';
 import { generatePattern, generateOrnament, generateInitial, generateOverprint, generateGradient, generateGridType, generateRule } from '../engine/generators';
 import { renderStrokes } from '../engine/brushes';
+import { getMotif, type MotifContext } from '../engine/motifs';
 import { parseSvgCached, svgPrims, svgMarkupFromDataUrl } from './svgImport';
 import { transformPath } from '../lib/pathData';
 import { findElement, pageSide } from '../model/surfaces';
@@ -270,6 +271,17 @@ export function compileElementLocal(el: Element, ctx: CompileContext): Prim[] {
     case 'gridtype': return generateGridType(el, genContext);
     case 'cutout': return [{ t: 'path', d: cutoutPath(el), stroke: '#e5007e', strokeWidth: 0.6, dash: [4, 2], fill: null, role: 'dieline' }];
     case 'drawing': return compileDrawing(el);
+    case 'motif': {
+      const def = getMotif(el.kind);
+      if (!def) return [{ t: 'path', d: rectPath(0, 0, el.w, el.h), stroke: '#b9b0a0', strokeWidth: 0.5, dash: [3, 3] }];
+      if (el.fontFamily) void ensureFamily(el.fontFamily);
+      const mctx: MotifContext = { ...genContext, unit: ctx.project.book.unit, book: ctx.project.book };
+      try {
+        return def.generate(el, mctx);
+      } catch {
+        return [{ t: 'path', d: rectPath(0, 0, el.w, el.h), stroke: '#e5483a', strokeWidth: 0.5, dash: [3, 3] }];
+      }
+    }
   }
 }
 
@@ -286,8 +298,17 @@ export function elementMatrix(el: Element, offsetX = 0, offsetY = 0): Matrix {
 
 const compiledCache = new WeakMap<Element, { key: string; prims: Prim[] }>();
 
+const bookIds = new WeakMap<object, number>();
+let bookCounter = 0;
+function bookKey(book: BookSpec): number {
+  let id = bookIds.get(book);
+  if (id == null) { id = ++bookCounter; bookIds.set(book, id); }
+  return id;
+}
+
 function contextKey(el: Element, ctx: CompileContext): string {
   const v = useFontStore.getState().version;
+  if (el.type === 'motif') return `${v}|${bookKey(ctx.project.book)}`;
   if (el.type === 'image' || el.type === 'svg') return `${v}|${el.assetId ? (ctx.project.assets[el.assetId] ? 1 : 0) : 0}`;
   return String(v);
 }

@@ -2,7 +2,7 @@ import React from 'react';
 import clsx from 'clsx';
 import {
   MousePointer2, Spline, Type, Square, Circle, Star, Minus, PenTool, Image, Brush, Eraser, Orbit, Flower2, TextInitial,
-  Blend, Sparkles, Scissors, Grid3x3, Hand, ZoomIn,
+  Blend, Sparkles, Scissors, Grid3x3, Hand, ZoomIn, LayoutGrid, Ruler, CaseSensitive, Library,
 } from 'lucide-react';
 import { useStore, type Tool } from '../store/store';
 
@@ -36,6 +36,11 @@ const GROUPS: ToolDef[][] = [
     { id: 'cutout', icon: <Scissors size={16} />, label: 'Die-cut window (Munari)', key: 'D' },
   ],
   [
+    { id: 'grid-diagram', icon: <LayoutGrid size={16} />, label: 'Grid diagram (teaching)', hint: 'Drag a box to draw a visible field grid' },
+    { id: 'dimension', icon: <Ruler size={16} />, label: 'Dimension line', key: 'M', hint: 'Drag to measure; the label shows the length in document units' },
+    { id: 'specimen', icon: <CaseSensitive size={16} />, label: 'Type specimen (waterfall)', hint: 'Drag a box; pick the typeface in the inspector' },
+  ],
+  [
     { id: 'hand', icon: <Hand size={16} />, label: 'Hand (or hold Space)', key: 'H' },
     { id: 'zoom', icon: <ZoomIn size={16} />, label: 'Zoom (Alt to zoom out)', key: 'Z' },
   ],
@@ -46,6 +51,15 @@ export function Toolbar() {
   const setTool = useStore((s) => s.setTool);
   return (
     <nav className="scroll-thin flex w-10 shrink-0 flex-col items-center gap-0.5 overflow-y-auto border-r border-ink-700 bg-ink-900 py-1.5" aria-label="Tools">
+      <button
+        type="button"
+        title="Element library — designs by Cleves, Diehl, Munari, Crouwel, Martens, Schrofer, Tschichold, Bringhurst, Bosshard, Müller-Brockmann, Hochuli, Unger, Caflisch, Sato"
+        aria-label="Element library"
+        onClick={() => useStore.getState().setLeftTab('library')}
+        className="mb-1 inline-flex h-8 w-8 items-center justify-center rounded-[6px] text-gold hover:bg-ink-700"
+      >
+        <Library size={16} />
+      </button>
       {GROUPS.map((g, gi) => (
         <React.Fragment key={gi}>
           {gi > 0 && <div className="my-1 h-px w-5 bg-ink-700" />}

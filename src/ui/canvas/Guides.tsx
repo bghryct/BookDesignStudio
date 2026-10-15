@@ -12,6 +12,7 @@ const MICRO = 'rgba(70, 170, 230, 0.22)';
 const BLEED = 'rgba(232, 72, 52, 0.85)';
 const CANON = 'rgba(217, 83, 47, 0.75)';
 const FOLD = 'rgba(40, 170, 120, 0.95)';
+const SECOND = 'rgba(240, 140, 30, 0.85)';
 
 const hair = { vectorEffect: 'non-scaling-stroke' as const, strokeWidth: 1, fill: 'none' };
 
@@ -41,6 +42,9 @@ export function SurfaceGuides({ project, surface }: { project: Project; surface:
       ))}
       {g.showGrid && grid.cols.length > 1 && grid.cols.map((c, i) => (
         <rect key={`c${i}`} x={c.x} y={block.y} width={c.w} height={block.h} stroke={COLUMN} {...hair} />
+      ))}
+      {g.showGrid && grid.cols2.map((c, i) => (
+        <rect key={`c2${i}`} x={c.x} y={block.y} width={c.w} height={block.h} stroke={SECOND} {...hair} strokeDasharray="6 3" />
       ))}
       {g.showMargins && <rect x={block.x} y={block.y} width={block.w} height={block.h} stroke={MARGIN} {...hair} />}
     </g>

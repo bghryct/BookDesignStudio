@@ -59,7 +59,7 @@ export function defaultBookSpec(): BookSpec {
     facing: true,
     direction: 'ltr',
     plannedPages: 240,
-    paper: { gsm: 90, bulk: 1.3, grain: 'long', sheetW: mm(1000), sheetH: mm(700), color: '#f7f2e7' },
+    paper: { gsm: 90, bulk: 1.3, grain: 'short', sheetW: mm(1000), sheetH: mm(700), color: '#f7f2e7' },
     binding: {
       type: 'case',
       boardThickness: mm(2.5),
@@ -150,7 +150,7 @@ export function createDefaultProject(): Project {
   const colophon = makePage({ label: 'Colophon' });
   colophon.elements.push(makeText({
     name: 'Colophon', x: left.x, y: H - spec.margins.bottom - 100, w: left.w, h: 100,
-    text: 'Set in EB Garamond, after the romans of Claude Garamont, with true small caps and old-style figures. Text block proportioned on the Van de Graaf canon; lines locked to a 14 pt baseline grid; justified with total-fit line breaking.\nSewn in sixteen-page sections on 90 g/m² book wove, long grain; case-bound in cloth with gold foil.',
+    text: 'Set in EB Garamond, after the romans of Claude Garamont, with true small caps and old-style figures. Text block proportioned on the Van de Graaf canon; lines locked to a 14 pt baseline grid; justified with total-fit line breaking.\nSewn in sixteen-page sections on 90 g/m² book wove, grain parallel to the spine; case-bound in cloth with gold foil.',
     style: textStyle({ fontSize: 8, leading: 11, align: 'left', hyphenate: true, baselineGrid: false, firstLineIndent: 0, indentFirstParagraph: false, paragraphSpacing: 5.5 }),
   }));
 

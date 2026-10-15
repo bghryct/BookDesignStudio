@@ -93,7 +93,7 @@ export interface TextStyle {
 export type ElementType =
   | 'text' | 'image' | 'shape' | 'rule' | 'path' | 'svg'
   | 'pattern' | 'ornament' | 'initial' | 'overprint' | 'gradient'
-  | 'cutout' | 'drawing' | 'gridtype';
+  | 'cutout' | 'drawing' | 'gridtype' | 'motif';
 
 /** Cover finishing applied in the 3D preview and flagged in the PDF. */
 export type Finish = 'none' | 'gold-foil' | 'silver-foil' | 'copper-foil' | 'holo-foil' | 'blind-deboss' | 'spot-gloss';
@@ -326,10 +326,25 @@ export interface DrawingElement extends ElementBase {
   paperGrain: number; // 0–1
 }
 
+/**
+ * A designer motif: one element type backed by a registry of generators
+ * (src/engine/motifs) — marbled endpapers, line-fillers, Penguin bands, Beethoven arcs,
+ * dual grids, teaching diagrams and more. `kind` is the registry key.
+ */
+export interface MotifElement extends ElementBase {
+  type: 'motif';
+  kind: string;
+  seed: number;
+  colors: string[];
+  params: Record<string, number>;
+  text: string;
+  fontFamily: string;
+}
+
 export type Element =
   | TextElement | ImageElement | ShapeElement | RuleElement | PathElement | SvgElement
   | PatternElement | OrnamentElement | InitialElement | OverprintElement | GradientElement
-  | CutoutElement | DrawingElement | GridTypeElement;
+  | CutoutElement | DrawingElement | GridTypeElement | MotifElement;
 
 /* ------------------------------------------------------------------------- */
 /* Book structure                                                             */
@@ -433,6 +448,10 @@ export interface GridSpec {
   snapToBaseline: boolean;
   /** Show canon construction lines (Van de Graaf / golden section). */
   showCanon: boolean;
+  /** Bosshard: a second column system superimposed on the first (0 = off). */
+  secondaryColumns?: number;
+  /** Hochuli: tint loose / tight lines and mark hyphen ladders on the canvas. */
+  showSpacing?: boolean;
 }
 
 export interface BookSpec {

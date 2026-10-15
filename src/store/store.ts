@@ -12,7 +12,8 @@ export type Tool =
   | 'select' | 'node' | 'hand' | 'zoom'
   | 'text' | 'rect' | 'ellipse' | 'polygon' | 'line' | 'pen' | 'image'
   | 'brush' | 'eraser'
-  | 'pattern' | 'ornament' | 'initial' | 'overprint' | 'gradient' | 'cutout' | 'gridtype';
+  | 'pattern' | 'ornament' | 'initial' | 'overprint' | 'gradient' | 'cutout' | 'gridtype'
+  | 'grid-diagram' | 'dimension' | 'specimen';
 
 export interface BrushSettings {
   type: BrushType;
@@ -29,7 +30,7 @@ export interface BrushSettings {
 }
 
 export type RightTab = 'element' | 'type' | 'document' | 'binding' | 'fonts';
-export type LeftTab = 'pages' | 'layers' | 'presets' | 'assets';
+export type LeftTab = 'pages' | 'layers' | 'library' | 'presets' | 'assets';
 
 /** Which master is being edited instead of a spread. */
 export interface MasterEdit { id: ID }

@@ -30,6 +30,14 @@ export const TRIM_PRESETS: { id: string; label: string; w: number; h: number; gr
   { id: 'kiku', label: '菊判 Kiku — 150 × 220 mm', w: 150, h: 220, group: 'Japanese' },
 ];
 
+/** Page proportions after Bringhurst's musical intervals and geometric series. */
+export const PROPORTIONS: { label: string; ratio: number }[] = [
+  { label: 'Square (unison)', ratio: 1 }, { label: 'Minor third 5:6', ratio: 6 / 5 }, { label: 'Major third 4:5', ratio: 5 / 4 },
+  { label: 'Fourth 3:4', ratio: 4 / 3 }, { label: 'ISO 1:√2', ratio: Math.SQRT2 }, { label: 'Fifth 2:3', ratio: 1.5 },
+  { label: 'Minor sixth 5:8', ratio: 1.6 }, { label: 'Golden section 1:φ', ratio: (1 + Math.sqrt(5)) / 2 }, { label: 'Major sixth 3:5', ratio: 5 / 3 },
+  { label: 'Hexagon 1:√3', ratio: Math.sqrt(3) }, { label: 'Octave 1:2', ratio: 2 },
+];
+
 export function DocumentPanel() {
   const book = useStore((s) => s.project.book);
   const swatches = useStore((s) => s.project.swatches);
@@ -69,6 +77,7 @@ export function DocumentPanel() {
           <NumberField label="Slug (marks)" length value={book.slug} min={0} onChange={(v) => set((d) => { d.slug = v; })} />
         </Row>
         <p className="text-[10.5px] text-ink-400">Proportion 1 : {ratio.toFixed(3)}{Math.abs(ratio - 1.5) < 0.01 ? ' — 2:3, the classical page' : Math.abs(ratio - 1.618) < 0.012 ? ' — golden section' : Math.abs(ratio - Math.SQRT2) < 0.01 ? ' — √2 (ISO)' : Math.abs(ratio - 1.333) < 0.01 ? ' — 3:4' : ''}</p>
+        <Select label="Proportion (Bringhurst §8.1) — keeps the width" value="" options={[{ value: '', label: 'Set height from a proportion…' }, ...PROPORTIONS.map((p) => ({ value: String(p.ratio), label: `${p.label} — 1 : ${p.ratio.toFixed(3)}` }))]} onChange={(v) => { const r = parseFloat(v); if (r) set((d) => { d.trimH = d.trimW * r; }); }} />
         <Row>
           <Toggle label="Facing pages" checked={book.facing} onChange={(v) => set((d) => { d.facing = v; })} />
           <Segmented value={book.direction} onChange={(v) => set((d) => { d.direction = v; })} options={[{ value: 'ltr', label: 'LTR', title: 'Binds on the left' }, { value: 'rtl', label: 'RTL', title: 'Binds on the right (Japanese, Arabic, Hebrew)' }]} />
@@ -103,6 +112,7 @@ export function DocumentPanel() {
           <NumberField label="Baseline" unit="pt" value={book.grid.baseline} min={0} step={0.25} onChange={(v) => set((d) => { d.grid.baseline = v; })} hint="Usually the body leading" />
           <NumberField label="First baseline" unit="pt" value={book.grid.baselineOffset} min={0} step={0.25} onChange={(v) => set((d) => { d.grid.baselineOffset = v; })} hint="Offset from the top margin" />
           <NumberField label="Micro-grid" value={book.grid.microDivisions} min={1} max={12} decimals={0} onChange={(v) => set((d) => { d.grid.microDivisions = Math.round(v); })} hint="Bosshard's dual grid: subdivisions per field" />
+          <NumberField label="2nd system (Bosshard)" value={book.grid.secondaryColumns ?? 0} min={0} max={24} decimals={0} onChange={(v) => set((d) => { d.grid.secondaryColumns = Math.round(v); })} hint="A second column system on the same text block (e.g. 2 over 3); 0 = off. Shown dashed orange; items snap to both." />
         </Row>
         <Button className="w-full" onClick={() => {
           const patch = lockGridToBaseline(s().project.book);
@@ -116,6 +126,7 @@ export function DocumentPanel() {
           <Toggle label="Bleed" checked={book.grid.showBleed} onChange={(v) => set((d) => { d.grid.showBleed = v; })} />
           <Toggle label="Snap to grid" checked={book.grid.snap} onChange={(v) => set((d) => { d.grid.snap = v; })} />
           <Toggle label="Snap to baselines" checked={book.grid.snapToBaseline} onChange={(v) => set((d) => { d.grid.snapToBaseline = v; })} />
+          <Toggle label="Spacing check" checked={!!book.grid.showSpacing} onChange={(v) => set((d) => { d.grid.showSpacing = v; })} hint="Hochuli: tint loose (red) and tight (blue) lines, tick hyphens, flag ladders of 3+" />
         </div>
       </Section>
 

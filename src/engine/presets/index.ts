@@ -14,110 +14,13 @@ import { canonMargins, textBlock, computeGrid, lockGridToBaseline, type CanonKin
 import { computeBinding } from '../binding';
 import { rng, pick } from '../../lib/random';
 
-export interface PresetContent {
-  title: string;
-  subtitle: string;
-  author: string;
-  publisher: string;
-  body: string;
-  japanese: string;
-}
+import type { PresetContent, PresetResult, PresetFamily } from './helpers';
+import { specWith, sideOf, chain, firstParagraphs, plain, runningHeads, textFrames, blankPages } from './helpers';
+import { bosshardGrid, bosshardConcrete } from './bosshard';
+import { hochuliDetail, hochuliTypotron } from './hochuli';
 
-export interface PresetResult {
-  name: string;
-  book: BookSpec;
-  pages: Page[];
-  masters: Master[];
-  cover: Element[];
-  swatches?: Swatch[];
-  /** Spread shown in the matrix thumbnail. */
-  focusSpread: number;
-  /** One-line description of this variation. */
-  caption: string;
-}
-
-export interface PresetFamily {
-  id: string;
-  name: string;
-  designer: string;
-  era: string;
-  description: string;
-  rationale: string[];
-  accent: string;
-  generate: (content: PresetContent, variant: number, seed: number) => PresetResult;
-}
-
-export function defaultContent(project?: Project): PresetContent {
-  let body = SAMPLE_ESSAY;
-  if (project) {
-    // Use the longest story in the document as the content.
-    let best = '';
-    for (const p of project.pages) for (const e of p.elements) if (e.type === 'text' && e.text.length > best.length && e.style.writingMode === 'horizontal') best = e.text;
-    if (best.length > 400) body = best;
-  }
-  const b = project?.book;
-  return {
-    title: b?.title || SAMPLE_TITLE,
-    subtitle: b?.subtitle || 'Notes on proportion, type & binding',
-    author: b?.author || 'The Compositor',
-    publisher: b?.publisher || 'Book Design Studio',
-    body,
-    japanese: SAMPLE_JAPANESE,
-  };
-}
-
-/* -------------------------------------------------------------------------- */
-/* Helpers                                                                     */
-/* -------------------------------------------------------------------------- */
-
-function specWith(over: (s: BookSpec) => void): BookSpec {
-  const s = defaultBookSpec();
-  over(s);
-  return s;
-}
-
-/** Page sides for LTR facing books: index 0 = recto (right). */
-const sideOf = (spec: BookSpec, i: number): PageSide => (spec.direction === 'rtl' ? (i % 2 === 0 ? 'left' : 'right') : i % 2 === 0 ? 'right' : 'left');
-
-function chain(frames: TextElement[]) {
-  for (let i = 0; i < frames.length - 1; i++) frames[i].flowNext = frames[i + 1].id;
-}
-
-function firstParagraphs(text: string, n: number) {
-  return text.split('\n').filter((l) => l.trim() && !l.startsWith('#') && !/^-{3,}$/.test(l.trim())).slice(0, n).join('\n');
-}
-
-const plain = (o: Partial<TextStyle> = {}) => textStyle({ baselineGrid: false, hyphenate: false, firstLineIndent: 0, ...o });
-
-function runningHeads(spec: BookSpec, style: Partial<TextStyle>, placement: 'centre' | 'outer' = 'centre', folioAtFoot = true): Master {
-  const m = makeMaster('A · Text');
-  for (const side of ['left', 'right'] as const) {
-    const b = textBlock(spec, side);
-    const align = placement === 'centre' ? 'center' : side === 'left' ? 'left' : 'right';
-    const head = makeText({ name: 'Running head', x: b.x, y: b.y - spec.grid.baseline * 2.2, w: b.w, h: 14, text: side === 'left' ? '{title}' : '{author}', style: plain({ fontSize: 8.5, leading: 11, align, ...style }) });
-    const folio = folioAtFoot
-      ? makeText({ name: 'Folio', x: b.x, y: b.y + b.h + spec.grid.baseline * 1.2, w: b.w, h: 14, text: '{page}', style: plain({ fontSize: 9, leading: 11, align, ...style, tracking: 0, features: { onum: true } }) })
-      : null;
-    (side === 'left' ? m.left : m.right).push(head, ...(folio ? [folio] : []));
-  }
-  return m;
-}
-
-function textFrames(spec: BookSpec, pageIdx: number[], content: string, style: TextStyle, opts: { columns?: number; topOffset?: (i: number) => number; width?: (b: { x: number; w: number }, side: PageSide) => { x: number; w: number } } = {}): TextElement[] {
-  const frames = pageIdx.map((pi, i) => {
-    const side = sideOf(spec, pi);
-    const b = textBlock(spec, side);
-    const top = opts.topOffset ? opts.topOffset(i) : 0;
-    const geo = opts.width ? opts.width(b, side) : { x: b.x, w: b.w };
-    return makeText({ name: `Text ${i + 1}`, x: geo.x, y: b.y + top, w: geo.w, h: b.h - top, columns: opts.columns ?? 1, columnGap: spec.grid.gutter, text: i === 0 ? content : '', style: i === 0 ? style : textStyle(style) });
-  });
-  chain(frames);
-  return frames;
-}
-
-function blankPages(n: number, paper: string, masterId: string | null = null): Page[] {
-  return Array.from({ length: n }, () => makePage({ masterId, paperColor: paper }));
-}
+export type { PresetContent, PresetResult, PresetFamily } from './helpers';
+export { defaultContent } from './helpers';
 
 /* -------------------------------------------------------------------------- */
 /* 1 · Tschichold — classical golden canon                                      */
@@ -644,7 +547,7 @@ const sato: PresetFamily = {
   },
 };
 
-export const PRESET_FAMILIES: PresetFamily[] = [cleves, crouwel, schrofer, martens, munari, tschichold, bringhurst, mullerBrockmann, sato];
+export const PRESET_FAMILIES: PresetFamily[] = [cleves, crouwel, schrofer, martens, munari, tschichold, bringhurst, mullerBrockmann, bosshardGrid, bosshardConcrete, hochuliDetail, hochuliTypotron, sato];
 
 /** Merge a preset result into a project, keeping uploads (assets, fonts) and swatches. */
 export function applyPreset(project: Project, r: PresetResult): Project {

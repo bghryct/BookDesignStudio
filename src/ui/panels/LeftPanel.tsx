@@ -10,6 +10,7 @@ import type { Element, PaperMaterial, Project } from '../../model/types';
 import { insertPages, deletePage, duplicatePage, movePage, addMaster, deleteMaster, autoFlow } from '../../model/pageOps';
 import { Button, Select, TextInput, Toggle, Hint } from '../controls';
 import { PresetsPanel } from './PresetsPanel';
+import { LibraryPanel } from '../library/LibraryPanel';
 import { importFiles } from '../importFiles';
 import { makeImage, makeSvg } from '../../model/factory';
 import { textBlock } from '../../engine/grid';
@@ -18,6 +19,7 @@ import { SAMPLE_ESSAY } from '../../model/defaults';
 const TABS: { id: LeftTab; label: string }[] = [
   { id: 'pages', label: 'Pages' },
   { id: 'layers', label: 'Layers' },
+  { id: 'library', label: 'Library' },
   { id: 'presets', label: 'Presets' },
   { id: 'assets', label: 'Assets' },
 ];
@@ -32,7 +34,7 @@ export function LeftPanel() {
             key={t.id}
             type="button"
             onClick={() => useStore.getState().setLeftTab(t.id)}
-            className={clsx('h-8 rounded-t px-2.5 text-[11.5px]', tab === t.id ? 'border-x border-t border-ink-700 bg-ink-800 text-ink-100' : 'text-ink-400 hover:text-ink-200')}
+            className={clsx('h-8 rounded-t px-2 text-[11.5px]', tab === t.id ? 'border-x border-t border-ink-700 bg-ink-800 text-ink-100' : 'text-ink-400 hover:text-ink-200')}
           >
             {t.label}
           </button>
@@ -41,6 +43,7 @@ export function LeftPanel() {
       <div className="scroll-thin min-h-0 flex-1 overflow-y-auto">
         {tab === 'pages' && <PagesPanel />}
         {tab === 'layers' && <LayersPanel />}
+        {tab === 'library' && <LibraryPanel />}
         {tab === 'presets' && <PresetsPanel />}
         {tab === 'assets' && <AssetsPanel />}
       </div>
@@ -243,7 +246,7 @@ function currentSurfaces(project: Project, view: string, spread: number, masterI
 }
 
 const TYPE_GLYPH: Record<Element['type'], string> = {
-  text: 'T', image: '▣', shape: '■', rule: '—', path: '✎', svg: '◇', pattern: '◎', ornament: '❦', initial: 'Ꭿ', overprint: '◐', gradient: '◍', cutout: '◌', drawing: '✐', gridtype: '⌗',
+  text: 'T', image: '▣', shape: '■', rule: '—', path: '✎', svg: '◇', pattern: '◎', ornament: '❦', initial: 'Ꭿ', overprint: '◐', gradient: '◍', cutout: '◌', drawing: '✐', gridtype: '⌗', motif: '✦',
 };
 
 function LayersPanel() {

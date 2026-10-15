@@ -64,7 +64,31 @@ Live vector objects with their own controls:
 - Rules: double, Scotch, dotted, wave, Greek key, chain.
 
 ### Generative presets & layout matrix (`src/engine/presets/`)
-Nine canons — Illuminated Manuscript, Systematic Grid, Restless Typography, Overprint Monoprint, Unreadable Book, Golden Canon, Elements of Style, Swiss Grid, Ma · Japanese. Each generates a complete small book (spec, masters, pages, cover) from your own text, in eight structured variations. The **Matrix** view compares them side by side; Apply is undoable.
+Thirteen canons, each generating a complete small book (spec, masters, pages, cover) from your own text, in eight structured variations:
+- Illuminated Manuscript (Cleves)
+- Systematic Grid (Crouwel)
+- Restless Typography (Schrofer)
+- Overprint Monoprint (Martens)
+- Unreadable Book (Munari)
+- Golden Canon (Tschichold)
+- Elements of Style (Bringhurst)
+- Swiss Grid (Müller-Brockmann)
+- **Typographic Grid** and **Concrete Typography** (Hans Rudolf Bosshard): two column systems on one common unit grid; constructive bar progressions and Lohse-style serial colour fields
+- **Detail in Typography** and **Typotron** (Jost Hochuli): reader-first asymmetric books with marginalia (or a symmetric axis when the content asks for it); small, playful St. Gallen booklets
+- Ma · Japanese (Sato / wa-toji)
+
+The **Matrix** view compares them side by side; Apply is undoable.
+
+### Element library (`src/ui/library/`, `src/engine/motifs/`)
+A **Library** tab of ready-made design elements grouped by designer — Cleves, Diehl, Munari, Crouwel, Martens, Schrofer, Tschichold, Bringhurst, Bosshard, Müller-Brockmann, Hochuli, Unger, Caflisch, Sato — with live thumbnails. Click to place on the current page or front cover, or drag onto the canvas. Besides compositions (title pages, chapter openings, marginal headings, rotated columns, die-cut windows, overprints, kinetic patterns, illuminated frames and initials …) it exposes the **motif** generators:
+- **Decorative**: marbled and paste-paper endpapers, block-printed repeats, washi, manuscript line-fillers and rubricated pilcrows, printer's-flower borders, the Penguin band structure, Beethoven-style concentric arcs, circle compositions, diagonal bar progressions, concrete colour fields, folding diagrams.
+- **Teaching**: field grids, Bosshard dual and em-derived grids, dimension lines, the typographic scale, page-proportion charts, the Van de Graaf construction, type waterfalls, letter-spacing studies, a Vox-ATypI classification chart, letterform anatomy, case-making, imposition and stab-binding diagrams drawn from the book's own settings.
+
+### Teaching tools
+- **Spacing check** (Hochuli): tints loose and tight lines, ticks hyphenated lines and flags hyphen ladders. The inspector reports the measure in characters per line (Bringhurst's 45–75).
+- **Second column system** (Bosshard): a second grid over the first; items snap to both.
+- Classical typographic-scale size chips; page proportions from Bringhurst's musical intervals.
+- Grid-diagram, dimension and type-specimen tools in the toolbar.
 
 ### Brushes (`src/engine/brushes/`)
 Pencil, graphite, charcoal, crayon, pastel, marker, highlighter, fineliner, ink, broad-edge calligraphy, watercolour (wet edges, blooms, granulation), gouache, airbrush, stipple, gold leaf and eraser. They respond to pen pressure; with a mouse, speed simulates pressure. A stabiliser smooths the line. Strokes are stored as data and re-rendered at screen, 300-dpi and video resolution.
@@ -91,7 +115,7 @@ three.js with PBR materials: cloth weave, buckram, leather grain, matte / gloss 
 Current Chrome, Edge, Safari and Firefox on desktop. MP4/WebM encoding uses WebCodecs where available (Chrome, Edge, Safari 16.4+, Firefox 130+), otherwise MediaRecorder; GIF works everywhere. A pen tablet or Apple Pencil gives real pressure for the brushes.
 
 ## Keyboard
-`V` select · `A` direct selection · `T` text · `R` rectangle · `E` ellipse · `L` rule · `P` pen · `B` brush · `X` eraser · `K` pattern · `O` ornament · `G` gradient · `D` die-cut · `H`/Space hand · `Z` zoom · `[ ]` brush size · `⌘Z / ⇧⌘Z` undo/redo · `⌘D` duplicate · `⌘0` fit · `⌘= / ⌘-` zoom · `⌘] / ⌘[` arrange · arrows nudge (⇧ ×10).
+`V` select · `A` direct selection · `T` text · `R` rectangle · `E` ellipse · `L` rule · `P` pen · `B` brush · `X` eraser · `K` pattern · `O` ornament · `G` gradient · `D` die-cut · `M` dimension · `H`/Space hand · `Z` zoom · `[ ]` brush size · `⌘Z / ⇧⌘Z` undo/redo · `⌘D` duplicate · `⌘0` fit · `⌘= / ⌘-` zoom · `⌘] / ⌘[` arrange · arrows nudge (⇧ ×10).
 
 ## Licence
 The application code is licensed under the Apache License 2.0 (see `LICENSE`).

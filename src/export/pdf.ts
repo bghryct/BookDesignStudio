@@ -345,7 +345,7 @@ async function fontFor(w: PageWriter, r: TextRun): Promise<PDFFont | null> {
   const key = `${r.font.face}|${JSON.stringify(r.font.features)}`;
   if (w.fonts.has(key)) return w.fonts.get(key)!;
   try {
-    const f = await w.doc.embedFont(bytes, { subset: true, features: r.font.features as Record<string, boolean> });
+    const f = await w.doc.embedFont(bytes, { subset: true, features: { ...r.font.features } as Record<string, boolean> });
     w.fonts.set(key, f);
     return f;
   } catch {

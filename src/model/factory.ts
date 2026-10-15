@@ -1,9 +1,10 @@
 import type {
   Element, ElementType, TextStyle, TextElement, ImageElement, ShapeElement, RuleElement, PathElement, SvgElement,
   PatternElement, OrnamentElement, InitialElement, OverprintElement, GradientElement, CutoutElement, DrawingElement,
-  GridTypeElement, ElementBase, OrnamentPalette, Page, Master,
+  GridTypeElement, ElementBase, OrnamentPalette, Page, Master, MotifElement,
 } from './types';
 import { uid } from '../lib/random';
+import { getMotif } from '../engine/motifs';
 
 export const INK = '#1b1813';
 export const VERMILION = '#b0331f';
@@ -55,7 +56,7 @@ export function textStyle(over: Partial<TextStyle> = {}): TextStyle {
 const NAMES: Record<ElementType, string> = {
   text: 'Text', image: 'Image', shape: 'Shape', rule: 'Rule', path: 'Path', svg: 'SVG',
   pattern: 'Kinetic pattern', ornament: 'Marginalia', initial: 'Initial', overprint: 'Overprint',
-  gradient: 'Tonal gradient', cutout: 'Die-cut', drawing: 'Drawing', gridtype: 'Grid type',
+  gradient: 'Tonal gradient', cutout: 'Die-cut', drawing: 'Drawing', gridtype: 'Grid type', motif: 'Motif',
 };
 
 function base(type: ElementType, over: Partial<ElementBase>): ElementBase {
@@ -152,6 +153,23 @@ export function makeGridType(over: Over<GridTypeElement> = {}): GridTypeElement 
   return { ...base('gridtype', { w: 320, h: 60, ...over }), type: 'gridtype', text: 'new alphabet', color: INK, weight: 0.62, corner: 1, tracking: 1, showModules: false, ...over } as GridTypeElement;
 }
 
+/** A registry motif with its declared defaults (size, colours, params, text, font). */
+export function makeMotif(kind: string, over: Over<MotifElement> = {}): MotifElement {
+  const def = getMotif(kind);
+  const size = def?.defaultSize ?? { w: 200, h: 200 };
+  return {
+    ...base('motif', { w: size.w, h: size.h, name: def?.label ?? 'Motif', ...over }),
+    type: 'motif',
+    kind,
+    seed: Math.floor(Math.random() * 100000),
+    colors: def?.colors.map((c) => c.default) ?? [],
+    params: Object.fromEntries((def?.params ?? []).map((p) => [p.key, p.default])),
+    text: def?.text?.default ?? '',
+    fontFamily: def?.fontFamily ?? 'inter',
+    ...over,
+  } as MotifElement;
+}
+
 export function makeElement(type: ElementType, over: Partial<Element> = {}): Element {
   switch (type) {
     case 'text': return makeText(over as Over<TextElement>);
@@ -168,6 +186,7 @@ export function makeElement(type: ElementType, over: Partial<Element> = {}): Ele
     case 'cutout': return makeCutout(over as Over<CutoutElement>);
     case 'drawing': return makeDrawing(over as Over<DrawingElement>);
     case 'gridtype': return makeGridType(over as Over<GridTypeElement>);
+    case 'motif': return makeMotif((over as Partial<MotifElement>).kind ?? 'grid-diagram', over as Over<MotifElement>);
   }
 }
 

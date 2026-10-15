@@ -45,13 +45,29 @@ export interface FrameSpec {
   grid?: { origin: number; increment: number } | null;
 }
 
+/** Per-line facts for the editor's micro-typography checks. */
+export interface LineInfo {
+  x: number;
+  y: number;
+  w: number;
+  /** Knuth–Plass adjustment ratio actually used: > 0 loose (spaces stretched), < 0 tight. */
+  ratio?: number;
+  /** Characters on the line (for the measure readout). */
+  chars?: number;
+  /** Last line of its paragraph (never stretched). */
+  last?: boolean;
+  /** Line was justified (spaces adjusted). */
+  justified?: boolean;
+  hyphenated?: boolean;
+}
+
 export interface FrameLayout {
   prims: Prim[];
   lineCount: number;
   overflow: boolean;
   baselines: number[];
   /** Line boxes (frame-local) — used by manuscript ruling and the editor. */
-  lines: { x: number; y: number; w: number }[];
+  lines: LineInfo[];
 }
 
 /* -------------------------------------------------------------------------- */
@@ -450,7 +466,7 @@ function protrusion(seg: Seg | undefined, side: 'l' | 'r'): number {
   return f * measure(ch, seg.font, seg.size);
 }
 
-interface Placed { runs: TextRun[]; width: number }
+interface Placed { runs: TextRun[]; width: number; ratio: number; chars: number; justified: boolean }
 
 function sameFont(a: FontRef, b: FontRef): boolean {
   return a === b || (a.face === b.face && a.css === b.css && a.weight === b.weight && a.italic === b.italic &&
@@ -515,7 +531,8 @@ function placeLine(items: Item[], line: Line, lineW: number, alignIn: TextStyle[
     run.x = rtl ? xOffset + lineW - (run.x + x0 + run.width) : xOffset + run.x + x0;
     if (rtl) run.dir = 'rtl';
   }
-  if (rtl || justify) return { runs, width };
+  const chars = runs.reduce((n, rr) => n + [...rr.text].length, 0) + Math.max(0, runs.length - 1);
+  if (rtl || justify) return { runs, width, ratio: justify ? r : 0, chars, justified: justify };
   // Ragged lines: merge words into one run per font so the SVG stays light. The glue equals
   // the font's own space advance, which is exactly what the browser will set.
   const merged: TextRun[] = [];
@@ -531,7 +548,7 @@ function placeLine(items: Item[], line: Line, lineW: number, alignIn: TextStyle[
     }
     merged.push({ ...run });
   }
-  return { runs: merged, width };
+  return { runs: merged, width, ratio: r, chars, justified: false };
 }
 
 /* -------------------------------------------------------------------------- */
@@ -716,7 +733,7 @@ function layoutFrame(prep: Prepared, style: TextStyle, frame: FrameSpec, cursor:
       const placed = placeLine(items, line, colW - indent, ps.align, style.opticalMargin, rtl, baseline, colX + (rtl ? 0 : indent), mergeSpaces);
       runs.push(...placed.runs);
       baselines.push(baseline);
-      lineBoxes.push({ x: colX, y: baseline, w: colW });
+      lineBoxes.push({ x: colX, y: baseline, w: colW, ratio: placed.ratio, chars: placed.chars, last: line.last, justified: placed.justified, hyphenated: !!line.hyphen });
       lineCount++;
       y = baseline;
 

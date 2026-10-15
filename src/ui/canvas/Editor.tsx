@@ -6,7 +6,9 @@ import { useStore, type Tool } from '../../store/store';
 import { spreadsOf, surfaceElementsDraft, findElement, COVER_KEY, pageKey, masterKey } from '../../model/surfaces';
 import { computeBinding, type BindingCalc } from '../../engine/binding';
 import { computeGrid } from '../../engine/grid';
-import { makeElement, makeText, makeDrawing, makePath, makeOrnament, makeRule } from '../../model/factory';
+import { makeElement, makeText, makeDrawing, makePath, makeOrnament, makeRule, makeMotif } from '../../model/factory';
+import { LIBRARY_MIME } from '../library/LibraryPanel';
+import { getItem, insertItem, targetFor } from '../library/insert';
 import { uid } from '../../lib/random';
 import { applyMatrix, multiply, translate, scale as scaleM } from '../../render/primitives';
 import { layoutText, threadOf } from '../../render/compile';
@@ -15,6 +17,7 @@ import { parsePath, serialize, type Seg } from '../../lib/pathData';
 import { SurfaceView } from './SurfaceView';
 import { SurfaceGuides, CanonGuides, CoverGuides } from './Guides';
 import { TextStoryEditor } from './TextStoryEditor';
+import { SpacingOverlay } from './SpacingOverlay';
 import {
   type SurfaceDesc, type Pt, sceneMatrix, toLocal, corners, sceneBounds, hitElement, surfaceAt, snapTargets, snapAxis,
 } from './geometry';
@@ -42,7 +45,8 @@ type Interaction =
 
 interface PenPoint { x: number; y: number; hx: number; hy: number } // anchor + outgoing handle offset (scene)
 
-const CREATE_TOOLS: Tool[] = ['text', 'rect', 'ellipse', 'polygon', 'line', 'image', 'pattern', 'ornament', 'initial', 'overprint', 'gradient', 'cutout', 'gridtype'];
+const CREATE_TOOLS: Tool[] = ['text', 'rect', 'ellipse', 'polygon', 'line', 'image', 'pattern', 'ornament', 'initial', 'overprint', 'gradient', 'cutout', 'gridtype', 'grid-diagram', 'dimension', 'specimen'];
+const MOTIF_TOOLS: Partial<Record<Tool, string>> = { 'grid-diagram': 'grid-diagram', dimension: 'dimension', specimen: 'waterfall' };
 
 export function Editor({ mode }: { mode: 'spreads' | 'cover' }) {
   const project = useStore((s) => s.project);
@@ -634,6 +638,17 @@ export function Editor({ mode }: { mode: 'spreads' | 'cover' }) {
       const L = click ? 120 : len;
       const cx = (click ? a.x + 60 : (a.x + b.x) / 2) - surface.x, cy = (click ? a.y : (a.y + b.y) / 2) - surface.y;
       el = makeRule({ x: cx - L / 2, y: cy - 4, w: L, h: 8, rotation: click ? 0 : +ang.toFixed(2) });
+    } else if (t === 'dimension') {
+      const len = Math.hypot(b.x - a.x, b.y - a.y);
+      const ang = (Math.atan2(b.y - a.y, b.x - a.x) * 180) / Math.PI;
+      const L = click ? 72 : len;
+      const cx = (click ? a.x + 36 : (a.x + b.x) / 2) - surface.x, cy = (click ? a.y : (a.y + b.y) / 2) - surface.y;
+      el = makeMotif('dimension', { x: cx - L / 2, y: cy - 9, w: L, h: 18, rotation: click ? 0 : +ang.toFixed(2) });
+    } else if (MOTIF_TOOLS[t]) {
+      const kind = MOTIF_TOOLS[t]!;
+      const m = makeMotif(kind);
+      if (click) { w = m.w; h = m.h; x -= w / 2; y -= h / 2; }
+      el = { ...m, x, y, w: Math.max(8, w), h: Math.max(8, h) };
     } else if (t === 'ornament' && click && surface.kind !== 'cover') {
       // Click: frame the whole text block, decorating the margins.
       const g = computeGrid(s.project.book, surface.side);
@@ -769,7 +784,7 @@ export function Editor({ mode }: { mode: 'spreads' | 'cover' }) {
       if (mod || e.altKey) return;
       if (e.key === '[') { s.setBrush({ size: Math.max(0.5, s.brush.size / 1.2) }); return; }
       if (e.key === ']') { s.setBrush({ size: Math.min(400, s.brush.size * 1.2) }); return; }
-      const map: Record<string, Tool> = { v: 'select', a: 'node', t: 'text', r: 'rect', e: 'ellipse', l: 'line', p: 'pen', b: 'brush', x: 'eraser', h: 'hand', z: 'zoom', i: 'image', k: 'pattern', o: 'ornament', g: 'gradient', d: 'cutout' };
+      const map: Record<string, Tool> = { v: 'select', a: 'node', t: 'text', r: 'rect', e: 'ellipse', l: 'line', p: 'pen', b: 'brush', x: 'eraser', h: 'hand', z: 'zoom', i: 'image', k: 'pattern', o: 'ornament', g: 'gradient', d: 'cutout', m: 'dimension' };
       const tl = map[e.key.toLowerCase()];
       if (tl) s.setTool(tl);
     };
@@ -782,6 +797,18 @@ export function Editor({ mode }: { mode: 'spreads' | 'cover' }) {
   /* ---------------------------------------------------------------- drop files */
   const onDrop = async (e: React.DragEvent) => {
     e.preventDefault();
+    const libId = e.dataTransfer.getData(LIBRARY_MIME);
+    if (libId) {
+      const item = getItem(libId);
+      const p = toScene(e);
+      const surface = surfaceAt(surfaces, p, 40 / zoom) ?? surfaces[0];
+      const target = surface ? targetFor(st().project, surface.key) : null;
+      if (item && target && surface) {
+        const ax = target.anchor && calc ? calc.panels.find((pp) => pp.id === target.anchor)?.x ?? 0 : 0;
+        insertItem(item, target, { x: p.x - surface.x - ax, y: p.y - surface.y });
+      }
+      return;
+    }
     const files = [...e.dataTransfer.files];
     if (!files.length) return;
     const p = toScene(e);
@@ -830,6 +857,7 @@ export function Editor({ mode }: { mode: 'spreads' | 'cover' }) {
           )}
           {mode === 'spreads' && surfaces.map((s) => <SurfaceGuides key={`g${s.key}`} project={project} surface={s} />)}
           {mode === 'spreads' && <CanonGuides project={project} x={0} y={0} />}
+          {spec.grid.showSpacing && <SpacingOverlay project={project} items={allEls} calc={calc} />}
           {mode === 'cover' && calc && surfaces[0] && <CoverGuides calc={calc} surface={surfaces[0]} showBleed={spec.grid.showBleed} />}
           {mode === 'spreads' && surfaces.map((s) => (
             <text key={`l${s.key}`} x={s.x + 2} y={s.y + s.h + s.bleed + 12 / zoom} fontSize={10 / zoom} fill="rgba(240,235,225,0.45)" style={{ fontFamily: 'ui-sans-serif, system-ui' }}>

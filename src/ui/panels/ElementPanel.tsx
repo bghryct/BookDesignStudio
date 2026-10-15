@@ -18,6 +18,10 @@ import { threadOf, layoutText, contextForElement } from '../../render/compile';
 import { importFiles } from '../importFiles';
 import { parseSvgCached, svgMarkupFromDataUrl, svgPrims } from '../../render/svgImport';
 import { makePath } from '../../model/factory';
+import { MotifPanel } from './MotifPanel';
+import { spacingReport } from '../canvas/SpacingOverlay';
+import { getMotif } from '../../engine/motifs';
+import type { MotifElement } from '../../model/types';
 import { parsePath, pathBounds, serialize, transformSegs } from '../../lib/pathData';
 import { computeGrid, textBlock } from '../../engine/grid';
 import { pageSide } from '../../model/surfaces';
@@ -122,7 +126,7 @@ function SinglePanel({ el, surfaceKey, project }: { el: Element; surfaceKey: str
 
   return (
     <div>
-      <Section title={TITLES[el.type]} id="el-geometry" right={
+      <Section title={el.type === 'motif' ? getMotif(el.kind)?.label ?? 'Motif' : TITLES[el.type]} id="el-geometry" right={
         <div className="flex">
           <IconButton title={el.locked ? 'Unlock' : 'Lock'} onClick={() => set({ locked: !el.locked })}>{el.locked ? <Lock size={13} /> : <LockOpen size={13} />}</IconButton>
           <IconButton title="Duplicate (⌘D)" onClick={() => s().duplicateSelection()}><Copy size={13} /></IconButton>
@@ -163,7 +167,7 @@ function SinglePanel({ el, surfaceKey, project }: { el: Element; surfaceKey: str
 const TITLES: Record<Element['type'], string> = {
   text: 'Text frame', image: 'Image frame', shape: 'Shape', rule: 'Rule', path: 'Path', svg: 'SVG graphic', pattern: 'Kinetic pattern · Schrofer',
   ornament: 'Marginalia · Cleves', initial: 'Illuminated initial', overprint: 'Overprint · Martens', gradient: 'Tonal gradient · Sato',
-  cutout: 'Die-cut · Munari', drawing: 'Drawing', gridtype: 'Grid alphabet · Crouwel',
+  cutout: 'Die-cut · Munari', drawing: 'Drawing', gridtype: 'Grid alphabet · Crouwel', motif: 'Motif',
 };
 
 function familyOptions() {
@@ -222,6 +226,25 @@ function TypeSpecific({ el, project }: { el: Element; project: Project }) {
             <Select label="Vertical align" value={e.verticalAlign} options={[{ value: 'top', label: 'Top' }, { value: 'middle', label: 'Middle' }, { value: 'bottom', label: 'Bottom' }]} onChange={(v) => set({ verticalAlign: v } as Partial<Element>)} />
           </Row>
           <ColorField label="Frame fill" value={e.fill} allowNone onChange={(v) => set({ fill: v } as Partial<Element>)} />
+          {layout && e.style.writingMode !== 'vertical' && (() => {
+            const rep = spacingReport(layout.lines);
+            const measureOk = rep.avgChars >= 45 && rep.avgChars <= 75;
+            return (
+              <div className="space-y-1 rounded-md border border-ink-700 bg-ink-900 p-2 text-[11px] text-ink-300">
+                <div className="flex justify-between">
+                  <span title="Bringhurst §2.1.2: 45–75 characters, 66 ideal for a single column">Measure</span>
+                  <span className={measureOk ? 'text-[#7fcf9a]' : 'text-[#f0b46e]'}>≈ {Math.round(rep.avgChars)} characters / line</span>
+                </div>
+                <div className="flex justify-between" title="Hochuli: lines whose word spaces stretched or shrank beyond comfort">
+                  <span>Spacing</span>
+                  <span>{rep.loose} loose · {rep.tight} tight · {rep.hyphens} hyphens{rep.ladder >= 3 ? ` · ladder of ${rep.ladder}` : ''}</span>
+                </div>
+                <button type="button" className="text-[10.5px] text-ink-400 underline hover:text-ink-200" onClick={() => s().update((d) => { d.book.grid.showSpacing = !d.book.grid.showSpacing; })}>
+                  {project.book.grid.showSpacing ? 'Hide' : 'Show'} spacing check on the canvas
+                </button>
+              </div>
+            );
+          })()}
           <div className="rounded-md border border-ink-700 bg-ink-900 p-2 text-[11px] text-ink-300">
             <div className="flex items-center justify-between">
               <span>Thread: frame {chain.indexOf(e.id) + 1} of {chain.length}</span>
@@ -490,6 +513,8 @@ function TypeSpecific({ el, project }: { el: Element; project: Project }) {
         </Section>
       );
     }
+    case 'motif':
+      return <MotifPanel el={el as MotifElement} />;
     case 'gridtype': {
       const e = el as GridTypeElement;
       return (

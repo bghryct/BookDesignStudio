@@ -494,7 +494,9 @@ export function shape(text: string, ref: FontRef): Shaped | null {
     const cp = ch.codePointAt(0)!;
     if (cp > 32 && !fk.hasGlyphForCodePoint(cp)) { complete = false; break; }
   }
-  const run = fk.layout(text, ref.features as TypeFeatures);
+  // fontkit writes every feature it plans (frac, numr, dnom …) back into the object it is
+  // given; pass a copy so the FontRef — and the CSS generated from it — stays clean.
+  const run = fk.layout(text, { ...ref.features } as TypeFeatures);
   const glyphs = run.glyphs.map((g, i) => ({
     id: g.id,
     xAdvance: run.positions[i].xAdvance / upm,
