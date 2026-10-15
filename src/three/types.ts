@@ -1,5 +1,5 @@
 import type { BookSpec, PaperMaterial } from '../model/types';
-import type { BindingCalc } from '../engine/binding';
+import type { BindingCalc, JacketCalc } from '../engine/binding';
 
 export interface PageInfo {
   material: PaperMaterial;          // 'paper' | 'vellum' | 'colored' | 'kraft'
@@ -14,6 +14,8 @@ export interface BookSceneInput {
   calc: BindingCalc;
   /** index 0 = page 1 */
   pages: PageInfo[];
+  /** Dust jacket layout (`computeJacket`); null / undefined = no jacket. */
+  jacket?: JacketCalc | null;
 }
 
 export type FinishKey = 'gold-foil' | 'silver-foil' | 'copper-foil' | 'holo-foil' | 'blind-deboss' | 'spot-gloss';
@@ -29,9 +31,18 @@ export interface BookTextures {
   /** Trim-sized page art (no bleed), index 0 = page 1 (a recto). null = blank paper. */
   pages: (HTMLCanvasElement | null)[];
   pagePxPerPt: number;
+  /** Flat dust-jacket art. Pixel (0,0) = jacket point (−bleed, −bleed); size (width + 2·bleed,
+   *  height + 2·bleed) × jacketPxPerPt; panels from JacketCalc.panels (RTL already mirrored). */
+  jacket?: HTMLCanvasElement | null;
+  jacketPxPerPt?: number;
+  /** Same size/layout as `jacket`. */
+  jacketFinishMasks?: Partial<Record<FinishKey, HTMLCanvasElement>>;
 }
 
-export type AnimationMode = 'none' | 'orbit' | 'open' | 'page-turn' | 'showcase';
+export type AnimationMode =
+  | 'none' | 'orbit' | 'open' | 'page-turn' | 'showcase'
+  | 'flip-through' | 'spine-reveal' | 'float' | 'push-in' | 'turntable-flat'
+  | 'read-spread' | 'drop-in' | 'jacket-off' | 'cover-close-up';
 
 export interface AnimationOptions {
   /** Seconds. Defaults depend on the mode (see `getAnimationDuration`). */
@@ -42,11 +53,60 @@ export interface AnimationOptions {
   loop?: boolean;
 }
 
+export interface AnimationInfo {
+  id: AnimationMode;
+  label: string;
+  /** Seconds, for the current book (and the current `pagesToTurn`). */
+  duration: number;
+  description: string;
+}
+
 export interface EnvironmentOptions {
   background?: string;
   lightIntensity?: number;
   shadows?: boolean;
   showGround?: boolean;
+}
+
+export type LightingPreset = 'studio' | 'soft-box' | 'window' | 'golden-hour' | 'dramatic' | 'top-down' | 'overcast' | 'gallery' | 'night';
+
+export interface LightingOptions {
+  preset?: LightingPreset;
+  /** 0–3, default 1. */
+  intensity?: number;
+  /** Key light around the book, degrees: 0 = from the front, 90 = from the right, −90 = from the left
+   *  (mirrored for right-to-left books, so it keeps falling on the spine side). */
+  azimuth?: number;
+  /** Key light height, degrees 5–85. */
+  elevation?: number;
+  /** −1 cool … +1 warm. */
+  warmth?: number;
+  /** Tone-mapping exposure 0.3–3. */
+  exposure?: number;
+  /** 0 hard … 1 very soft shadows. */
+  shadowSoftness?: number;
+  /** Environment (bounce) light 0–2. */
+  ambient?: number;
+}
+
+export type BackdropPreset = 'solid' | 'gradient' | 'studio-sweep' | 'wood' | 'linen' | 'concrete' | 'paper' | 'marble' | 'felt' | 'transparent';
+
+export interface BackdropOptions {
+  preset: BackdropPreset;
+  /** solid: background; gradient: top colour; studio-sweep: cove colour; surfaces: base tint. */
+  color?: string;
+  /** gradient: bottom colour; surfaces: secondary (grain / vein) colour. */
+  color2?: string;
+  showGround?: boolean;
+}
+
+export type CameraPose = 'standing' | 'lying' | 'angled' | 'open';
+
+export interface CameraOptions {
+  /** Vertical field of view, degrees 15–75 (long lens = flatter product shot). */
+  fov?: number;
+  /** Resting pose between animations. */
+  pose?: CameraPose;
 }
 
 export interface BookSceneOptions {

@@ -5,7 +5,7 @@
  * Everything is computed in points from the BookSpec; the cover editor, the 3D model, the
  * PDF cover export and the Binding panel all read from `computeBinding()` so they agree.
  */
-import type { BindingType, BookSpec } from '../model/types';
+import type { BindingType, BookSpec, JacketSpec, PanelGrid } from '../model/types';
 import { mm, ptToMm } from '../model/units';
 
 export interface Panel {
@@ -325,4 +325,97 @@ export function spinePanel(calc: BindingCalc): Panel {
 }
 export function backPanel(calc: BindingCalc): Panel {
   return calc.panels.find((p) => p.id === 'back')!;
+}
+
+
+/* -------------------------------------------------------------------------- */
+/* Dust jacket                                                                 */
+/* -------------------------------------------------------------------------- */
+
+export const DEFAULT_JACKET: JacketSpec = {
+  enabled: false,
+  flapWidth: mm(85),
+  heightAllowance: 0,
+  foldEase: mm(1),
+  finish: 'matte',
+  paperColor: '#f4f0e8',
+};
+
+export function jacketSpec(spec: BookSpec): JacketSpec {
+  return { ...DEFAULT_JACKET, ...(spec.jacket ?? {}) };
+}
+
+export const DEFAULT_PANEL_GRID: PanelGrid = {
+  margins: { inner: mm(12), top: mm(14), outer: mm(12), bottom: mm(16) },
+  columns: 1, rows: 1, gutter: mm(4), rowGutter: mm(4), baseline: 0, spineMargin: mm(10), show: true, snap: true,
+};
+
+export const coverGrid = (spec: BookSpec): PanelGrid => ({ ...DEFAULT_PANEL_GRID, ...(spec.cover.grid ?? {}), margins: { ...DEFAULT_PANEL_GRID.margins, ...(spec.cover.grid?.margins ?? {}) } });
+export const jacketGrid = (spec: BookSpec): PanelGrid => {
+  const g = spec.jacket?.grid;
+  return { ...DEFAULT_PANEL_GRID, ...(g ?? {}), margins: { ...DEFAULT_PANEL_GRID.margins, ...(g?.margins ?? {}) } };
+};
+
+export interface JacketPanel {
+  id: 'back-flap' | 'back-fold' | 'back' | 'spine' | 'front' | 'front-fold' | 'front-flap';
+  label: string;
+  x: number;
+  w: number;
+}
+
+export interface JacketCalc {
+  /** Flat jacket size without bleed, pt. */
+  width: number;
+  height: number;
+  bleed: number;
+  panels: JacketPanel[];
+  /** Fold lines on the flat jacket, x in pt. */
+  folds: { x: number; kind: 'fold' | 'spine' }[];
+  /** Panel widths that wrap the book, for the 3D model. */
+  boardW: number;
+  spineW: number;
+  foldW: number;
+  flapW: number;
+  notes: string[];
+}
+
+/**
+ * Jacket layout: back flap | fore-edge fold | back | spine (incl. joints) | front | fold | front flap.
+ * The fore-edge folds wrap the board thickness plus a little ease, so the flaps sit snug inside the boards.
+ */
+export function computeJacket(spec: BookSpec, calc: BindingCalc = computeBinding(spec)): JacketCalc {
+  const j = jacketSpec(spec);
+  const b = spec.binding;
+  const isCase = b.type === 'case' || b.type === 'coptic';
+  const boardW = isCase ? calc.boardW : spec.trimW;
+  const thickness = isCase ? b.boardThickness : b.coverCaliper;
+  const spineW = isCase ? calc.spine + 2 * b.hingeGap : calc.spine;
+  const foldW = thickness + j.foldEase;
+  const flapW = Math.max(0, Math.min(j.flapWidth, boardW - mm(10)));
+  const height = (isCase ? calc.boardH : spec.trimH) + j.heightAllowance;
+  const panels: JacketPanel[] = [];
+  let x = 0;
+  const push = (id: JacketPanel['id'], label: string, w: number) => { panels.push({ id, label, x, w }); x += w; };
+  push('back-flap', 'Back flap', flapW);
+  push('back-fold', 'Fold', foldW);
+  push('back', 'Back', boardW);
+  push('spine', 'Spine', spineW);
+  push('front', 'Front', boardW);
+  push('front-fold', 'Fold', foldW);
+  push('front-flap', 'Front flap', flapW);
+  const width = x;
+  if (spec.direction === 'rtl') {
+    for (const p of panels) p.x = width - p.x - p.w;
+    panels.sort((a, c) => a.x - c.x);
+  }
+  const folds: JacketCalc['folds'] = [];
+  for (const p of panels) {
+    if (p.id === 'back-fold' || p.id === 'front-fold') folds.push({ x: p.x, kind: 'fold' }, { x: p.x + p.w, kind: 'fold' });
+    if (p.id === 'spine') folds.push({ x: p.x, kind: 'spine' }, { x: p.x + p.w, kind: 'spine' });
+  }
+  const notes = [
+    `Jacket ${ptToMm(width).toFixed(1)} × ${ptToMm(height).toFixed(1)} mm; flaps ${ptToMm(flapW).toFixed(0)} mm.`,
+    `Spine panel ${ptToMm(spineW).toFixed(1)} mm${isCase ? ' (spine arc + both joints)' : ''}; fore-edge folds ${ptToMm(foldW).toFixed(1)} mm wrap the ${isCase ? 'boards' : 'cover'}.`,
+  ];
+  return { width, height, bleed: spec.bleed, panels, folds, boardW, spineW, foldW, flapW, notes };
 }

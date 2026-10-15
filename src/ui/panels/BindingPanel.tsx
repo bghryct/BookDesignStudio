@@ -7,6 +7,7 @@ import type { BookSpec, BindingType, CoverFinish, EdgeTreatment } from '../../mo
 import { computeBinding, type BindingCalc } from '../../engine/binding';
 import { mm, ptToMm, fromPt } from '../../model/units';
 import { Section, Row, NumberField, Select, Toggle, Slider, ColorField, Hint, Button } from '../controls';
+import { JacketSettings } from './SurfaceSettings';
 
 const BINDINGS: { id: BindingType; name: string; note: string }[] = [
   { id: 'case', name: 'Case-bound', note: 'Sewn sections, rounded & backed, boards, cloth or leather, optional raised bands (Diehl).' },
@@ -153,6 +154,8 @@ export function BindingPanel() {
           <Hint>{calc.stations.length} sewing stations, kettle stitches 12 mm from head and tail.</Hint>
         </Section>
       )}
+
+      <JacketSettings />
 
       <Section title="Cover material & edges" id="bind-cover">
         <Select<CoverFinish> label="Finish" value={book.cover.finish} options={[

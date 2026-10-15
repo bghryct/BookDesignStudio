@@ -111,7 +111,7 @@ export interface ElementBase {
   flipX?: boolean;
   flipY?: boolean;
   finish?: Finish;
-  /** Cover only: panel the element is anchored to (x is relative to that panel). */
+  /** Cover / jacket only: panel the element is anchored to (x is relative to that panel). */
   anchor?: 'front-flap' | 'front' | 'spine' | 'back' | 'back-flap' | null;
 }
 
@@ -416,15 +416,54 @@ export interface PaperSpec {
   color: string;
 }
 
+/**
+ * Grid and margins applied inside each panel of a flat cover or jacket (front, back,
+ * flaps; the spine gets only head/foot margins). `inner` is the side toward the spine or fold.
+ */
+export interface PanelGrid {
+  margins: Margins;
+  columns: number;
+  rows: number;
+  gutter: number;
+  rowGutter: number;
+  /** Baseline increment, pt (0 = off). */
+  baseline: number;
+  /** Head and foot margin on the spine panel, pt. */
+  spineMargin: number;
+  show: boolean;
+  snap: boolean;
+}
+
 export interface CoverSpec {
-  /** Dust-jacket flaps (0 = no flaps), pt. */
+  /** Soft-cover French flaps (0 = no flaps), pt. Case bindings use the dust jacket instead. */
   flapWidth: number;
   finish: CoverFinish;
   /** Cloth / leather / paper base colour of the case. */
   material: string;
   edge: EdgeTreatment;
   edgeColor: string;
+  /** Grid and margins on the cover panels (optional for older projects). */
+  grid?: PanelGrid;
 }
+
+export type JacketFinish = 'matte' | 'gloss' | 'uncoated' | 'soft-touch';
+
+/** Dust jacket that wraps the case (or a soft cover): flaps fold inside the boards. */
+export interface JacketSpec {
+  enabled: boolean;
+  /** Flap width, pt. */
+  flapWidth: number;
+  /** Added to the case height, pt (usually 0). */
+  heightAllowance: number;
+  /** Extra ease at each fore-edge fold beyond the board thickness, pt. */
+  foldEase: number;
+  finish: JacketFinish;
+  paperColor: string;
+  grid?: PanelGrid;
+}
+
+/** User-placed ruler guides on one surface, in that surface's coordinates. */
+export interface Guides { x: number[]; y: number[] }
 
 export interface Margins { inner: number; top: number; outer: number; bottom: number }
 
@@ -473,6 +512,8 @@ export interface BookSpec {
   paper: PaperSpec;
   binding: BindingSpec;
   cover: CoverSpec;
+  /** Optional for projects saved before dust jackets existed. */
+  jacket?: JacketSpec;
   grid: GridSpec;
 }
 
@@ -504,6 +545,13 @@ export interface Project {
   pages: Page[];
   masters: Master[];
   cover: { elements: Element[] };
+  /** Dust-jacket artwork (optional for older projects). */
+  jacket?: { elements: Element[] };
+  /** Ruler guides keyed by surface (`page:<id>`, `master:<id>:left`, `cover`, `jacket`). */
+  guides?: Record<SurfaceKey, Guides>;
+  /** Hide or lock all ruler guides. */
+  guidesHidden?: boolean;
+  guidesLocked?: boolean;
   swatches: Swatch[];
   assets: Record<ID, Asset>;
   fonts: UploadedFontMeta[];

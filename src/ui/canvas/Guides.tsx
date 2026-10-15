@@ -1,7 +1,7 @@
 import React from 'react';
-import type { Project } from '../../model/types';
-import { computeGrid, canonLines } from '../../engine/grid';
-import type { BindingCalc } from '../../engine/binding';
+import type { BookSpec, PanelGrid, Project } from '../../model/types';
+import { computeGrid, canonLines, panelGridLines } from '../../engine/grid';
+import { coverGrid, jacketGrid, type BindingCalc, type JacketCalc } from '../../engine/binding';
 import type { SurfaceDesc } from './geometry';
 
 const MARGIN = 'rgba(214, 92, 214, 0.85)';
@@ -63,11 +63,45 @@ export function CanonGuides({ project, x, y }: { project: Project; x: number; y:
   );
 }
 
-export function CoverGuides({ calc, surface, showBleed }: { calc: BindingCalc; surface: SurfaceDesc; showBleed: boolean }) {
+/** Margins, columns, rows and baselines inside each cover / jacket panel. */
+function PanelGridGuides({ panels, grid, height }: { panels: { id: string; x: number; w: number }[]; grid: PanelGrid; height: number }) {
+  if (!grid.show) return null;
+  const g = panelGridLines(panels, grid, height);
+  return (
+    <g>
+      {g.baselines.map((b, i) => <line key={`pb${i}`} x1={b.x} x2={b.x + b.w} y1={b.y} y2={b.y} stroke={BASELINE} {...hair} />)}
+      {g.rows.map((r, i) => <rect key={`pr${i}`} x={r.x} y={r.y} width={r.w} height={r.h} stroke={ROW} {...hair} />)}
+      {g.cols.map((c, i) => <rect key={`pc${i}`} x={c.x} y={c.y} width={c.w} height={c.h} stroke={COLUMN} {...hair} />)}
+      {g.blocks.map((b, i) => <rect key={`pm${i}`} x={b.x} y={b.y} width={b.w} height={b.h} stroke={MARGIN} {...hair} />)}
+    </g>
+  );
+}
+
+export function JacketGuides({ jc, spec, surface, showBleed }: { jc: JacketCalc; spec: BookSpec; surface: SurfaceDesc; showBleed: boolean }) {
+  const H = jc.height, b = jc.bleed;
+  return (
+    <g transform={`translate(${surface.x} ${surface.y})`} pointerEvents="none">
+      {showBleed && <rect x={-b} y={-b} width={jc.width + 2 * b} height={H + 2 * b} stroke={BLEED} {...hair} />}
+      {jc.panels.filter((p) => p.id.endsWith('-fold')).map((p) => <rect key={p.id} x={p.x} y={0} width={p.w} height={H} fill="rgba(0,0,0,0.1)" />)}
+      <PanelGridGuides panels={jc.panels} grid={jacketGrid(spec)} height={H} />
+      {jc.folds.map((f, i) => (
+        <line key={i} x1={f.x} x2={f.x} y1={-b} y2={H + b} stroke={FOLD} {...hair} strokeDasharray={f.kind === 'spine' ? '6 3' : '3 3'} />
+      ))}
+      {jc.panels.filter((p) => !p.id.endsWith('-fold')).map((p) => (
+        <text key={`t${p.id}`} x={p.x + p.w / 2} y={-b - 6} textAnchor="middle" fontSize={8} fill="rgba(240,235,225,0.55)" style={{ fontFamily: 'ui-sans-serif, system-ui', letterSpacing: '0.08em' }}>
+          {p.label.toUpperCase()}
+        </text>
+      ))}
+    </g>
+  );
+}
+
+export function CoverGuides({ calc, spec, surface, showBleed }: { calc: BindingCalc; spec: BookSpec; surface: SurfaceDesc; showBleed: boolean }) {
   const H = calc.coverH;
   const w = calc.wrap;
   return (
     <g transform={`translate(${surface.x} ${surface.y})`} pointerEvents="none">
+      <PanelGridGuides panels={calc.panels} grid={coverGrid(spec)} height={H} />
       {showBleed && <rect x={-w} y={-w} width={calc.coverW + 2 * w} height={H + 2 * w} stroke={BLEED} {...hair} />}
       {calc.panels.filter((p) => p.id.startsWith('hinge')).map((p) => (
         <rect key={p.id} x={p.x} y={0} width={p.w} height={H} fill="rgba(0,0,0,0.12)" />

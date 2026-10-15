@@ -110,7 +110,7 @@ function AlignButtons({ onAlign }: { onAlign: (m: 'l' | 'c' | 'r' | 't' | 'm' | 
 function SinglePanel({ el, surfaceKey, project }: { el: Element; surfaceKey: string; project: Project }) {
   const { set, live, begin } = useEdit(el.id);
   const s = useStore.getState;
-  const onCover = surfaceKey === 'cover';
+  const onCover = surfaceKey === 'cover' || surfaceKey === 'jacket';
 
   const alignToPage = (mode: 'l' | 'c' | 'r' | 't' | 'm' | 'b') => {
     const loc = findElement(project, el.id);

@@ -40,9 +40,11 @@ export function pageSide(project: Project, pageIndex: number): PageSide {
 export const pageKey = (pageId: ID): SurfaceKey => `page:${pageId}`;
 export const masterKey = (masterId: ID, side: PageSide): SurfaceKey => `master:${masterId}:${side}`;
 export const COVER_KEY: SurfaceKey = 'cover';
+export const JACKET_KEY: SurfaceKey = 'jacket';
 
 export function surfaceElements(project: Project, key: SurfaceKey): Element[] {
   if (key === COVER_KEY) return project.cover.elements;
+  if (key === JACKET_KEY) return project.jacket?.elements ?? [];
   if (key.startsWith('page:')) return project.pages.find((p) => p.id === key.slice(5))?.elements ?? [];
   if (key.startsWith('master:')) {
     const [, id, side] = key.split(':');
@@ -55,6 +57,10 @@ export function surfaceElements(project: Project, key: SurfaceKey): Element[] {
 /** Mutable access for immer drafts. */
 export function surfaceElementsDraft(project: Project, key: SurfaceKey): Element[] | null {
   if (key === COVER_KEY) return project.cover.elements;
+  if (key === JACKET_KEY) {
+    if (!project.jacket) project.jacket = { elements: [] };
+    return project.jacket.elements;
+  }
   if (key.startsWith('page:')) return project.pages.find((p) => p.id === key.slice(5))?.elements ?? null;
   if (key.startsWith('master:')) {
     const [, id, side] = key.split(':');
@@ -69,6 +75,7 @@ export function allSurfaces(project: Project): SurfaceKey[] {
     ...project.pages.map((p) => pageKey(p.id)),
     ...project.masters.flatMap((m) => [masterKey(m.id, 'left'), masterKey(m.id, 'right')]),
     COVER_KEY,
+    JACKET_KEY,
   ];
 }
 
@@ -89,6 +96,9 @@ export function findElement(project: Project, id: ID): Located | null {
   }
   const i = project.cover.elements.findIndex((e) => e.id === id);
   if (i >= 0) return { key: COVER_KEY, el: project.cover.elements[i], index: i, pageIndex: null };
+  const jEls = project.jacket?.elements ?? [];
+  const j = jEls.findIndex((e) => e.id === id);
+  if (j >= 0) return { key: JACKET_KEY, el: jEls[j], index: j, pageIndex: null };
   return null;
 }
 
@@ -97,3 +107,9 @@ export function pageIndexOfKey(project: Project, key: SurfaceKey): number | null
   const i = project.pages.findIndex((p) => p.id === key.slice(5));
   return i >= 0 ? i : null;
 }
+
+/* -------------------------------------------------------------------------- */
+/* Ruler guides                                                                */
+/* -------------------------------------------------------------------------- */
+
+export const guidesOf = (project: Project, key: SurfaceKey) => project.guides?.[key] ?? { x: [], y: [] };

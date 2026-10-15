@@ -3,11 +3,17 @@ import type { PageSide } from '../../engine/grid';
 import { computeGrid } from '../../engine/grid';
 import { applyMatrix, invert, multiply, translate, type Matrix } from '../../render/primitives';
 import { elementMatrix } from '../../render/compile';
-import type { BindingCalc } from '../../engine/binding';
+import { coverGrid, jacketGrid } from '../../engine/binding';
+import { panelGridLines } from '../../engine/grid';
+import { guidesOf } from '../../model/surfaces';
+
+/** Anything with flat-cover panels: the cover's BindingCalc or the jacket's JacketCalc. */
+export interface PanelLayout { panels: { id: string; x: number; w: number; label?: string }[] }
+type BindingCalc = PanelLayout;
 
 export interface SurfaceDesc {
   key: SurfaceKey;
-  kind: 'page' | 'master' | 'cover';
+  kind: 'page' | 'master' | 'cover' | 'jacket';
   /** Offset of the surface's trim origin in scene coordinates (pt). */
   x: number;
   y: number;
@@ -23,7 +29,7 @@ export interface Pt { x: number; y: number }
 
 /** x offset of an element on the cover caused by its panel anchor. */
 export function anchorOffset(el: Element, surface: SurfaceDesc, calc: BindingCalc | null): number {
-  if (surface.kind !== 'cover' || !el.anchor || !calc) return 0;
+  if ((surface.kind !== 'cover' && surface.kind !== 'jacket') || !el.anchor || !calc) return 0;
   return calc.panels.find((p) => p.id === el.anchor)?.x ?? 0;
 }
 
@@ -75,15 +81,27 @@ export interface SnapLines { x: number[]; y: number[] }
 export function snapTargets(project: Project, surface: SurfaceDesc, others: { el: Element; surface: SurfaceDesc }[], calc: BindingCalc | null, exclude: Set<string>): SnapLines {
   const xs: number[] = [], ys: number[] = [];
   const spec = project.book;
-  if (surface.kind === 'cover' && calc) {
-    xs.push(0, calc.coverW, calc.coverW / 2);
+  if ((surface.kind === 'cover' || surface.kind === 'jacket') && calc) {
+    xs.push(0, surface.w, surface.w / 2);
     for (const p of calc.panels) xs.push(p.x, p.x + p.w, p.x + p.w / 2);
-    ys.push(0, calc.coverH, calc.coverH / 2);
+    ys.push(0, surface.h, surface.h / 2);
+    const pg = surface.kind === 'cover' ? coverGrid(spec) : jacketGrid(spec);
+    if (pg.snap) {
+      const lines = panelGridLines(calc.panels, pg, surface.h);
+      xs.push(...lines.snapX);
+      ys.push(...lines.snapY);
+    }
   } else if (spec.grid.snap) {
     const g = computeGrid(spec, surface.side);
     xs.push(...g.snapX);
     ys.push(...g.snapY);
     if (spec.grid.snapToBaseline) ys.push(...g.baselines);
+  }
+  // Ruler guides on this surface.
+  if (!project.guidesHidden) {
+    const g = guidesOf(project, surface.key);
+    xs.push(...g.x);
+    ys.push(...g.y);
   }
   for (const o of others) {
     if (exclude.has(o.el.id) || o.el.hidden) continue;

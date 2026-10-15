@@ -6,7 +6,7 @@ import { findElement, surfaceElementsDraft, spreadsOf } from '../model/surfaces'
 import { cloneElement } from '../model/factory';
 import { idbGet, idbSet } from '../lib/idb';
 
-export type View = 'spreads' | 'cover' | '3d' | 'matrix';
+export type View = 'spreads' | 'cover' | 'jacket' | '3d' | 'matrix';
 
 export type Tool =
   | 'select' | 'node' | 'hand' | 'zoom'
@@ -93,9 +93,15 @@ interface State {
   copySelection: () => void;
   paste: (key: SurfaceKey) => void;
   arrange: (dir: 'front' | 'back' | 'forward' | 'backward') => void;
+  /** Ruler guides: add (returns index), move, remove; axis 'x' = vertical guide at x. */
+  addGuide: (key: SurfaceKey, axis: 'x' | 'y', pos: number) => void;
+  moveGuide: (key: SurfaceKey, axis: 'x' | 'y', index: number, pos: number, opts?: { history?: boolean }) => void;
+  removeGuide: (key: SurfaceKey, axis: 'x' | 'y', index: number) => void;
+  clearGuides: (keys: SurfaceKey[]) => void;
 }
 
 const HISTORY_LIMIT = 150;
+let lastHistoryAt = 0;
 
 export const useStore = create<State>((set, get) => ({
   project: createDefaultProject(),
@@ -125,7 +131,11 @@ export const useStore = create<State>((set, get) => ({
     const { project, past } = get();
     const next = produce(project, recipe);
     if (next === project) return;
-    if (opts?.history === false) set({ project: next, rev: get().rev + 1 });
+    const now = performance.now();
+    // A burst of changes (dragging in a colour picker, holding an arrow key) is one undo step.
+    const burst = now - lastHistoryAt < 300;
+    lastHistoryAt = now;
+    if (opts?.history === false || (burst && past.length)) set({ project: next, future: [], rev: get().rev + 1 });
     else set({ project: next, past: [...past.slice(-HISTORY_LIMIT), project], future: [], rev: get().rev + 1 });
   },
   checkpoint: () => {
@@ -198,6 +208,7 @@ export const useStore = create<State>((set, get) => ({
       for (const p of d.pages) strip(p.elements);
       for (const m of d.masters) { strip(m.left); strip(m.right); }
       strip(d.cover.elements);
+      if (d.jacket) strip(d.jacket.elements);
       for (const p of d.pages) for (const e of p.elements) if (e.type === 'text' && e.flowNext && ids.has(e.flowNext)) e.flowNext = null;
     });
     set({ selection: [], textEditing: null });
@@ -227,6 +238,28 @@ export const useStore = create<State>((set, get) => ({
     const copies = clip.map((e) => cloneElement(e, 10, 10));
     get().update((d) => { const els = surfaceElementsDraft(d as Project, key); if (els) els.push(...(copies as Draft<Element>[])); });
     set({ selection: copies.map((c) => c.id), clipboard: copies });
+  },
+  addGuide: (key, axis, pos) => {
+    get().update((d) => {
+      if (!d.guides) d.guides = {};
+      if (!d.guides[key]) d.guides[key] = { x: [], y: [] };
+      d.guides[key][axis].push(+pos.toFixed(3));
+    });
+  },
+  moveGuide: (key, axis, index, pos, opts) => {
+    get().update((d) => {
+      const g = d.guides?.[key];
+      if (g && index < g[axis].length) g[axis][index] = +pos.toFixed(3);
+    }, opts);
+  },
+  removeGuide: (key, axis, index) => {
+    get().update((d) => {
+      const g = d.guides?.[key];
+      if (g) g[axis].splice(index, 1);
+    });
+  },
+  clearGuides: (keys) => {
+    get().update((d) => { for (const k of keys) if (d.guides?.[k]) delete d.guides[k]; });
   },
   arrange: (dir) => {
     const { selection } = get();

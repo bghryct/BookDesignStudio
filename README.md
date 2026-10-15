@@ -33,13 +33,15 @@ Node 20+ is recommended (CI uses Node 22).
 - Case-making geometry after Edith Diehl: board size with squares and joint set-back, french joints, turn-ins with corner mitres, raised-band positions, sewing stations with kettle stitches, headband height, spine linings, Diehl's board-thickness recommendations.
 - **Grain-direction check**: folds the parent sheet as folio / quarto / octavo / 16mo and reports whether the grain runs parallel to the spine.
 - Bindings: hardcover case (raised bands, headbands), Smyth-sewn and perfect-bound soft covers, Coptic with exposed spine, Japanese stab binding (yotsume / kikkō / kōki toji, fukuro-toji leaves), and Munari soft covers for die-cut / vellum sequences. Right-to-left books bind on the right.
-- Flat cover / case / jacket editor with panels for flaps, boards, joints and spine; objects anchor to their panel so they follow the spine as the page count changes.
+- Flat cover / case editor with panels for boards, joints and spine; objects anchor to their panel so they follow the spine as the page count changes.
+- **Dust jacket**: its own unwrapped editor (the **Jacket** view) with flaps, fore-edge folds sized to the board thickness plus ease, a spine that wraps the case's hinges, height allowance, a finish (matte, gloss, soft-touch, uncoated) and a paper colour. It has starter typography, can copy the cover artwork, exports a jacket PDF with fold marks, SVG and PNG, and is worn by the book in 3D.
+- **Cover and jacket grids**: margins (inner/outer/head/foot, measured from the spine or fold), columns, rows, gutters and a baseline inside every panel, plus head and foot margins on the spine. Items snap to them.
 
 ### Grids & canons (`src/engine/grid.ts`)
 Van de Graaf, Tschichold 2:3:4:6, golden progression, Bringhurst proportion, Fibonacci, manuscript (Cleves), Müller-Brockmann, Crouwel and Ma (間) margins, each with its source and rationale; modular field grids with column and row gutters; baseline grid; Bosshard dual micro-grid; "lock fields to baseline" (rows become whole lines with a one-line gutter); Van de Graaf construction overlay.
 
 ### Canvas
-Every item can be moved, resized, rotated, flipped, stacked, locked, hidden and blended (multiply, screen, difference …), and snaps to columns, fields, baselines, margins and other items. There's a pen tool with Bézier handles and a node editor, threaded text frames (click the red `+` overset port, then a frame), master pages with `{page}` `{title}` `{author}` `{page:roman}` tokens, drag-and-drop of images, SVG, fonts and text, and undo/redo.
+Every item can be moved, resized, rotated, flipped, stacked, locked, hidden and blended (multiply, screen, difference …), and snaps to columns, fields, baselines, margins, ruler guides and other items. **Rulers and guides** work on pages, master pages, the cover and the jacket: drag a guide out of a ruler, drag it back to delete it, or create a column/row guide grid from the Document panel (`⌘;` show/hide, `⌥⌘;` lock). There's a pen tool with Bézier handles and a node editor, threaded text frames (click the red `+` overset port, then a frame), master pages with `{page}` `{title}` `{author}` `{page:roman}` tokens, drag-and-drop of images, SVG, fonts and text, and undo/redo.
 
 ### Micro-typography (`src/engine/textLayout.ts`, `src/engine/fonts.ts`)
 - **Knuth–Plass** total-fit line breaking for justified *and* ragged text, with fitness classes, flagged-hyphen demerits and runt avoidance.
@@ -91,10 +93,15 @@ A **Library** tab of ready-made design elements grouped by designer — Cleves, 
 - Grid-diagram, dimension and type-specimen tools in the toolbar.
 
 ### Brushes (`src/engine/brushes/`)
-Pencil, graphite, charcoal, crayon, pastel, marker, highlighter, fineliner, ink, broad-edge calligraphy, watercolour (wet edges, blooms, granulation), gouache, airbrush, stipple, gold leaf and eraser. They respond to pen pressure; with a mouse, speed simulates pressure. A stabiliser smooths the line. Strokes are stored as data and re-rendered at screen, 300-dpi and video resolution.
+Pencil, graphite, charcoal, crayon, pastel, marker, highlighter, fineliner, ink, broad-edge calligraphy, watercolour (wet edges, blooms, granulation), gouache, airbrush, stipple, gold leaf and eraser. They respond to pen pressure; with a mouse, speed simulates pressure. A stabiliser smooths the line. The **brush panel** shows every medium as a live stroke preview, with a full colour picker (HSV, hex, CMYK readout, eyedropper, artist's pigment palette and recent colours) and per-brush size, opacity, flow, hardness, texture and smoothing. Strokes are stored as data and re-rendered at screen, 300-dpi and video resolution.
 
 ### 3D visualiser (`src/three/`)
-three.js with PBR materials: cloth weave, buckram, leather grain, matte / gloss / soft-touch, translucent vellum. Gold, silver, copper and holographic foil, blind deboss and spot gloss come from the finish you set on cover items. It models the exact board, rounded spine, raised bands, headbands, gilt / stained / sprayed / deckle edges, Coptic link stitches, stab-binding thread, vellum pages and die-cut holes. Animations — 360° orbit, cover opening, page turning, showcase — and orbit controls.
+three.js with PBR materials: cloth weave, buckram, leather grain, matte / gloss / soft-touch, translucent vellum. Gold, silver, copper and holographic foil, blind deboss and spot gloss come from the finish you set on cover items. It models the exact board, rounded spine, raised bands, headbands, gilt / stained / sprayed / deckle edges, Coptic link stitches, stab-binding thread, vellum pages and die-cut holes. The book can wear its dust jacket.
+- **Animations** (each with a speed control, loop and a scrubber): 360° orbit, open cover, turn pages, showcase, flip through, spine reveal, float, push in, flat turntable, read the spread, drop in, jacket off and cover close-up.
+- **Lighting**: studio, soft box, window, golden hour, dramatic, top-down, overcast, gallery and night presets, each adjustable (intensity, key direction and height, warmth, exposure, shadow softness, ambient bounce).
+- **Backdrops**: studio sweep, solid, gradient, oak desk, linen, concrete, paper, marble, felt or transparent, with your own colours and an optional ground with contact shadow.
+- **Camera**: lens from 15° to 75° field of view (shown as 35 mm equivalent), and standing, angled, lying or open poses.
+- **Stills and video in any orientation**: landscape 3:2, wide 16:9, portrait 4:5, portrait 1:√2, square and 9:16 story. The framing adapts to the aspect ratio.
 
 ### Export
 - **Print PDF** (pdf-lib):
@@ -104,9 +111,10 @@ three.js with PBR materials: cloth weave, buckram, leather grain, matte / gloss 
   - Gradients as PDF shadings, blend modes, overprint.
   - Die-cuts on a *CutContour* spot; foil, deboss and spot-UV artwork on named spot plates.
   - Rasters only where the medium is raster, at 150–600 dpi.
-- **Cover PDF** with fold and score marks and stab-hole die lines.
+- **Cover PDF** with fold and score marks and stab-hole die lines; **dust-jacket PDF** with flap and spine fold marks.
 - **SVG** (text as outlines or live text) and **PNG** of a page, spread, cover or single item.
-- **Video**: frame-exact MP4 (H.264) and WebM (VP9) via WebCodecs + mp4-muxer / webm-muxer, with a MediaRecorder fallback, and animated GIF.
+- **3D stills**: PNG up to 4096 px on the long edge, with alpha on a transparent backdrop.
+- **Video**: frame-exact MP4 (H.264) and WebM (VP9) via WebCodecs + mp4-muxer / webm-muxer, with a MediaRecorder fallback, and animated GIF, in landscape, portrait, square or story formats up to 4K.
 - **Project file** `.bds.json` with images and fonts embedded.
 
 ---

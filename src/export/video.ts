@@ -9,6 +9,9 @@
  * The scene canvas is resized to the export size while rendering; when the export ends
  * (or fails / is aborted) `scene.resize()` restores the size the canvas had on screen.
  * Callers that manage the canvas size themselves may call `scene.resize()` again.
+ *
+ * With a transparent backdrop, WebM keeps the alpha channel when the browser's VP9/VP8 encoder
+ * supports it; MP4 (H.264) and GIF have no alpha, so transparent areas come out black.
  */
 import { ArrayBufferTarget as Mp4Target, Muxer as Mp4Muxer } from 'mp4-muxer';
 import { ArrayBufferTarget as WebmTarget, Muxer as WebmMuxer } from 'webm-muxer';
@@ -76,11 +79,12 @@ function pickMime(list: string[]): string | null {
 
 const even = (v: number) => Math.max(2, Math.round(v / 2) * 2);
 
-async function findEncoderConfig(codecs: string[], width: number, height: number, fps: number, bitrate: number): Promise<VideoEncoderConfig | null> {
+async function findEncoderConfig(codecs: string[], width: number, height: number, fps: number, bitrate: number, alpha = false): Promise<VideoEncoderConfig | null> {
   if (!hasWebCodecs()) return null;
   for (const codec of codecs) {
     const config: VideoEncoderConfig = { codec, width, height, bitrate, framerate: fps };
     if (codec.startsWith('avc1')) config.avc = { format: 'avc' };
+    if (alpha) config.alpha = 'keep';
     try {
       const res = await VideoEncoder.isConfigSupported(config);
       if (res.supported) return config;
@@ -145,7 +149,11 @@ function waitForDequeue(encoder: VideoEncoder): Promise<void> {
 /** Frame-exact WebCodecs encode. Resolves null when no codec configuration is supported. */
 async function encodeWebCodecs(format: 'mp4' | 'webm', job: Job): Promise<Blob | null> {
   const { scene, width: w, height: h, fps, frames, bitrate, onProgress, signal } = job;
-  const config = await findEncoderConfig(codecList(format, w, h), w, h, fps, bitrate);
+  // A transparent backdrop keeps its alpha in WebM (VP9/VP8 with alpha) where the encoder allows.
+  const wantAlpha = format === 'webm' && scene.hasTransparentBackground();
+  let config = wantAlpha ? await findEncoderConfig(codecList(format, w, h), w, h, fps, bitrate, true) : null;
+  const alpha = !!config;
+  if (!config) config = await findEncoderConfig(codecList(format, w, h), w, h, fps, bitrate);
   if (!config) return null;
   throwIfAborted(signal);
 
@@ -158,7 +166,7 @@ async function encodeWebCodecs(format: 'mp4' | 'webm', job: Job): Promise<Blob |
   } else {
     const target = new WebmTarget();
     const codec = config.codec.startsWith('vp09') ? 'V_VP9' : 'V_VP8';
-    sink = new WebmMuxer({ target, video: { codec, width: w, height: h, frameRate: fps }, firstTimestampBehavior: 'offset' });
+    sink = new WebmMuxer({ target, video: { codec, width: w, height: h, frameRate: fps, alpha }, firstTimestampBehavior: 'offset' });
     output = () => target.buffer;
   }
 

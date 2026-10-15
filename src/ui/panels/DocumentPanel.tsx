@@ -7,6 +7,7 @@ import { mm, fromPt } from '../../model/units';
 import { Section, Row, NumberField, Select, Toggle, TextInput, Segmented, Button, Hint, ColorField } from '../controls';
 import { CANONS, canonMargins, lockGridToBaseline, type CanonKind } from '../../engine/grid';
 import { cmykToHex, rgbToCmyk } from '../../lib/color';
+import { PanelGridEditor, JacketSettings, GuidesSection } from './SurfaceSettings';
 import { uid } from '../../lib/random';
 
 export const TRIM_PRESETS: { id: string; label: string; w: number; h: number; group: string }[] = [
@@ -50,6 +51,20 @@ export function DocumentPanel() {
   const presetId = TRIM_PRESETS.find((p) => Math.abs(mm(p.w) - book.trimW) < 0.5 && Math.abs(mm(p.h) - book.trimH) < 0.5)?.id ?? '';
   const ratio = book.trimH / book.trimW;
 
+  const view = useStore((st) => st.view);
+  if (view === 'cover' || view === 'jacket') {
+    return (
+      <div>
+        {view === 'jacket' && <JacketSettings />}
+        <PanelGridEditor which={view} />
+        <GuidesSection />
+        <Section title="Units" id="doc-units-cover">
+          <Select<Unit> label="Units" value={book.unit} options={[{ value: 'mm', label: 'Millimetres' }, { value: 'cm', label: 'Centimetres' }, { value: 'in', label: 'Inches' }, { value: 'pt', label: 'Points' }, { value: 'pc', label: 'Picas' }, { value: 'px', label: 'Pixels' }]} onChange={(v) => set((d) => { d.unit = v; })} />
+          <Hint>Page format, margins and the book’s grid are edited in the Spreads view.</Hint>
+        </Section>
+      </div>
+    );
+  }
   return (
     <div>
       <Section title="Book" id="doc-book">
@@ -129,6 +144,8 @@ export function DocumentPanel() {
           <Toggle label="Spacing check" checked={!!book.grid.showSpacing} onChange={(v) => set((d) => { d.grid.showSpacing = v; })} hint="Hochuli: tint loose (red) and tight (blue) lines, tick hyphens, flag ladders of 3+" />
         </div>
       </Section>
+
+      <GuidesSection />
 
       <Section title="Paper" id="doc-paper" defaultOpen={false}>
         <ColorField label="Default paper colour" value={book.paper.color} onChange={(v) => v && s().update((d) => {

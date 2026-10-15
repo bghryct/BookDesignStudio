@@ -1,8 +1,9 @@
 import type { Element, Project } from '../../model/types';
 import { useStore } from '../../store/store';
-import { spreadsOf, pageKey, masterKey, findElement, pageSide, COVER_KEY } from '../../model/surfaces';
+import { spreadsOf, pageKey, masterKey, findElement, pageSide, COVER_KEY, JACKET_KEY } from '../../model/surfaces';
 import { textBlock } from '../../engine/grid';
-import { computeBinding } from '../../engine/binding';
+import { computeBinding, computeJacket, coverGrid, jacketGrid } from '../../engine/binding';
+import { panelGridLines } from '../../engine/grid';
 import { mm } from '../../model/units';
 import { libraryItems, type LibraryContext, type LibraryItem } from './items';
 
@@ -12,11 +13,16 @@ export interface Target { key: string; ctx: LibraryContext; anchor: Element['anc
 export function currentTarget(project: Project): Target | null {
   const s = useStore.getState();
   const spec = project.book;
-  if (s.view === 'cover') {
+  if (s.view === 'cover' || s.view === 'jacket') {
+    // The front panel's margin block from the cover / jacket grid, in panel coordinates.
     const calc = computeBinding(spec);
-    const front = calc.panels.find((p) => p.id === 'front')!;
-    const inset = mm(10);
-    return { key: COVER_KEY, anchor: 'front', ctx: { spec, W: front.w, H: calc.coverH, side: 'right', onCover: true, block: { x: inset, y: inset, w: front.w - inset * 2, h: calc.coverH - inset * 2 } } };
+    const jc = s.view === 'jacket' ? computeJacket(spec, calc) : null;
+    const panels = jc ? jc.panels : calc.panels;
+    const H = jc ? jc.height : calc.coverH;
+    const front = panels.find((p) => p.id === 'front')!;
+    const blk = panelGridLines(panels, jc ? jacketGrid(spec) : coverGrid(spec), H).blocks.find((b) => b.panel === 'front');
+    const block = blk ? { x: blk.x - front.x, y: blk.y, w: blk.w, h: blk.h } : { x: mm(10), y: mm(10), w: front.w - mm(20), h: H - mm(20) };
+    return { key: jc ? JACKET_KEY : COVER_KEY, anchor: 'front', ctx: { spec, W: front.w, H, side: 'right', onCover: true, block } };
   }
   if (s.masterEdit) {
     const side = 'right' as const;
@@ -37,10 +43,9 @@ export function currentTarget(project: Project): Target | null {
 /** Target for a specific surface (drag & drop). */
 export function targetFor(project: Project, key: string): Target | null {
   const spec = project.book;
-  if (key === COVER_KEY) {
-    const s = useStore.getState();
-    const prev = s.view;
-    if (prev !== 'cover') return null;
+  if (key === COVER_KEY || key === JACKET_KEY) {
+    const view = useStore.getState().view;
+    if ((key === COVER_KEY && view !== 'cover') || (key === JACKET_KEY && view !== 'jacket')) return null;
     return currentTarget(project);
   }
   if (key.startsWith('master:')) {
@@ -75,7 +80,8 @@ export function insertItem(item: LibraryItem, target: Target, at?: { x: number; 
   }
   if (target.anchor) els = els.map((e) => ({ ...e, anchor: target.anchor }));
   s.update((d) => {
-    const arr = target.key === COVER_KEY ? d.cover.elements : target.key.startsWith('page:') ? d.pages.find((p) => `page:${p.id}` === target.key)?.elements : (() => {
+    if (target.key === JACKET_KEY && !d.jacket) d.jacket = { elements: [] };
+    const arr = target.key === COVER_KEY ? d.cover.elements : target.key === JACKET_KEY ? d.jacket!.elements : target.key.startsWith('page:') ? d.pages.find((p) => `page:${p.id}` === target.key)?.elements : (() => {
       const [, id, side] = target.key.split(':');
       const m = d.masters.find((x) => x.id === id);
       return m ? (side === 'left' ? m.left : m.right) : undefined;

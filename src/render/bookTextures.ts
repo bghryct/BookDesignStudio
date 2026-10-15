@@ -3,9 +3,9 @@
  * text is drawn from the same glyph outlines as the PDF).
  */
 import type { Element, Finish, Project } from '../model/types';
-import type { BindingCalc } from '../engine/binding';
+import type { BindingCalc, JacketCalc } from '../engine/binding';
 import type { BookTextures, FinishKey, PageInfo } from '../three';
-import { compileCover, compilePage, elementMatrix } from './compile';
+import { compileCover, compileJacket, compilePage, elementMatrix } from './compile';
 import { renderToCanvas, preloadImages } from './canvasBackend';
 import { applyMatrix } from './primitives';
 
@@ -23,7 +23,7 @@ function toMask(c: HTMLCanvasElement): HTMLCanvasElement {
   return c;
 }
 
-export interface TextureOptions { coverMaxPx?: number; pageMaxPx?: number; pageLimit?: number; signal?: { cancelled: boolean } }
+export interface TextureOptions { coverMaxPx?: number; pageMaxPx?: number; pageLimit?: number; signal?: { cancelled: boolean }; jacket?: JacketCalc | null }
 
 export async function buildBookTextures(project: Project, calc: BindingCalc, o: TextureOptions = {}): Promise<BookTextures | null> {
   const wrap = calc.wrap;
@@ -53,7 +53,25 @@ export async function buildBookTextures(project: Project, calc: BindingCalc, o: 
     pages.push(renderToCanvas(prims, { x: 0, y: 0, w: W, h: H }, pagePxPerPt, { hideDieLines: true }));
     if (i % 3 === 2) await tick();
   }
-  return { cover, coverPxPerPt, finishMasks, pages, pagePxPerPt };
+  // Dust jacket art + finish masks, same conventions as the cover (origin at −bleed, −bleed).
+  let jacket: HTMLCanvasElement | null = null;
+  let jacketPxPerPt = 1;
+  const jacketFinishMasks: BookTextures['finishMasks'] = {};
+  if (o.jacket) {
+    const jc = o.jacket;
+    const box = { x: -jc.bleed, y: -jc.bleed, w: jc.width + 2 * jc.bleed, h: jc.height + 2 * jc.bleed };
+    jacketPxPerPt = Math.min(4, (o.coverMaxPx ?? 2400) / box.w);
+    const prims = compileJacket(project, jc);
+    await preloadImages(prims);
+    if (o.signal?.cancelled) return null;
+    jacket = renderToCanvas(prims, box, jacketPxPerPt, { hideDieLines: true });
+    const usedJ = new Set((project.jacket?.elements ?? []).map((e) => e.finish).filter((f): f is Finish => !!f && f !== 'none'));
+    for (const f of FINISHES) {
+      if (!usedJ.has(f)) continue;
+      jacketFinishMasks[f] = toMask(renderToCanvas(compileJacket(project, jc, { background: null, finishFilter: (el: Element) => el.finish === f }), box, jacketPxPerPt, { hideDieLines: true }));
+    }
+  }
+  return { cover, coverPxPerPt, finishMasks, pages, pagePxPerPt, jacket, jacketPxPerPt, jacketFinishMasks };
 }
 
 /** Per-page material + die-cut windows (both faces of a leaf share its holes). */

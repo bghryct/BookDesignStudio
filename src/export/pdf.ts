@@ -26,12 +26,12 @@ import { renderToCanvas, preloadImages } from '../render/canvasBackend';
 import { parsePath } from '../lib/pathData';
 import { parseColor, rgbToCmyk, findSwatchCmyk } from '../lib/color';
 import { shape, glyphPath, canOutline, faceBytes, getFace } from '../engine/fonts';
-import { computeBinding } from '../engine/binding';
+import { computeBinding, computeJacket } from '../engine/binding';
 import { pageSide, spreadsOf } from '../model/surfaces';
 import { coverBaseColor } from '../render/compile';
 
 export interface PdfOptions {
-  scope: 'interior' | 'cover' | 'spread';
+  scope: 'interior' | 'cover' | 'jacket' | 'spread';
   /** 1-based inclusive page range for the interior. */
   from?: number;
   to?: number;
@@ -620,6 +620,39 @@ export async function exportPdf(project: Project, opts: PdfOptions): Promise<Uin
   const slug = marks ? Math.max(b.slug, 30) : 0;
   const bleed = opts.bleed ? b.bleed : 0;
   const stamp = new Date().toISOString().slice(0, 16).replace('T', ' ');
+
+  if (opts.scope === 'jacket') {
+    const jc = computeJacket(b);
+    const bl = opts.bleed ? jc.bleed : 0;
+    const W = jc.width, H = jc.height;
+    const page = doc.addPage([W + 2 * (bl + slug), H + 2 * (bl + slug)]);
+    const ox = bl + slug, oy = bl + slug;
+    page.setTrimBox(ox, oy, W, H);
+    page.setBleedBox(slug, slug, W + 2 * bl, H + 2 * bl);
+    const w = new PageWriter(doc, page, project, opts, images, fonts, glyphs);
+    w.push(concatTransformationMatrix(1, 0, 0, -1, 0, page.getHeight()));
+    w.push(concatTransformationMatrix(1, 0, 0, 1, ox, oy));
+    if (opts.paperColor) {
+      w.setColor(b.jacket?.paperColor ?? '#ffffff', false, null);
+      w.push(moveTo(-bl, -bl), lineTo(W + bl, -bl), lineTo(W + bl, H + bl), lineTo(-bl, H + bl), closePath(), fill());
+    }
+    const ctx: CompileContext = { project, surface: 'jacket', pageIndex: null, side: 'right' };
+    const els = project.jacket?.elements ?? [];
+    for (const [i, el] of els.entries()) {
+      opts.onProgress?.(i / Math.max(1, els.length), 'Jacket');
+      await emitElement(w, el, ctx, el.anchor ? jc.panels.find((p) => p.id === el.anchor)?.x ?? 0 : 0);
+    }
+    w.push(pushGraphicsState());
+    w.setColor('#000000', true, 'registration');
+    w.push(setLineWidth(0.3));
+    for (const f of jc.folds) w.push(setDashPattern(f.kind === 'spine' ? [3, 2] : [1, 1], 0), moveTo(f.x, -bl - 4), lineTo(f.x, -bl - 16), moveTo(f.x, H + bl + 4), lineTo(f.x, H + bl + 16), stroke());
+    w.push(popGraphicsState());
+    drawMarks(w, 0, 0, W, H, bl, 'Jacket', '');
+    w.flush();
+    await pageInfo(w, `${b.title} - dust jacket ${(W / 72 * 25.4).toFixed(1)} x ${(H / 72 * 25.4).toFixed(1)} mm - flaps ${(jc.flapW / 72 * 25.4).toFixed(0)} mm - spine ${(jc.spineW / 72 * 25.4).toFixed(2)} mm - ${stamp}`, opts.colorBars ? 8 + 12 * 9 + 10 : 0, H + bl + slug * 0.55);
+    w.flush();
+    return doc.save();
+  }
 
   if (opts.scope === 'cover') {
     const calc = computeBinding(b);

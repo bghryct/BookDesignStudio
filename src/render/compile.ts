@@ -83,6 +83,7 @@ function threadIndex(project: Project): ThreadIndex {
     for (const e of p.elements) if (e.type === 'text') byId.set(e.id, { el: e, pageIndex: pi, surface: `page:${p.id}` });
   });
   for (const e of project.cover.elements) if (e.type === 'text') byId.set(e.id, { el: e, pageIndex: null, surface: 'cover' });
+  for (const e of project.jacket?.elements ?? []) if (e.type === 'text') byId.set(e.id, { el: e, pageIndex: null, surface: 'jacket' });
   for (const { el } of byId.values()) if (el.flowNext && byId.has(el.flowNext)) prev.set(el.flowNext, el.id);
   idx = { prev, byId };
   threadIndexCache.set(project, idx);
@@ -408,3 +409,18 @@ export function contextForElement(project: Project, id: string, fallbackPage: nu
 
 export { IDENTITY };
 export type { PathPrim };
+
+/** Dust-jacket primitives in jacket coordinates (origin = top-left of the flat jacket, bleed outside). */
+export function compileJacket(project: Project, jc: { panels: { id: string; x: number; w: number }[]; width: number; height: number; bleed: number }, opts: PageRenderOptions & { background?: string | null } = {}): Prim[] {
+  const out: Prim[] = [];
+  const ctx: CompileContext = { project, surface: 'jacket', pageIndex: null, side: 'right' };
+  if (opts.background !== null) {
+    const b = jc.bleed;
+    out.push({ t: 'path', d: rectPath(-b, -b, jc.width + 2 * b, jc.height + 2 * b), fill: opts.background ?? project.book.jacket?.paperColor ?? '#f4f0e8' });
+  }
+  for (const el of project.jacket?.elements ?? []) {
+    if (el.hidden || (opts.finishFilter && !opts.finishFilter(el))) continue;
+    out.push(placedElement(el, ctx, coverAnchorX(project, el, jc.panels), 0));
+  }
+  return out;
+}

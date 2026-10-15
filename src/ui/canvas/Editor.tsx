@@ -3,8 +3,8 @@ import { create } from 'zustand';
 import type { Draft } from 'immer';
 import type { BrushStroke, DrawingElement, Element, PathElement, Project, TextElement } from '../../model/types';
 import { useStore, type Tool } from '../../store/store';
-import { spreadsOf, surfaceElementsDraft, findElement, COVER_KEY, pageKey, masterKey } from '../../model/surfaces';
-import { computeBinding, type BindingCalc } from '../../engine/binding';
+import { spreadsOf, surfaceElementsDraft, findElement, COVER_KEY, JACKET_KEY, pageKey, masterKey, guidesOf } from '../../model/surfaces';
+import { computeBinding, computeJacket } from '../../engine/binding';
 import { computeGrid } from '../../engine/grid';
 import { makeElement, makeText, makeDrawing, makePath, makeOrnament, makeRule, makeMotif } from '../../model/factory';
 import { LIBRARY_MIME } from '../library/LibraryPanel';
@@ -15,11 +15,12 @@ import { layoutText, threadOf } from '../../render/compile';
 import { renderStroke, simulatePressure, stabilize } from '../../engine/brushes';
 import { parsePath, serialize, type Seg } from '../../lib/pathData';
 import { SurfaceView } from './SurfaceView';
-import { SurfaceGuides, CanonGuides, CoverGuides } from './Guides';
+import { SurfaceGuides, CanonGuides, CoverGuides, JacketGuides } from './Guides';
+import { Rulers, RULER } from './Rulers';
 import { TextStoryEditor } from './TextStoryEditor';
 import { SpacingOverlay } from './SpacingOverlay';
 import {
-  type SurfaceDesc, type Pt, sceneMatrix, toLocal, corners, sceneBounds, hitElement, surfaceAt, snapTargets, snapAxis,
+  type SurfaceDesc, type Pt, type PanelLayout, sceneMatrix, toLocal, corners, sceneBounds, hitElement, surfaceAt, snapTargets, snapAxis,
 } from './geometry';
 import { importFiles } from '../importFiles';
 
@@ -41,14 +42,15 @@ type Interaction =
   | { k: 'create'; tool: Tool; surface: SurfaceDesc; start: Pt; cur: Pt }
   | { k: 'draw'; surface: SurfaceDesc; elId: string; points: number[]; mouse: boolean; stroke: BrushStroke }
   | { k: 'node'; id: string; seg: number; which: 'p' | 'c1' | 'c2'; segs: Seg[]; surface: SurfaceDesc }
-  | { k: 'pen-drag'; idx: number };
+  | { k: 'pen-drag'; idx: number }
+  | { k: 'guide'; axis: 'x' | 'y'; from: { key: string; index: number } | null; pos: Pt };
 
 interface PenPoint { x: number; y: number; hx: number; hy: number } // anchor + outgoing handle offset (scene)
 
 const CREATE_TOOLS: Tool[] = ['text', 'rect', 'ellipse', 'polygon', 'line', 'image', 'pattern', 'ornament', 'initial', 'overprint', 'gradient', 'cutout', 'gridtype', 'grid-diagram', 'dimension', 'specimen'];
 const MOTIF_TOOLS: Partial<Record<Tool, string>> = { 'grid-diagram': 'grid-diagram', dimension: 'dimension', specimen: 'waterfall' };
 
-export function Editor({ mode }: { mode: 'spreads' | 'cover' }) {
+export function Editor({ mode }: { mode: 'spreads' | 'cover' | 'jacket' }) {
   const project = useStore((s) => s.project);
   const spreadIdx = useStore((s) => s.spread);
   const masterEdit = useStore((s) => s.masterEdit);
@@ -74,14 +76,21 @@ export function Editor({ mode }: { mode: 'spreads' | 'cover' }) {
   const [hoverCursor, setHoverCursor] = useState<string>('default');
   const inter = useRef<Interaction>({ k: 'none' });
 
-  const calc: BindingCalc | null = useMemo(() => (mode === 'cover' ? computeBinding(project.book) : null), [mode, project.book]);
+  const bindingCalc = useMemo(() => (mode === 'cover' || mode === 'jacket' ? computeBinding(project.book) : null), [mode, project.book]);
+  const jacketCalc = useMemo(() => (mode === 'jacket' && bindingCalc ? computeJacket(project.book, bindingCalc) : null), [mode, project.book, bindingCalc]);
+  /** Panels of the flat cover or jacket (anchoring, snapping); null on pages. */
+  const calc: PanelLayout | null = mode === 'cover' ? bindingCalc : mode === 'jacket' ? jacketCalc : null;
   const spec = project.book;
+  const [guidePreview, setGuidePreview] = useState<{ axis: 'x' | 'y'; pos: number } | null>(null);
 
   /* ---------------------------------------------------------------- surfaces */
   const surfaces: SurfaceDesc[] = useMemo(() => {
     const W = spec.trimW, H = spec.trimH;
-    if (mode === 'cover' && calc) {
-      return [{ key: COVER_KEY, kind: 'cover', x: 0, y: 0, w: calc.coverW, h: calc.coverH, bleed: calc.wrap, pageIndex: null, side: 'right', label: 'Cover' }];
+    if (mode === 'cover' && bindingCalc) {
+      return [{ key: COVER_KEY, kind: 'cover', x: 0, y: 0, w: bindingCalc.coverW, h: bindingCalc.coverH, bleed: bindingCalc.wrap, pageIndex: null, side: 'right', label: 'Cover' }];
+    }
+    if (mode === 'jacket' && jacketCalc) {
+      return [{ key: JACKET_KEY, kind: 'jacket', x: 0, y: 0, w: jacketCalc.width, h: jacketCalc.height, bleed: jacketCalc.bleed, pageIndex: null, side: 'right', label: 'Dust jacket' }];
     }
     if (masterEdit) {
       const m = project.masters.find((x) => x.id === masterEdit.id);
@@ -99,15 +108,19 @@ export function Editor({ mode }: { mode: 'spreads' | 'cover' }) {
     if (sp.left != null) out.push({ key: pageKey(project.pages[sp.left].id), kind: 'page', x: 0, y: 0, w: W, h: H, bleed: spec.bleed, pageIndex: sp.left, side: 'left', label: `Page ${sp.left + 1}` });
     if (sp.right != null) out.push({ key: pageKey(project.pages[sp.right].id), kind: 'page', x: facing ? W : 0, y: 0, w: W, h: H, bleed: spec.bleed, pageIndex: sp.right, side: facing ? 'right' : 'right', label: `Page ${sp.right + 1}` });
     return out;
-  }, [mode, calc, masterEdit, project, spreadIdx, spec]);
+  }, [mode, bindingCalc, jacketCalc, masterEdit, project, spreadIdx, spec]);
 
   const sceneBox = useMemo(() => {
-    const pad = (mode === 'cover' && calc ? calc.wrap : spec.bleed) + 18;
-    if (mode === 'cover' && calc) return { x: -pad, y: -pad - 14, w: calc.coverW + pad * 2, h: calc.coverH + pad * 2 + 14 };
+    if ((mode === 'cover' || mode === 'jacket') && surfaces[0]) {
+      const sf = surfaces[0];
+      const pad = sf.bleed + 18;
+      return { x: -pad, y: -pad - 14, w: sf.w + pad * 2, h: sf.h + pad * 2 + 14 };
+    }
+    const pad = spec.bleed + 18;
     const W = spec.trimW;
     const total = spec.facing ? W * 2 : W;
     return { x: -pad, y: -pad, w: total + pad * 2, h: spec.trimH + pad * 2 };
-  }, [mode, calc, spec]);
+  }, [mode, surfaces, spec]);
 
   const allEls = useMemo(() => {
     const out: { el: Element; surface: SurfaceDesc }[] = [];
@@ -239,6 +252,24 @@ export function Editor({ mode }: { mode: 'spreads' | 'cover' }) {
       return;
     }
 
+    // Dragging out of a ruler creates a guide.
+    const rulerEl = (e.target as HTMLElement).closest?.('[data-ruler]') as HTMLElement | null;
+    if (rulerEl) {
+      const axis = rulerEl.dataset.ruler === 'top' ? 'y' : 'x';
+      inter.current = { k: 'guide', axis, from: null, pos: p };
+      setGuidePreview({ axis, pos: axis === 'x' ? p.x : p.y });
+      return;
+    }
+    if ((tool === 'select' || tool === 'node') && !s.project.guidesHidden && !s.project.guidesLocked) {
+      const hitG = guideAt(p);
+      if (hitG) {
+        s.checkpoint();
+        inter.current = { k: 'guide', axis: hitG.axis, from: { key: hitG.key, index: hitG.index }, pos: p };
+        setGuidePreview({ axis: hitG.axis, pos: hitG.axis === 'x' ? p.x : p.y });
+        return;
+      }
+    }
+
     if (tool === 'select' || tool === 'node') {
       // Overflow port on a text frame → enter linking mode.
       if (single && single.el.type === 'text') {
@@ -341,7 +372,8 @@ export function Editor({ mode }: { mode: 'spreads' | 'cover' }) {
       case 'none': {
         if (tool === 'select') {
           const h = handleAt(p);
-          setHoverCursor(h ? (h.kind === 'rotate' ? 'grab' : HANDLE_CURSORS[HANDLES.indexOf(h.h)]) : 'default');
+          const g = !h && !s.project.guidesHidden && !s.project.guidesLocked ? guideAt(p) : null;
+          setHoverCursor(h ? (h.kind === 'rotate' ? 'grab' : HANDLE_CURSORS[HANDLES.indexOf(h.h)]) : g ? (g.axis === 'x' ? 'col-resize' : 'row-resize') : 'default');
         }
         if (tool === 'pen' && pen) setPenHover(p);
         return;
@@ -481,6 +513,19 @@ export function Editor({ mode }: { mode: 'spreads' | 'cover' }) {
         s.updateElement(it.id, { d: serialize(segs) } as Partial<PathElement>, { history: false });
         return;
       }
+      case 'guide': {
+        it.pos = p;
+        // Snap guides to the grid / margins when close.
+        const sAt = surfaceAt(surfaces, p, 40 / zoom);
+        let pos = it.axis === 'x' ? p.x : p.y;
+        if (sAt && !e.altKey) {
+          const lines = snapTargets(s.project, sAt, [], calc, new Set());
+          const sn = snapAxis([pos], it.axis === 'x' ? lines.x : lines.y, 5 / zoom);
+          pos += sn.delta;
+        }
+        setGuidePreview({ axis: it.axis, pos });
+        return;
+      }
       case 'pen-drag': {
         if (!pen) return;
         const pts = [...pen.pts];
@@ -537,6 +582,22 @@ export function Editor({ mode }: { mode: 'spreads' | 'cover' }) {
       }
       case 'pen-drag':
         break;
+      case 'guide': {
+        const pos = guidePreview ? guidePreview.pos : it.axis === 'x' ? it.pos.x : it.pos.y;
+        setGuidePreview(null);
+        const r = rootRef.current!.getBoundingClientRect();
+        const overRuler = e.clientX - r.left < RULER || e.clientY - r.top < RULER;
+        const target = overRuler ? null : surfaceAt(surfaces, it.pos, 0);
+        if (it.from) {
+          if (!target || target.key !== it.from.key) s.removeGuide(it.from.key, it.axis, it.from.index);
+          else s.moveGuide(it.from.key, it.axis, it.from.index, it.axis === 'x' ? pos - target.x : pos - target.y, { history: false });
+          if (target && target.key !== it.from.key) s.addGuide(target.key, it.axis, it.axis === 'x' ? pos - target.x : pos - target.y);
+        } else if (target) {
+          s.addGuide(target.key, it.axis, it.axis === 'x' ? pos - target.x : pos - target.y);
+          if (s.project.guidesHidden) s.update((d) => { d.guidesHidden = false; }, { history: false });
+        }
+        break;
+      }
       default:
         break;
     }
@@ -544,6 +605,18 @@ export function Editor({ mode }: { mode: 'spreads' | 'cover' }) {
   };
 
   /* ---------------------------------------------------------------- actions */
+  function guideAt(p: Pt): { key: string; axis: 'x' | 'y'; index: number } | null {
+    const tol = 4 / zoom;
+    for (const sf of surfaces) {
+      const g = guidesOf(project, sf.key);
+      const inY = p.y >= sf.y - sf.bleed && p.y <= sf.y + sf.h + sf.bleed;
+      const inX = p.x >= sf.x - sf.bleed && p.x <= sf.x + sf.w + sf.bleed;
+      if (inY) for (let i = 0; i < g.x.length; i++) if (Math.abs(sf.x + g.x[i] - p.x) < tol) return { key: sf.key, axis: 'x', index: i };
+      if (inX) for (let i = 0; i < g.y.length; i++) if (Math.abs(sf.y + g.y[i] - p.y) < tol) return { key: sf.key, axis: 'y', index: i };
+    }
+    return null;
+  }
+
   function centerOf(el: Element, surface: SurfaceDesc): Pt {
     const m = sceneMatrix(el, surface, calc);
     const [x, y] = applyMatrix(m, el.w / 2, el.h / 2);
@@ -572,7 +645,7 @@ export function Editor({ mode }: { mode: 'spreads' | 'cover' }) {
   /** Dragging an item onto the other page of the spread moves it to that page. */
   function transferAcrossPages(ids: string[]) {
     const s = st();
-    if (mode === 'cover') { reanchor(ids); return; }
+    if (mode === 'cover' || mode === 'jacket') { reanchor(ids); return; }
     s.update((d) => {
       for (const id of ids) {
         const cur = allEls.find((x) => x.el.id === id);
@@ -597,11 +670,11 @@ export function Editor({ mode }: { mode: 'spreads' | 'cover' }) {
     st().update((d) => {
       for (const id of ids) {
         const loc = findElement(d as Project, id);
-        if (!loc || loc.key !== COVER_KEY) continue;
-        const el = d.cover.elements[loc.index];
+        if (!loc || (loc.key !== COVER_KEY && loc.key !== JACKET_KEY)) continue;
+        const el = loc.key === COVER_KEY ? d.cover.elements[loc.index] : d.jacket!.elements[loc.index];
         const off = el.anchor ? calc.panels.find((p) => p.id === el.anchor)?.x ?? 0 : 0;
         const cx = off + el.x + el.w / 2;
-        const panel = calc.panels.find((p) => cx >= p.x && cx <= p.x + p.w && !p.id.startsWith('hinge'));
+        const panel = calc.panels.find((p) => cx >= p.x && cx <= p.x + p.w && !p.id.startsWith('hinge') && !p.id.endsWith('-fold'));
         const next = (panel?.id ?? null) as Element['anchor'];
         if (next === (el.anchor ?? null)) continue;
         const nOff = next ? calc.panels.find((p) => p.id === next)!.x : 0;
@@ -619,11 +692,11 @@ export function Editor({ mode }: { mode: 'spreads' | 'cover' }) {
     let el: Element;
     const anchorX = (xx: number) => {
       if (!calc) return { anchor: undefined as Element['anchor'], x: xx };
-      const panel = calc.panels.find((p) => xx >= p.x && xx <= p.x + p.w && !p.id.startsWith('hinge'));
+      const panel = calc.panels.find((p) => xx >= p.x && xx <= p.x + p.w && !p.id.startsWith('hinge') && !p.id.endsWith('-fold'));
       return panel ? { anchor: panel.id as Element['anchor'], x: xx - panel.x } : { anchor: undefined, x: xx };
     };
     if (t === 'text') {
-      if (click && surface.kind !== 'cover') {
+      if (click && surface.kind !== 'cover' && surface.kind !== 'jacket') {
         // Click inside a column: frame the column from the click to the foot of the text block.
         const g = computeGrid(s.project.book, surface.side);
         const col = g.cols.find((c) => x >= c.x - 2 && x <= c.x + c.w + 2) ?? { x, w: 200 };
@@ -649,7 +722,7 @@ export function Editor({ mode }: { mode: 'spreads' | 'cover' }) {
       const m = makeMotif(kind);
       if (click) { w = m.w; h = m.h; x -= w / 2; y -= h / 2; }
       el = { ...m, x, y, w: Math.max(8, w), h: Math.max(8, h) };
-    } else if (t === 'ornament' && click && surface.kind !== 'cover') {
+    } else if (t === 'ornament' && click && surface.kind !== 'cover' && surface.kind !== 'jacket') {
       // Click: frame the whole text block, decorating the margins.
       const g = computeGrid(s.project.book, surface.side);
       const band = Math.min(s.project.book.margins.outer, s.project.book.margins.bottom) * 0.8;
@@ -662,7 +735,7 @@ export function Editor({ mode }: { mode: 'spreads' | 'cover' }) {
       if (t === 'ellipse') el = { ...el, ...{ shape: 'ellipse' } } as Element;
       if (t === 'polygon') el = { ...el, ...{ shape: 'star', sides: 5 } } as Element;
     }
-    if (surface.kind === 'cover') {
+    if (surface.kind === 'cover' || surface.kind === 'jacket') {
       const an = anchorX(el.x);
       el = { ...el, x: an.x, anchor: an.anchor };
     }
@@ -755,6 +828,7 @@ export function Editor({ mode }: { mode: 'spreads' | 'cover' }) {
       if (mod && (e.key === '0')) { e.preventDefault(); fit(); return; }
       if (mod && (e.key === '=' || e.key === '+')) { e.preventDefault(); zoomAt(1.25, size.w / 2, size.h / 2); return; }
       if (mod && e.key === '-') { e.preventDefault(); zoomAt(0.8, size.w / 2, size.h / 2); return; }
+      if (mod && e.key === ';') { e.preventDefault(); s.update((d) => { if (e.altKey) d.guidesLocked = !d.guidesLocked; else d.guidesHidden = !d.guidesHidden; }, { history: false }); return; }
       if (mod && e.key === '1') { e.preventDefault(); const z = 1; zoomAt(z / s.zoom, size.w / 2, size.h / 2); return; }
       if (mod && e.key === ']') { e.preventDefault(); s.arrange(e.shiftKey ? 'front' : 'forward'); return; }
       if (mod && e.key === '[') { e.preventDefault(); s.arrange(e.shiftKey ? 'back' : 'backward'); return; }
@@ -858,7 +932,17 @@ export function Editor({ mode }: { mode: 'spreads' | 'cover' }) {
           {mode === 'spreads' && surfaces.map((s) => <SurfaceGuides key={`g${s.key}`} project={project} surface={s} />)}
           {mode === 'spreads' && <CanonGuides project={project} x={0} y={0} />}
           {spec.grid.showSpacing && <SpacingOverlay project={project} items={allEls} calc={calc} />}
-          {mode === 'cover' && calc && surfaces[0] && <CoverGuides calc={calc} surface={surfaces[0]} showBleed={spec.grid.showBleed} />}
+          {mode === 'cover' && bindingCalc && surfaces[0] && <CoverGuides calc={bindingCalc} spec={spec} surface={surfaces[0]} showBleed={spec.grid.showBleed} />}
+          {mode === 'jacket' && jacketCalc && surfaces[0] && <JacketGuides jc={jacketCalc} spec={spec} surface={surfaces[0]} showBleed={spec.grid.showBleed} />}
+          {!project.guidesHidden && surfaces.map((sf) => {
+            const g = guidesOf(project, sf.key);
+            return (
+              <g key={`rg${sf.key}`} pointerEvents="none">
+                {g.x.map((gx, i) => <line key={`gx${i}`} x1={sf.x + gx} x2={sf.x + gx} y1={sf.y - sf.bleed - 6} y2={sf.y + sf.h + sf.bleed + 6} stroke={project.guidesLocked ? '#6aa8b8' : '#21b8d6'} strokeWidth={1} vectorEffect="non-scaling-stroke" />)}
+                {g.y.map((gy, i) => <line key={`gy${i}`} y1={sf.y + gy} y2={sf.y + gy} x1={sf.x - sf.bleed - 6} x2={sf.x + sf.w + sf.bleed + 6} stroke={project.guidesLocked ? '#6aa8b8' : '#21b8d6'} strokeWidth={1} vectorEffect="non-scaling-stroke" />)}
+              </g>
+            );
+          })}
           {mode === 'spreads' && surfaces.map((s) => (
             <text key={`l${s.key}`} x={s.x + 2} y={s.y + s.h + s.bleed + 12 / zoom} fontSize={10 / zoom} fill="rgba(240,235,225,0.45)" style={{ fontFamily: 'ui-sans-serif, system-ui' }}>
               {s.label}{s.pageIndex != null && project.pages[s.pageIndex]?.label ? ` · ${project.pages[s.pageIndex].label}` : ''}{s.pageIndex != null && project.pages[s.pageIndex]?.masterId ? ` · ${project.masters.find((m) => m.id === project.pages[s.pageIndex!].masterId)?.name ?? ''}` : ''}
@@ -878,6 +962,9 @@ export function Editor({ mode }: { mode: 'spreads' | 'cover' }) {
         </g>
         {/* Overlays in screen space */}
         <g>
+          {guidePreview && (guidePreview.axis === 'x'
+            ? <line x1={guidePreview.pos * zoom + pan.x} x2={guidePreview.pos * zoom + pan.x} y1={0} y2={size.h} stroke="#21b8d6" strokeDasharray="4 3" />
+            : <line y1={guidePreview.pos * zoom + pan.y} y2={guidePreview.pos * zoom + pan.y} x1={0} x2={size.w} stroke="#21b8d6" strokeDasharray="4 3" />)}
           {selected.map(({ el, surface }) => {
             const cs = corners(el, surface, calc).map(toScreen);
             const overflow = textOverflow(el, surface);
@@ -978,6 +1065,7 @@ export function Editor({ mode }: { mode: 'spreads' | 'cover' }) {
         className="pointer-events-none absolute inset-0"
         style={{ width: size.w, height: size.h }}
       />
+      <Rulers zoom={zoom} pan={pan} size={size} unit={spec.unit} />
       {(tool === 'brush' || tool === 'eraser') && <BrushCursor zoom={zoom} size={brush.size} />}
       {textEditing && (() => {
         const target = allEls.find((x) => x.el.id === textEditing);
@@ -1036,6 +1124,7 @@ function toolType(t: Tool): Element['type'] {
 
 function surfaceEls(project: Project, s: SurfaceDesc): Element[] {
   if (s.kind === 'cover') return project.cover.elements;
+  if (s.kind === 'jacket') return project.jacket?.elements ?? [];
   if (s.kind === 'master') {
     const [, id, side] = s.key.split(':');
     const m = project.masters.find((x) => x.id === id);

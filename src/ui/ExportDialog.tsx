@@ -60,7 +60,8 @@ function PdfTab() {
   };
   return (
     <div className="space-y-3">
-      <Segmented value={o.scope} onChange={(v) => set({ scope: v })} options={[{ value: 'interior', label: 'Interior' }, { value: 'cover', label: 'Cover / case' }, { value: 'spread', label: 'Current spread' }]} />
+      <Segmented value={o.scope} onChange={(v) => set({ scope: v })} options={[{ value: 'interior', label: 'Interior' }, { value: 'cover', label: 'Cover / case' }, { value: 'jacket', label: 'Dust jacket' }, { value: 'spread', label: 'Spread' }]} />
+      {o.scope === 'jacket' && !project.book.jacket?.enabled && <Hint>This book has no dust jacket yet — add one in the Jacket view.</Hint>}
       {o.scope === 'interior' && (
         <Row>
           <NumberField label="From page" value={o.from ?? 1} min={1} max={project.pages.length} decimals={0} onChange={(v) => set({ from: Math.round(v) })} />
@@ -126,7 +127,7 @@ function SvgTab() {
   return (
     <div className="space-y-3">
       <Segmented value={o.target} onChange={(v) => set({ target: v })} options={[
-        { value: 'spread', label: 'Current spread' }, { value: 'page', label: 'Page' }, { value: 'cover', label: 'Flat cover' }, { value: 'selection', label: 'Selected item' },
+        { value: 'spread', label: 'Spread' }, { value: 'page', label: 'Page' }, { value: 'cover', label: 'Cover' }, { value: 'jacket', label: 'Jacket' }, { value: 'selection', label: 'Selection' },
       ]} />
       {o.target === 'page' && <NumberField label="Page" value={o.pageIndex + 1} min={1} max={project.pages.length} decimals={0} onChange={(v) => set({ pageIndex: Math.round(v) - 1 })} />}
       {o.target === 'selection' && !selection.length && <Hint>Select an item first.</Hint>}

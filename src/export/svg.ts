@@ -3,15 +3,15 @@
  * Text is converted to outlines by default so files render identically anywhere.
  */
 import type { Project } from '../model/types';
-import { compilePage, compileCover, placedElement, contextForElement } from '../render/compile';
+import { compilePage, compileCover, compileJacket, placedElement, contextForElement } from '../render/compile';
 import { primsToSvg } from '../render/svgString';
 import { renderToCanvas, preloadImages } from '../render/canvasBackend';
 import { spreadsOf, findElement } from '../model/surfaces';
-import { computeBinding } from '../engine/binding';
+import { computeBinding, computeJacket } from '../engine/binding';
 import type { Prim } from '../render/primitives';
 
 export interface SvgExportOptions {
-  target: 'spread' | 'page' | 'cover' | 'selection';
+  target: 'spread' | 'page' | 'cover' | 'jacket' | 'selection';
   spreadIndex: number;
   pageIndex: number;
   selectionId?: string;
@@ -29,6 +29,11 @@ function build(project: Project, o: SvgExportOptions): Built {
     const calc = computeBinding(b);
     const wrap = o.includeBleed ? calc.wrap : 0;
     return { prims: compileCover(project, calc), box: { x: -wrap, y: -wrap, w: calc.coverW + 2 * wrap, h: calc.coverH + 2 * wrap }, name: 'cover' };
+  }
+  if (o.target === 'jacket') {
+    const jc = computeJacket(b);
+    const bl = o.includeBleed ? jc.bleed : 0;
+    return { prims: compileJacket(project, jc), box: { x: -bl, y: -bl, w: jc.width + 2 * bl, h: jc.height + 2 * bl }, name: 'jacket' };
   }
   if (o.target === 'selection' && o.selectionId) {
     const loc = findElement(project, o.selectionId);

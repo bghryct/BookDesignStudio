@@ -1,15 +1,16 @@
 /**
  * Interactive real-time 3D book (three.js). Framework-agnostic: give it a canvas, feed it
  * the book (`setInput`) and its artwork (`setTextures`); it runs its own render loop.
+ *
+ * Scene graph:  motion (lift / spin / tilt about the book centre)
+ *                └ motionInner → stagePivot (standing ↔ lying) → root (pt → scene units, RTL mirror)
+ *                   └ BookModel.group (a-space)
  */
 import {
   ACESFilmicToneMapping,
-  Box3,
   Color,
-  DirectionalLight,
   Group,
   Mesh,
-  VSMShadowMap,
   PerspectiveCamera,
   PlaneGeometry,
   PMREMGenerator,
@@ -17,13 +18,17 @@ import {
   ShadowMaterial,
   SRGBColorSpace,
   Vector3,
+  VSMShadowMap,
   WebGLRenderer,
+  type Texture,
   type WebGLProgramParametersWithUniforms,
   type WebGLRenderTarget,
 } from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import {
+  ANIMATION_INFO,
+  STAGE_ANGLED,
   animationDuration,
   clamp01,
   easeInOutCubic,
@@ -31,25 +36,35 @@ import {
   leafTurns,
   sampleTimeline,
   type CameraKey,
+  type TimelineBook,
   type TimelineSample,
 } from './animation';
+import { Backdrop, DEFAULT_BACKDROP, isSurface, resolveBackdrop, type ResolvedBackdrop } from './backdrop';
 import { ContactShadow } from './contactShadow';
 import { BookModel } from './geometry';
 import { SCENE_UNITS_PER_PT, computeLayout, type BookLayout } from './layout';
-import { BookMaterials, TextureCache } from './materials';
+import { LightRig, resolveLighting, type ResolvedLighting } from './lighting';
+import { BookMaterials, TextureCache, createCanvas } from './materials';
 import type {
+  AnimationInfo,
   AnimationMode,
   AnimationOptions,
+  BackdropOptions,
   BookSceneInput,
   BookSceneOptions,
   BookTextures,
+  CameraOptions,
+  CameraPose,
   EnvironmentOptions,
+  LightingOptions,
 } from './types';
 
 const DEFAULT_BACKGROUND = '#d9d4cb';
 /** Seconds to lay the book down / stand it up in the interactive viewer. */
 const STAGE_TIME = 0.7;
 const OPEN_TIME = 1.1;
+/** Framing margin around the book's bounds. */
+const MARGIN = 1.1;
 
 /** Time-based tween; `value` is eased unless `linear`. */
 class Tween {
@@ -90,20 +105,32 @@ class Tween {
   }
 }
 
+interface RestBounds {
+  corners: Vector3[];
+  center: Vector3;
+  size: Vector3;
+}
+
+interface SavedCamera {
+  position: Vector3;
+  target: Vector3;
+}
+
 export class BookScene {
   readonly canvas: HTMLCanvasElement;
   private readonly renderer: WebGLRenderer;
   private readonly scene = new Scene();
-  private readonly camera = new PerspectiveCamera(30, 1, 0.5, 800);
+  private readonly camera = new PerspectiveCamera(30, 1, 0.5, 1200);
   private readonly controls: OrbitControls;
   private readonly pmrem: PMREMGenerator;
   private readonly envTarget: WebGLRenderTarget;
-  private readonly key = new DirectionalLight(0xfff3e4, 2.6);
-  private readonly fill = new DirectionalLight(0xdde6ff, 0.4);
-  private readonly rim = new DirectionalLight(0xffffff, 0.8);
+  private readonly lights = new LightRig();
   private readonly ground: Mesh<PlaneGeometry, ShadowMaterial>;
-  private readonly contact = new ContactShadow(512);
   private readonly groundFade = { value: 30 };
+  private readonly contact = new ContactShadow(512);
+  private readonly backdrop = new Backdrop();
+  private readonly motion = new Group();
+  private readonly motionInner = new Group();
   /** Rotates the book between standing (0) and lying (1) about the tail edge of the back cover. */
   private readonly stagePivot = new Group();
   /** Scales a-space points to scene units and mirrors right-to-left books. */
@@ -115,12 +142,18 @@ export class BookScene {
   private model: BookModel | null = null;
   private materials: BookMaterials | null = null;
   private textures: BookTextures | null = null;
-  private env: Required<EnvironmentOptions> = { background: DEFAULT_BACKGROUND, lightIntensity: 1, shadows: true, showGround: true };
+
+  private lightingOpts: LightingOptions = { preset: 'studio' };
+  private lighting: ResolvedLighting = resolveLighting({ preset: 'studio' });
+  private backdropState: ResolvedBackdrop = DEFAULT_BACKDROP;
+  private shadows = true;
+  private span = 30;
 
   private readonly openTw = new Tween(0);
   private readonly leafTw = new Tween(0, true);
   private readonly stageTw = new Tween(0);
   private closePending = false;
+  private pose: CameraPose = 'standing';
 
   private mode: AnimationMode = 'none';
   private animOpts: AnimationOptions = {};
@@ -132,21 +165,25 @@ export class BookScene {
   private manual = true;
   private userCamera = false;
 
+  private sample: TimelineSample = { open: 0, leaves: [], stage: 0, cam: null };
+  private rest: RestBounds = { corners: [], center: new Vector3(), size: new Vector3(1, 1, 1) };
   private lastPose = '';
   private poseDirty = true;
   private dirty = true;
   private raf = 0;
   private offline = false;
+  private savedCamera: SavedCamera | null = null;
   private disposed = false;
-  private readonly tmpBox = new Box3();
-  private readonly tmpV = new Vector3();
+  private live = { w: 300, h: 150, pr: 1 };
 
   constructor(canvas: HTMLCanvasElement, opts?: BookSceneOptions) {
     this.canvas = canvas;
     const r = new WebGLRenderer({
       canvas,
       antialias: true,
-      alpha: false,
+      // Alpha so a transparent backdrop can be composited; opaque backdrops clear with alpha 1.
+      alpha: true,
+      premultipliedAlpha: true,
       preserveDrawingBuffer: !!opts?.preserveDrawingBuffer,
       powerPreference: 'high-performance',
     });
@@ -155,23 +192,18 @@ export class BookScene {
     r.toneMapping = ACESFilmicToneMapping;
     r.toneMappingExposure = 1;
     r.shadowMap.enabled = true;
-    // Variance shadow maps: a key light that reads like a large softbox.
+    // Variance shadow maps: blur radius gives a key light that reads like a large softbox.
     r.shadowMap.type = VSMShadowMap;
     r.shadowMap.autoUpdate = false;
     this.cache = new TextureCache(Math.min(8, r.capabilities.getMaxAnisotropy()));
 
-    this.env.background = opts?.background ?? DEFAULT_BACKGROUND;
+    this.backdropState = { ...DEFAULT_BACKDROP, color: opts?.background ?? DEFAULT_BACKGROUND };
     this.pmrem = new PMREMGenerator(r);
     const room = new RoomEnvironment();
     this.envTarget = this.pmrem.fromScene(room, 0.04);
     room.dispose();
     this.scene.environment = this.envTarget.texture;
-
-    this.key.castShadow = true;
-    this.key.shadow.mapSize.set(1024, 1024);
-    this.key.shadow.bias = -0.0003;
-    this.key.shadow.blurSamples = 24;
-    this.scene.add(this.key, this.key.target, this.fill, this.fill.target, this.rim, this.rim.target);
+    this.scene.add(...this.lights.objects);
 
     this.ground = new Mesh(new PlaneGeometry(400, 400).rotateX(-Math.PI / 2), new ShadowMaterial({ opacity: 0.22 }));
     // Fade the cast shadow out well inside the shadow frustum (no visible frustum edge).
@@ -191,10 +223,13 @@ export class BookScene {
     this.ground.receiveShadow = true;
     // VSM needs a backdrop in the shadow map, or the blur mixes the book with the far plane.
     this.ground.castShadow = true;
-    this.scene.add(this.ground, this.contact.group);
+    this.scene.add(this.ground, this.contact.group, this.backdrop.group);
 
     this.stagePivot.add(this.root);
-    this.scene.add(this.stagePivot);
+    this.motionInner.add(this.stagePivot);
+    this.motion.add(this.motionInner);
+    this.motion.rotation.order = 'YXZ';
+    this.scene.add(this.motion);
 
     this.controls = new OrbitControls(this.camera, canvas);
     this.controls.enableDamping = true;
@@ -207,11 +242,11 @@ export class BookScene {
       this.dirty = true;
     });
 
-    this.applyEnvironment();
+    this.applyLighting();
+    this.applyBackdrop();
     const w = canvas.clientWidth || canvas.width || 300;
     const h = canvas.clientHeight || canvas.height || 150;
     this.resize(w, h, typeof window !== 'undefined' ? window.devicePixelRatio : 1);
-    this.frameCamera(this.staticSample());
     this.raf = requestAnimationFrame(this.frame);
   }
 
@@ -253,10 +288,12 @@ export class BookScene {
     this.root.scale.set(sx * k, k, k);
     this.root.position.set(-sx * k * ((layout.a0 + layout.a1) / 2), 0, -zt);
     this.root.add(model.group);
+    this.span = Math.max(layout.a1 - layout.a0, layout.coverH, layout.W * 2) * k;
     // Clamp the interactive leaf state to the leaves this book models.
-    const n = layout.nTurn;
-    if (this.leafTw.value > n) this.leafTw.set(n);
-    this.placeLights();
+    if (this.leafTw.value > layout.nTurn) this.leafTw.set(layout.nTurn);
+    this.placeShadowFrustum();
+    this.applyLighting();
+    this.applyBackdrop();
     this.lastPose = '';
     this.poseDirty = true;
     this.dirty = true;
@@ -273,25 +310,12 @@ export class BookScene {
     this.materials = null;
   }
 
-  /** Light rig and shadow frusta sized to the book. */
-  private placeLights(): void {
-    const L = this.layout;
-    if (!L) return;
-    const k = SCENE_UNITS_PER_PT;
-    const span = Math.max(L.a1 - L.a0, L.coverH, L.W * 2) * k;
+  /** Shadow frustum, contact-shadow area and orbit limits sized to the book. */
+  private placeShadowFrustum(): void {
+    const span = this.span;
     const reach = span * 1.35;
     const dist = span * 3;
-    const center = new Vector3(0, 0, 0);
-    const place = (light: DirectionalLight, dir: [number, number, number]) => {
-      const d = new Vector3(dir[0], dir[1], dir[2]).normalize().multiplyScalar(dist);
-      light.position.copy(center).add(d);
-      light.target.position.copy(center);
-      light.target.updateMatrixWorld();
-    };
-    place(this.key, [-0.95, 1.25, 0.55]);
-    place(this.fill, [0.9, 0.5, 0.4]);
-    place(this.rim, [0.2, 0.7, -1]);
-    const cam = this.key.shadow.camera;
+    const cam = this.lights.key.shadow.camera;
     cam.left = -reach;
     cam.right = reach;
     cam.top = reach;
@@ -299,47 +323,134 @@ export class BookScene {
     cam.near = dist * 0.3;
     cam.far = dist * 2;
     cam.updateProjectionMatrix();
-    // ~1 cm penumbra whatever the book size; the shadow fades out before the frustum edge.
-    this.key.shadow.radius = Math.min(24, Math.max(6, 1 / ((2 * reach) / this.key.shadow.mapSize.x)));
-    this.key.shadow.normalBias = 0.0006 * span;
+    this.lights.key.shadow.normalBias = 0.0006 * span;
     this.groundFade.value = reach;
-    this.contact.setArea(0, 0, span * 2.4, span * 2.4, Math.max(L.thick, L.coverH) * k * 0.8);
-    this.controls.minDistance = span * 0.35;
+    const L = this.layout;
+    this.contact.setArea(0, 0, span * 2.4, span * 2.4, (L ? Math.max(L.thick, L.coverH) * SCENE_UNITS_PER_PT : span) * 0.8);
+    this.controls.minDistance = span * 0.2;
     this.controls.maxDistance = span * 12;
     this.renderer.shadowMap.needsUpdate = true;
   }
 
   /* ----------------------------------------------------------------------- */
-  /* Environment                                                              */
+  /* Environment, lighting, backdrop, camera                                  */
   /* ----------------------------------------------------------------------- */
 
+  /** Legacy switchboard, mapped onto setBackdrop / setLighting. */
   setEnvironment(opts: EnvironmentOptions): void {
-    this.env = {
-      background: opts.background ?? this.env.background,
-      lightIntensity: opts.lightIntensity ?? this.env.lightIntensity,
-      shadows: opts.shadows ?? this.env.shadows,
-      showGround: opts.showGround ?? this.env.showGround,
-    };
-    this.applyEnvironment();
+    if (opts.lightIntensity != null || opts.shadows != null) {
+      if (opts.shadows != null) this.shadows = opts.shadows;
+      if (opts.lightIntensity != null) this.lightingOpts = { ...this.lightingOpts, intensity: opts.lightIntensity };
+      this.applyLighting();
+    }
+    const p = this.backdropState.preset;
+    const colourDriven = p === 'solid' || p === 'gradient' || p === 'studio-sweep';
+    this.setBackdrop({
+      preset: p,
+      color: opts.background != null && colourDriven ? opts.background : undefined,
+      showGround: opts.showGround,
+    });
   }
 
-  private applyEnvironment(): void {
-    const e = this.env;
-    const bg = new Color(e.background);
-    this.scene.background = bg;
-    this.renderer.setClearColor(bg, 1);
-    const li = Math.max(0, e.lightIntensity);
-    this.key.intensity = 2.6 * li;
-    this.fill.intensity = 0.4 * li;
-    this.rim.intensity = 0.8 * li;
-    this.scene.environmentIntensity = 0.6 * li;
-    this.key.castShadow = e.shadows;
-    this.ground.visible = e.showGround && e.shadows;
-    this.contact.group.visible = e.showGround;
-    this.controls.maxPolarAngle = e.showGround ? Math.PI / 2 - 0.03 : Math.PI;
+  setLighting(o: LightingOptions): void {
+    // A new preset replaces the look; fields without a preset refine the current one.
+    this.lightingOpts = o.preset ? { ...o } : { ...this.lightingOpts, ...o };
+    this.applyLighting();
+  }
+
+  setBackdrop(o: BackdropOptions): void {
+    this.backdropState = resolveBackdrop(o, this.backdropState);
+    this.applyBackdrop();
+  }
+
+  /** True when the backdrop clears to alpha 0 (stills / WebM can be composited). */
+  hasTransparentBackground(): boolean {
+    return this.backdropState.preset === 'transparent';
+  }
+
+  private applyLighting(): void {
+    const l = resolveLighting(this.lightingOpts);
+    this.lighting = l;
+    this.lights.apply(l, new Vector3(0, 0, 0), this.span, !!this.layout?.rtl, this.shadows);
+    this.renderer.toneMappingExposure = l.exposure;
+    this.scene.environmentIntensity = 0.55 * l.ambient;
+    this.applyShadowStrength();
+    this.applyBackground();
+    this.renderer.shadowMap.needsUpdate = true;
+    this.dirty = true;
+  }
+
+  private applyBackdrop(): void {
+    const st = this.backdropState;
+    this.backdrop.build(st, this.span, this.cache.anisotropy);
+    // The flat shadow catcher lies on every floor (plain, surface or cove) and stays in the shadow
+    // map as the VSM backdrop even when the ground is hidden.
+    const catcher = st.showGround;
+    this.ground.visible = true;
+    this.ground.castShadow = true;
+    this.ground.material.colorWrite = catcher;
+    this.ground.material.depthWrite = catcher;
+    this.contact.group.visible = st.showGround;
+    this.controls.maxPolarAngle = st.showGround ? Math.PI / 2 - 0.03 : Math.PI;
+    this.applyShadowStrength();
+    this.applyBackground();
     this.renderer.shadowMap.needsUpdate = true;
     this.poseDirty = true;
     this.dirty = true;
+  }
+
+  /** Cast-shadow strength: softer light gives lighter shadows; textured floors need more. */
+  private applyShadowStrength(): void {
+    const p = this.backdropState.preset;
+    const textured = isSurface(p) || p === 'studio-sweep';
+    this.ground.material.opacity = (0.3 - 0.12 * this.lighting.shadowSoftness) * (textured ? 1.7 : 1);
+  }
+
+  private applyBackground(): void {
+    const bg: Color | Texture | null = this.backdrop.background(this.lighting.backdrop);
+    this.scene.background = bg;
+    if (bg === null) this.renderer.setClearColor(0x000000, 0);
+    else if (bg instanceof Color) this.renderer.setClearColor(bg, 1);
+    else this.renderer.setClearColor(0x000000, 1);
+    this.dirty = true;
+  }
+
+  setCamera(o: CameraOptions): void {
+    if (o.fov != null && Number.isFinite(o.fov)) {
+      const prev = this.camera.fov;
+      const fov = Math.max(15, Math.min(75, o.fov));
+      this.camera.fov = fov;
+      this.camera.updateProjectionMatrix();
+      if (this.userCamera) {
+        // Keep the book the same size on screen: dolly with the lens change.
+        const k = Math.tan((prev * Math.PI) / 360) / Math.tan((fov * Math.PI) / 360);
+        const offset = this.camera.position.clone().sub(this.controls.target).multiplyScalar(k);
+        this.camera.position.copy(this.controls.target).add(offset);
+        this.controls.update();
+      } else this.applyCurrent();
+      this.dirty = true;
+    }
+    if (o.pose && o.pose !== this.pose) {
+      this.pose = o.pose;
+      this.enterManual();
+      const now = performance.now();
+      if (o.pose === 'open') {
+        this.closePending = false;
+        const lying = this.stageTw.value >= 0.999;
+        this.stageTw.animate(1, now, lying ? 0.001 : STAGE_TIME);
+        this.openTw.animate(1, now, OPEN_TIME * Math.max(0.35, 1 - this.openTw.value), lying ? 0 : STAGE_TIME * 0.9);
+      } else if (this.openTw.value > 0.001) {
+        this.openTw.animate(0, now, OPEN_TIME * Math.max(0.35, this.openTw.value));
+        this.closePending = true;
+      } else {
+        this.stageTw.animate(this.restStage(), now, STAGE_TIME);
+      }
+      this.dirty = true;
+    }
+  }
+
+  private restStage(): number {
+    return this.pose === 'standing' ? 0 : this.pose === 'angled' ? STAGE_ANGLED : 1;
   }
 
   /* ----------------------------------------------------------------------- */
@@ -350,9 +461,13 @@ export class BookScene {
     return this.layout?.nTurn ?? 0;
   }
 
+  private book(): TimelineBook {
+    return { nTurn: this.nTurn(), height: this.layout?.coverH ?? 600 };
+  }
+
   /** Hand the pose to setOpen/setLeaf (pauses a running animation). */
   private enterManual(): void {
-    if (this.mode !== 'none') {
+    if (this.mode !== 'none' && !this.manual) {
       this.playing = false;
       // Continue from wherever the timeline left the book.
       const s = this.timelineSample(this.time);
@@ -375,16 +490,14 @@ export class BookScene {
       this.stageTw.animate(1, now, lying ? 0.001 : STAGE_TIME);
       if (animate) this.openTw.animate(a, now, OPEN_TIME * Math.max(0.35, Math.abs(a - this.openTw.value)), lying ? 0 : STAGE_TIME * 0.9);
       else this.openTw.set(a);
+    } else if (animate) {
+      // Turned leaves close together with the cover; then the book returns to its resting pose.
+      this.openTw.animate(0, now, OPEN_TIME * Math.max(0.35, this.openTw.value));
+      this.closePending = true;
     } else {
-      // Turned leaves close together with the cover; then the book stands back up.
-      if (animate) {
-        this.openTw.animate(0, now, OPEN_TIME * Math.max(0.35, this.openTw.value));
-        this.closePending = true;
-      } else {
-        this.openTw.set(0);
-        this.leafTw.set(0);
-        this.stageTw.animate(0, now, STAGE_TIME);
-      }
+      this.openTw.set(0);
+      this.leafTw.set(0);
+      this.stageTw.animate(this.restStage(), now, STAGE_TIME);
     }
     this.dirty = true;
   }
@@ -428,7 +541,7 @@ export class BookScene {
     if (this.closePending && !this.openTw.active) {
       this.closePending = false;
       this.leafTw.set(0);
-      this.stageTw.animate(0, now, STAGE_TIME);
+      this.stageTw.animate(this.restStage(), now, STAGE_TIME);
       active = true;
     }
     return active;
@@ -475,7 +588,19 @@ export class BookScene {
   }
 
   getAnimationDuration(): number {
-    return animationDuration(this.mode, this.animOpts, this.nTurn());
+    return animationDuration(this.mode, this.animOpts, this.book());
+  }
+
+  /** Every available animation, with its duration for the current book. */
+  getAnimations(): AnimationInfo[] {
+    const book = this.book();
+    const jacket = this.model?.hasJacket ?? false;
+    return ANIMATION_INFO.map((a) => ({
+      id: a.id,
+      label: a.label,
+      duration: +animationDuration(a.id, { pagesToTurn: this.animOpts.pagesToTurn }, book).toFixed(2),
+      description: a.id === 'jacket-off' && !jacket ? `${a.description} This book has no jacket, so only the camera move plays.` : a.description,
+    }));
   }
 
   seek(t: number): void {
@@ -489,7 +614,7 @@ export class BookScene {
   }
 
   private timelineSample(t: number): TimelineSample {
-    return sampleTimeline(this.mode, this.animOpts, t, this.nTurn(), {
+    return sampleTimeline(this.mode, this.animOpts, t, this.book(), {
       open: this.openTw.value,
       leaf: this.leafTw.value,
       stage: this.stageTw.value,
@@ -508,15 +633,59 @@ export class BookScene {
   }
 
   private applySample(s: TimelineSample): void {
-    const key = `${s.open.toFixed(5)}|${s.stage.toFixed(5)}|${s.leaves.map((v) => v.toFixed(5)).join(',')}`;
-    this.stagePivot.rotation.x = (1 - clamp01(s.stage)) * (Math.PI / 2);
-    this.stagePivot.updateMatrixWorld(true);
-    if (this.model) this.model.setPose(s.open, s.leaves, clamp01(s.stage));
+    const stage = clamp01(s.stage);
+    const k = SCENE_UNITS_PER_PT;
+    // Pose at rest first (no rigid motion), to measure the bounds the camera frames.
+    this.motion.position.set(0, 0, 0);
+    this.motion.rotation.set(0, 0, 0);
+    this.motionInner.position.set(0, 0, 0);
+    this.stagePivot.rotation.x = (1 - stage) * (Math.PI / 2);
+    if (this.model) {
+      this.model.setPose(s.open, s.leaves, stage);
+      this.model.setJacketOffset(s.jacket ?? 0);
+    }
+    this.motion.updateMatrixWorld(true);
+    this.measureRest(s.open);
+    const lift = s.lift ?? 0, spin = s.spin ?? 0, tilt = s.tilt ?? 0;
+    if (lift !== 0 || spin !== 0 || tilt !== 0) {
+      const c = this.rest.center;
+      this.motion.position.set(c.x, lift * k, c.z);
+      this.motion.rotation.set(tilt, spin * (this.layout?.rtl ? -1 : 1), 0);
+      this.motionInner.position.set(-c.x, 0, -c.z);
+      this.motion.updateMatrixWorld(true);
+    }
+    const key = [s.open, stage, lift, spin, tilt, s.jacket ?? 0].map((v) => v.toFixed(5)).join('|') + s.leaves.map((v) => v.toFixed(5)).join(',');
     if (key !== this.lastPose) {
       this.lastPose = key;
       this.poseDirty = true;
     }
+    this.sample = s;
     this.dirty = true;
+  }
+
+  /** World-space bounds of the posed book without rigid motion. */
+  private measureRest(open: number): void {
+    const corners: Vector3[] = [];
+    const center = new Vector3();
+    const size = new Vector3(1, 1, 1);
+    if (this.model) {
+      const b = this.model.bounds(clamp01(open));
+      const m = this.model.group.matrixWorld;
+      const min = new Vector3(Infinity, Infinity, Infinity), max = new Vector3(-Infinity, -Infinity, -Infinity);
+      for (const a of [b.a0, b.a1]) for (const y of [b.y0, b.y1]) for (const z of [b.z0, b.z1]) {
+        const p = new Vector3(a, y, z).applyMatrix4(m);
+        corners.push(p);
+        min.min(p);
+        max.max(p);
+      }
+      center.addVectors(min, max).multiplyScalar(0.5);
+      size.subVectors(max, min);
+    } else {
+      for (const x of [-1, 1]) for (const y of [0, 2]) for (const z of [-1, 1]) corners.push(new Vector3(x * 8, y * 6, z * 11));
+      center.set(0, 6, 0);
+      size.set(16, 12, 22);
+    }
+    this.rest = { corners, center, size };
   }
 
   /* ----------------------------------------------------------------------- */
@@ -527,55 +696,71 @@ export class BookScene {
     return this.layout?.rtl ? 0.55 : -0.55;
   }
 
-  /** Place the camera to frame the book for a pose (auto framing). */
+  /** Direction from the target toward the camera for azimuth / elevation (radians). */
+  private static viewDir(az: number, el: number): Vector3 {
+    return new Vector3(Math.cos(el) * Math.sin(az), Math.sin(el), Math.cos(el) * Math.cos(az));
+  }
+
+  /**
+   * Smallest camera distance (from `center`, looking along −f) at which every corner of the rest
+   * bounds fits both the horizontal and the vertical field of view, with the framing margin.
+   */
+  private fitDistance(f: Vector3, aspect: number, center: Vector3, corners: Vector3[] = this.rest.corners): number {
+    const tanV = Math.tan((this.camera.fov * Math.PI) / 360);
+    const tanH = tanV * aspect;
+    const up = Math.abs(f.y) > 0.999 ? new Vector3(0, 0, -1) : new Vector3(0, 1, 0);
+    const r = up.cross(f).normalize();
+    const u = new Vector3().crossVectors(f, r);
+    const d = new Vector3();
+    let dist = 0.5;
+    for (const p of corners) {
+      d.subVectors(p, center);
+      const depth = d.dot(f);
+      dist = Math.max(dist, depth + Math.abs(d.dot(r)) / tanH, depth + Math.abs(d.dot(u)) / tanV);
+    }
+    return dist * MARGIN;
+  }
+
+  /** Place the camera to frame the book for a pose (auto framing, aspect aware). */
   private frameCamera(s: TimelineSample): void {
     const cam: CameraKey = s.cam ?? { az: 0, el: elevationFor(s.stage, s.open), zoom: 1 };
+    const sx = this.layout?.rtl ? -1 : 1;
     // The 3/4 view swings toward head-on as the book opens: a spread reads best square on.
-    const az = this.baseAzimuth() * (1 - 0.65 * clamp01(s.open)) + cam.az;
+    const az = this.baseAzimuth() * (1 - 0.65 * clamp01(s.open)) + sx * cam.az;
     const el = Math.max(0.03, Math.min(1.45, cam.el));
-    const center = this.tmpV;
-    const vfov = (this.camera.fov * Math.PI) / 180;
-    const tanV = Math.tan(vfov / 2);
-    const tanH = tanV * this.camera.aspect;
-    // Camera basis for a view: forward f points from the target toward the camera.
-    const basis = (azimuth: number) => {
-      const f = new Vector3(Math.cos(el) * Math.sin(azimuth), Math.sin(el), Math.cos(el) * Math.cos(azimuth));
-      const r = new Vector3(0, 1, 0).cross(f).normalize();
-      return { f, r, u: new Vector3().crossVectors(f, r) };
-    };
-    const views = cam.stable ? Array.from({ length: 12 }, (_, i) => basis((i * Math.PI) / 6)) : [basis(az)];
-    let dist = 30;
-    if (this.model) {
-      const b = this.model.bounds(clamp01(s.open));
-      this.model.group.updateWorldMatrix(true, false);
-      const box = this.tmpBox.makeEmpty();
-      const corners: Vector3[] = [];
-      for (const a of [b.a0, b.a1]) for (const y of [b.y0, b.y1]) for (const z of [b.z0, b.z1]) {
-        const p = new Vector3(a, y, z).applyMatrix4(this.model.group.matrixWorld);
-        corners.push(p);
-        box.expandByPoint(p);
-      }
-      box.getCenter(center);
-      // Smallest distance at which every corner of the bounds fits the frustum.
-      dist = 1;
-      const d = new Vector3();
-      for (const { f, r, u } of views) {
-        for (const p of corners) {
-          d.subVectors(p, center);
-          const depth = d.dot(f);
-          dist = Math.max(dist, depth + Math.abs(d.dot(r)) / tanH, depth + Math.abs(d.dot(u)) / tanV);
-        }
-      }
-      dist *= 1.1 * cam.zoom;
-    } else center.set(0, 0, 0);
-    this.camera.position.set(
-      center.x + dist * Math.cos(el) * Math.sin(az),
-      center.y + dist * Math.sin(el),
-      center.z + dist * Math.cos(el) * Math.cos(az),
-    );
-    this.camera.lookAt(center);
-    this.controls.target.copy(center);
+    const { size } = this.rest;
+    let corners = this.rest.corners;
+    const center = this.rest.center.clone();
+    if (cam.headroom && cam.headroom > 0) {
+      // Keep the book's highest point in frame as well (it rises above its rest position).
+      const up = cam.headroom * SCENE_UNITS_PER_PT;
+      corners = [...corners, ...corners.map((p) => p.clone().setY(p.y + up))];
+      center.y += up / 2;
+    }
+    const aspect = this.camera.aspect;
+    let dist = 0;
+    if (cam.stable) {
+      for (let i = 0; i < 12; i++) dist = Math.max(dist, this.fitDistance(BookScene.viewDir((i * Math.PI) / 6, el), aspect, center, corners));
+    } else dist = this.fitDistance(BookScene.viewDir(az, el), aspect, center, corners);
+    dist *= cam.zoom;
+    const target = center.clone();
+    if (cam.pan) target.add(new Vector3(size.x * cam.pan[0] * sx, size.y * cam.pan[1], size.z * cam.pan[2]));
+    this.camera.position.copy(target).addScaledVector(BookScene.viewDir(az, el), dist);
+    this.camera.lookAt(target);
+    this.controls.target.copy(target);
     this.dirty = true;
+  }
+
+  /** Re-fit a user-placed camera to another aspect, keeping its direction and relative zoom. */
+  private refitUserCamera(fromAspect: number, toAspect: number): void {
+    const target = this.controls.target;
+    const offset = this.camera.position.clone().sub(target);
+    const dist = offset.length();
+    if (dist < 1e-6) return;
+    const f = offset.clone().normalize();
+    const ratio = dist / this.fitDistance(f, fromAspect, target);
+    this.camera.position.copy(target).addScaledVector(f, ratio * this.fitDistance(f, toAspect, target));
+    this.camera.lookAt(target);
   }
 
   resetCamera(): void {
@@ -590,14 +775,22 @@ export class BookScene {
 
   resize(width: number, height: number, pixelRatio?: number): void {
     this.offline = false;
+    if (this.savedCamera) {
+      this.camera.position.copy(this.savedCamera.position);
+      this.controls.target.copy(this.savedCamera.target);
+      this.savedCamera = null;
+    }
     const w = Math.max(1, Math.round(width));
     const h = Math.max(1, Math.round(height));
-    const pr = pixelRatio ?? (typeof window !== 'undefined' ? window.devicePixelRatio : 1);
-    this.renderer.setPixelRatio(Math.min(2, Math.max(0.5, pr)));
+    const pr = Math.min(2, Math.max(0.5, pixelRatio ?? (typeof window !== 'undefined' ? window.devicePixelRatio : 1)));
+    const fromAspect = this.camera.aspect;
+    this.live = { w, h, pr };
+    this.renderer.setPixelRatio(pr);
     this.renderer.setSize(w, h, false);
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
     if (!this.userCamera) this.applyCurrent();
+    else if (Math.abs(fromAspect - this.camera.aspect) > 1e-3) this.refitUserCamera(fromAspect, this.camera.aspect);
     this.dirty = true;
   }
 
@@ -605,20 +798,74 @@ export class BookScene {
     this.renderNow();
   }
 
-  renderFrame(t: number, width: number, height: number): HTMLCanvasElement {
-    // Hold the live loop until the caller restores the size with resize().
-    this.offline = true;
-    const w = Math.max(2, Math.round(width));
-    const h = Math.max(2, Math.round(height));
+  /** Size the drawing buffer for an offline render and aim the camera for that aspect. */
+  private prepareOffline(w: number, h: number): void {
     if (this.canvas.width !== w || this.canvas.height !== h || this.renderer.getPixelRatio() !== 1) {
       this.renderer.setPixelRatio(1);
       this.renderer.setSize(w, h, false);
     }
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
-    this.applyAt(t, true);
+  }
+
+  /**
+   * For video export: pose at t (timeline modes pose the camera too), render at exactly
+   * width × height into the scene canvas and return it. The caller restores the size with resize().
+   */
+  renderFrame(t: number, width: number, height: number): HTMLCanvasElement {
+    // Hold the live loop until the caller restores the size with resize().
+    this.offline = true;
+    const w = Math.max(2, Math.round(width));
+    const h = Math.max(2, Math.round(height));
+    const liveAspect = this.live.w / this.live.h;
+    this.prepareOffline(w, h);
+    const timeline = this.mode !== 'none' && !this.manual;
+    if (timeline || !this.userCamera) this.applyAt(t, true);
+    else {
+      this.applyAt(t, false);
+      if (!this.savedCamera) this.savedCamera = { position: this.camera.position.clone(), target: this.controls.target.clone() };
+      this.camera.position.copy(this.savedCamera.position);
+      this.controls.target.copy(this.savedCamera.target);
+      this.refitUserCamera(liveAspect, w / h);
+    }
     this.renderNow();
     return this.canvas;
+  }
+
+  /**
+   * A still of the current pose and camera at exactly width × height (aspect-aware framing; a
+   * transparent backdrop gives alpha). Returns a separate 2D canvas, ready for toBlob(); the live
+   * view is restored before returning.
+   */
+  renderStill(width: number, height: number): HTMLCanvasElement {
+    const w = Math.max(2, Math.round(width));
+    const h = Math.max(2, Math.round(height));
+    const wasOffline = this.offline;
+    this.offline = true;
+    const position = this.camera.position.clone();
+    const target = this.controls.target.clone();
+    const liveAspect = this.live.w / this.live.h;
+    // The current pose, even if the render loop hasn't applied the latest setOpen / setLeaf yet.
+    if (this.manual || this.mode === 'none') this.applySample(this.staticSample());
+    this.prepareOffline(w, h);
+    if (this.userCamera) this.refitUserCamera(liveAspect, w / h);
+    else this.frameCamera(this.sample);
+    this.renderNow();
+    const out = createCanvas(w, h);
+    const ctx = out.getContext('2d');
+    if (ctx) ctx.drawImage(this.canvas, 0, 0, w, h);
+    // Restore the live view.
+    this.renderer.setPixelRatio(this.live.pr);
+    this.renderer.setSize(this.live.w, this.live.h, false);
+    this.camera.aspect = this.live.w / this.live.h;
+    this.camera.updateProjectionMatrix();
+    this.camera.position.copy(position);
+    this.controls.target.copy(target);
+    this.camera.lookAt(target);
+    this.offline = wasOffline;
+    this.dirty = true;
+    if (!wasOffline) this.renderNow();
+    return out;
   }
 
   snapshot(): string {
@@ -627,21 +874,25 @@ export class BookScene {
   }
 
   private sortTransparentLeaves(): void {
-    if (!this.model) return;
-    const leaves = this.model.transparentLeaves();
+    const model = this.model;
+    if (!model) return;
+    const leaves = model.transparentLeaves();
     if (leaves.length === 0) return;
     const cam = this.camera.position;
     const p = new Vector3();
     const sorted = leaves
-      .map((l) => ({ l, d: p.set(l.center[0], l.center[1], l.center[2]).applyMatrix4(this.model!.group.matrixWorld).distanceToSquared(cam) }))
+      .map((l) => ({ l, d: p.set(l.center[0], l.center[1], l.center[2]).applyMatrix4(model.group.matrixWorld).distanceToSquared(cam) }))
       .sort((x, y) => y.d - x.d);
     sorted.forEach((e, i) => { e.l.mesh.renderOrder = 10 + i; });
   }
 
   private renderNow(): void {
     if (this.disposed) return;
+    // Keep the cove's wall behind the book, whatever the camera does.
+    const c = this.rest.center;
+    this.backdrop.follow(c.x, c.z, Math.atan2(this.camera.position.x - c.x, this.camera.position.z - c.z));
     if (this.poseDirty) {
-      if (this.env.showGround && this.model) this.contact.render(this.renderer, this.scene, [this.ground]);
+      if (this.backdropState.showGround && this.model) this.contact.render(this.renderer, this.scene, [this.ground, this.backdrop.group]);
       this.renderer.shadowMap.needsUpdate = true;
       this.poseDirty = false;
     }
@@ -681,6 +932,7 @@ export class BookScene {
     this.disposeModel();
     this.cache.dispose();
     this.contact.dispose();
+    this.backdrop.dispose();
     this.ground.geometry.dispose();
     this.ground.material.dispose();
     this.envTarget.dispose();

@@ -1,10 +1,11 @@
-import React, { useEffect, useRef, useState, type ReactNode } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
+import { createPortal } from 'react-dom';
 import clsx from 'clsx';
 import { ChevronDown, ChevronRight } from 'lucide-react';
 import type { Unit } from '../../model/types';
 import { fromPt, parseLength, UNIT_DECIMALS, UNIT_STEP, toPt } from '../../model/units';
 import { useStore } from '../../store/store';
-import { rgbToCmyk } from '../../lib/color';
+import { ColorPicker } from './ColorPicker';
 
 /* -------------------------------------------------------------------------- */
 /* Layout                                                                      */
@@ -227,7 +228,7 @@ export function Select<T extends string | number>({ label, value, options, onCha
 
 export function Toggle({ label, checked, onChange, hint }: { label: ReactNode; checked: boolean; onChange: (v: boolean) => void; hint?: string }) {
   return (
-    <label className="flex cursor-pointer select-none items-center gap-2 text-[11.5px] text-ink-200" title={hint}>
+    <label className="relative flex cursor-pointer select-none items-center gap-2 text-[11.5px] text-ink-200" title={hint}>
       <span
         className={clsx('relative inline-flex h-[15px] w-[26px] shrink-0 rounded-full transition-colors', checked ? 'bg-rubric' : 'bg-ink-600')}
       >
@@ -325,63 +326,115 @@ export function IconButton({ children, onClick, active, title, className, disabl
 /* Colour                                                                      */
 /* -------------------------------------------------------------------------- */
 
+const POPOVER_W = 252;
+const POPOVER_M = 8;
+
+/**
+ * Colour field: a swatch button that opens the full ColorPicker in a portal on
+ * document.body, positioned (fixed) next to the button and kept inside the
+ * viewport, so scroll containers and overflow never clip it.
+ */
 export function ColorField({ label, value, onChange, allowNone, hint }: {
   label?: string; value: string | null; onChange: (v: string | null) => void; allowNone?: boolean; hint?: string;
 }) {
   const swatches = useStore((s) => s.project.swatches);
   const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLDivElement>(null);
+  const btnRef = useRef<HTMLButtonElement>(null);
+  const popRef = useRef<HTMLDivElement>(null);
+  const [pos, setPos] = useState<{ left: number; top: number; maxH: number } | null>(null);
+  const lastColor = useRef(value ?? '#000000');
+  if (value) lastColor.current = value;
+
+  const place = useCallback(() => {
+    const b = btnRef.current;
+    if (!b) return;
+    const r = b.getBoundingClientRect();
+    const vw = window.innerWidth, vh = window.innerHeight;
+    const h = popRef.current?.offsetHeight ?? 420;
+    const left = Math.max(POPOVER_M, Math.min(r.left, vw - POPOVER_W - POPOVER_M));
+    let top = r.bottom + 4;
+    if (top + h > vh - POPOVER_M) {
+      const above = r.top - 4 - h;
+      top = above >= POPOVER_M ? above : Math.max(POPOVER_M, vh - POPOVER_M - h);
+    }
+    setPos((o) => (o && o.left === left && o.top === top && o.maxH === vh - 2 * POPOVER_M ? o : { left, top, maxH: vh - 2 * POPOVER_M }));
+  }, []);
+
+  useLayoutEffect(() => {
+    if (!open) { setPos(null); return; }
+    place();
+  }, [open, place]);
+
   useEffect(() => {
     if (!open) return;
-    const close = (e: PointerEvent) => { if (!ref.current?.contains(e.target as Node)) setOpen(false); };
-    window.addEventListener('pointerdown', close);
-    return () => window.removeEventListener('pointerdown', close);
-  }, [open]);
+    const onDown = (e: PointerEvent) => {
+      const t = e.target as Node;
+      if (btnRef.current?.contains(t) || popRef.current?.contains(t)) return;
+      setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      e.stopPropagation();
+      setOpen(false);
+      btnRef.current?.focus();
+    };
+    window.addEventListener('pointerdown', onDown, true);
+    window.addEventListener('keydown', onKey, true);
+    window.addEventListener('resize', place);
+    window.addEventListener('scroll', place, true);
+    const ro = typeof ResizeObserver !== 'undefined' && popRef.current ? new ResizeObserver(place) : null;
+    if (ro && popRef.current) ro.observe(popRef.current);
+    return () => {
+      window.removeEventListener('pointerdown', onDown, true);
+      window.removeEventListener('keydown', onKey, true);
+      window.removeEventListener('resize', place);
+      window.removeEventListener('scroll', place, true);
+      ro?.disconnect();
+    };
+  }, [open, place]);
+
   const swatch = value ? swatches.find((s) => s.hex.toLowerCase() === value.toLowerCase()) : null;
-  const cmyk = value ? swatch?.cmyk ?? rgbToCmyk(value) : null;
   return (
-    <div className="relative min-w-0" ref={ref} title={hint}>
+    <div className="relative min-w-0" title={hint}>
       {label && <Label>{label}</Label>}
       <button
+        ref={btnRef}
         type="button"
+        aria-haspopup="dialog"
+        aria-expanded={open}
         onClick={() => setOpen(!open)}
-        className="mt-0.5 flex h-7 w-full items-center gap-2 rounded-[5px] border border-ink-700 bg-ink-900 px-1.5 text-left text-[11.5px] hover:border-ink-500"
+        className={clsx(
+          'mt-0.5 flex h-7 w-full items-center gap-2 rounded-[5px] border bg-ink-900 px-1.5 text-left text-[11.5px] hover:border-ink-500',
+          open ? 'border-ink-400' : 'border-ink-700',
+        )}
       >
         <span className={clsx('h-4 w-4 shrink-0 rounded-[3px] border border-white/15', !value && 'checker')} style={value ? { background: value } : undefined} />
         <span className="truncate text-ink-200">{value ? swatch?.name ?? value : 'None'}</span>
       </button>
-      {open && (
-        <div className="absolute left-0 top-full z-50 mt-1 w-56 rounded-md border border-ink-600 bg-ink-800 p-2 shadow-2xl">
-          <div className="flex items-center gap-2">
-            <input type="color" className="h-8 w-10 cursor-pointer" value={value && /^#[0-9a-f]{6}$/i.test(value) ? value : '#000000'} onChange={(e) => onChange(e.target.value)} />
-            <input
-              className="h-7 w-full rounded border border-ink-700 bg-ink-900 px-1.5 font-mono text-[11px] text-ink-100 outline-none"
-              value={value ?? ''}
-              placeholder="#000000"
-              onChange={(e) => { const v = e.target.value.trim(); if (/^#[0-9a-f]{6}$/i.test(v)) onChange(v); }}
-            />
-          </div>
-          {cmyk && (
-            <p className="mt-1.5 font-mono text-[10px] text-ink-400">
-              {swatch?.cmyk ? 'Swatch ' : '≈ '}C{Math.round(cmyk.c)} M{Math.round(cmyk.m)} Y{Math.round(cmyk.y)} K{Math.round(cmyk.k)}
-            </p>
+      {open && createPortal(
+        <div
+          ref={popRef}
+          role="dialog"
+          aria-label={label ? `${label} colour` : 'Colour'}
+          className="scroll-thin fixed z-[1000] overflow-y-auto rounded-lg border border-ink-600 bg-ink-800 p-2.5 text-ink-100 shadow-2xl"
+          style={{ width: POPOVER_W, left: pos?.left ?? -9999, top: pos?.top ?? -9999, maxHeight: pos?.maxH, visibility: pos ? 'visible' : 'hidden' }}
+        >
+          {allowNone && (
+            <button
+              type="button"
+              onClick={() => { onChange(null); setOpen(false); }}
+              className={clsx(
+                'mb-2 flex h-6 w-full items-center gap-2 rounded-[4px] border px-1.5 text-[11px]',
+                value ? 'border-ink-700 text-ink-300 hover:border-ink-500 hover:text-ink-100' : 'border-ink-400 text-ink-100',
+              )}
+            >
+              <span className="checker h-3.5 w-3.5 rounded-[3px] border border-white/15" />
+              No colour
+            </button>
           )}
-          <div className="mt-2 grid grid-cols-8 gap-1">
-            {allowNone && (
-              <button type="button" title="None" className="checker h-5 w-5 rounded-[3px] border border-white/15" onClick={() => { onChange(null); setOpen(false); }} />
-            )}
-            {swatches.map((s) => (
-              <button
-                key={s.id}
-                type="button"
-                title={`${s.name}${s.cmyk ? ` — C${s.cmyk.c} M${s.cmyk.m} Y${s.cmyk.y} K${s.cmyk.k}` : ''}`}
-                className={clsx('h-5 w-5 rounded-[3px] border', value?.toLowerCase() === s.hex.toLowerCase() ? 'border-white' : 'border-white/15')}
-                style={{ background: s.hex }}
-                onClick={() => { onChange(s.hex); setOpen(false); }}
-              />
-            ))}
-          </div>
-        </div>
+          <ColorPicker value={value ?? lastColor.current} onChange={(c) => onChange(c)} swatches={swatches} compact />
+        </div>,
+        document.body,
       )}
     </div>
   );

@@ -17,7 +17,8 @@ import {
   Vector2,
   type WebGLProgramParametersWithUniforms,
 } from 'three';
-import type { CoverFinish, EdgeTreatment } from '../model/types';
+import type { CoverFinish, EdgeTreatment, JacketFinish } from '../model/types';
+import { jacketSpec, type JacketCalc } from '../engine/binding';
 import { hash2, rng } from '../lib/random';
 import { mix, parseColor } from '../lib/color';
 import { mm } from '../model/units';
@@ -48,7 +49,7 @@ const smooth = (e0: number, e1: number, x: number) => {
 };
 
 /** Tileable value noise: lattice periods px × py cells. */
-function tileNoise(x: number, y: number, px: number, py: number, seed: number): number {
+export function tileNoise(x: number, y: number, px: number, py: number, seed: number): number {
   const xi = Math.floor(x), yi = Math.floor(y);
   const xf = x - xi, yf = y - yi;
   const u = xf * xf * (3 - 2 * xf), v = yf * yf * (3 - 2 * yf);
@@ -59,7 +60,7 @@ function tileNoise(x: number, y: number, px: number, py: number, seed: number): 
   return a + (b - a) * u + (c - a) * v + (a - b - c + d) * u * v;
 }
 
-function tileFbm(x: number, y: number, px: number, py: number, octaves: number, seed: number): number {
+export function tileFbm(x: number, y: number, px: number, py: number, octaves: number, seed: number): number {
   let amp = 0.5, f = 1, sum = 0, norm = 0;
   for (let o = 0; o < octaves; o++) {
     sum += amp * tileNoise(x * f, y * f, px * f, py * f, seed + o * 31);
@@ -287,10 +288,36 @@ export function colorTexture(canvas: HTMLCanvasElement, anisotropy: number): Can
  * a height map (deboss/foil impression) and an iridescence mask.
  */
 export function composeCover(tex: BookTextures | null, layout: BookLayout, finish: CoverFinish, material: string, anisotropy: number): CoverComposite {
-  const fp = finishParams(finish);
-  const map = layout.cover;
+  return composeSurface({
+    art: tex?.cover ?? null,
+    masks: tex?.finishMasks ?? {},
+    totalW: layout.cover.totalW,
+    totalH: layout.cover.totalH,
+    fp: finishParams(finish),
+    base: material,
+    anisotropy,
+  });
+}
+
+export interface SurfaceSource {
+  art: HTMLCanvasElement | null;
+  masks: Partial<Record<FinishKey, HTMLCanvasElement>>;
+  /** Physical size the art covers, pt. */
+  totalW: number;
+  totalH: number;
+  fp: FinishParams;
+  /** Fill colour under (or instead of) the art. */
+  base: string;
+  anisotropy: number;
+}
+
+/** Same as composeCover for any printed wrapper (the dust jacket uses it too). */
+export function composeSurface(src: SurfaceSource): CoverComposite {
+  const { fp, anisotropy } = src;
+  const map = { totalW: Math.max(1, src.totalW), totalH: Math.max(1, src.totalH) };
+  const material = src.base;
   let w: number, h: number;
-  const art = tex?.cover ?? null;
+  const art = src.art;
   if (art && art.width > 1 && art.height > 1) {
     // Cap the working size (the finishing pass is per-pixel): ≤ 4096 px and ≤ 6 MP.
     const k = Math.min(1, 4096 / Math.max(art.width, art.height), Math.sqrt(6e6 / (art.width * art.height)));
@@ -308,7 +335,7 @@ export function composeCover(tex: BookTextures | null, layout: BookLayout, finis
   if (art && art.width > 1) cctx.drawImage(art, 0, 0, w, h);
 
   const masks: Partial<Record<FinishKey, Float32Array>> = {};
-  const entries = Object.entries(tex?.finishMasks ?? {}) as [FinishKey, HTMLCanvasElement | undefined][];
+  const entries = Object.entries(src.masks) as [FinishKey, HTMLCanvasElement | undefined][];
   const scratch = createCanvas(w, h);
   for (const [key, cnv] of entries) {
     if (!cnv || cnv.width < 1 || cnv.height < 1) continue;
@@ -623,6 +650,9 @@ export class TextureCache {
   private composite: CoverComposite | null = null;
   private compositeKey = '';
   private compositeTex: BookTextures | null = null;
+  private jacketComposite: CoverComposite | null = null;
+  private jacketKey = '';
+  private jacketTex: BookTextures | null = null;
   constructor(public anisotropy: number) {}
 
   /** Call when a new BookTextures arrives: reused canvases are re-uploaded, stale ones dropped. */
@@ -655,13 +685,38 @@ export class TextureCache {
     return this.composite;
   }
 
+  /** Dust-jacket composite (art + finish masks), cached like the cover. */
+  jacket(tex: BookTextures | null, jc: JacketCalc, finish: JacketFinish, paper: string): CoverComposite {
+    const totalW = jc.width + 2 * jc.bleed, totalH = jc.height + 2 * jc.bleed;
+    const key = [finish, paper, totalW.toFixed(2), totalH.toFixed(2)].join('|');
+    if (this.jacketComposite && this.jacketTex === tex && this.jacketKey === key) return this.jacketComposite;
+    this.jacketComposite?.dispose();
+    this.jacketComposite = composeSurface({
+      art: tex?.jacket ?? null,
+      masks: tex?.jacketFinishMasks ?? {},
+      totalW,
+      totalH,
+      fp: finishParams(JACKET_FINISH[finish] ?? 'matte'),
+      base: paper,
+      anisotropy: this.anisotropy,
+    });
+    this.jacketTex = tex;
+    this.jacketKey = key;
+    return this.jacketComposite;
+  }
+
   dispose(): void {
     for (const t of this.pages.values()) t.dispose();
     this.pages.clear();
     this.composite?.dispose();
     this.composite = null;
+    this.jacketComposite?.dispose();
+    this.jacketComposite = null;
   }
 }
+
+/** Jacket stock finishes expressed as covering finishes. */
+const JACKET_FINISH: Record<JacketFinish, CoverFinish> = { matte: 'matte', gloss: 'gloss', uncoated: 'paper', 'soft-touch': 'soft-touch' };
 
 /* ------------------------------------------------------------------------- */
 /* Material set                                                               */
@@ -720,10 +775,14 @@ export class BookMaterials {
   /** Leaves drawn with alpha blending (vellum). */
   readonly leafTransparent: boolean[] = [];
   readonly headbandTexture: CanvasTexture;
+  /** Dust jacket: printed outside and plain inside (null when the book has no jacket). */
+  readonly jacketOuter: MeshPhysicalMaterial | null = null;
+  readonly jacketInner: MeshStandardMaterial | null = null;
   private readonly owned: Texture[] = [];
   private readonly leafAlpha: Texture[] = [];
   private readonly detail: DetailUniforms;
   private readonly fp: FinishParams;
+  private readonly jfp: FinishParams | null = null;
 
   constructor(private readonly input: BookSceneInput, private readonly layout: BookLayout, private readonly cache: TextureCache) {
     const { spec } = input;
@@ -792,24 +851,62 @@ export class BookMaterials {
       this.leafBack.push(new MeshStandardMaterial({ roughness: 0.86 }));
       this.leafTransparent.push(false);
     }
+
+    if (input.jacket) {
+      const js = jacketSpec(spec);
+      const jfp = finishParams(JACKET_FINISH[js.finish] ?? 'matte');
+      this.jfp = jfp;
+      const jDetail = new CanvasTexture(makeDetailCanvas(jfp, 19));
+      jDetail.colorSpace = NoColorSpace;
+      jDetail.wrapS = jDetail.wrapT = RepeatWrapping;
+      jDetail.anisotropy = aniso;
+      this.owned.push(jDetail);
+      const jc = input.jacket;
+      const outer = new MeshPhysicalMaterial({
+        color: 0xffffff,
+        roughness: 1,
+        metalness: 1,
+        sheen: jfp.sheen,
+        sheenRoughness: jfp.sheenRoughness,
+        sheenColor: new Color('#ffffff'),
+        clearcoat: 0,
+        clearcoatRoughness: jfp.clearcoatRoughness,
+        bumpScale: 2.2,
+        iridescenceIOR: 1.65,
+        iridescenceThicknessRange: [180, 650],
+      });
+      installDetailBump(outer, {
+        detailMap: { value: jDetail },
+        detailRepeat: { value: new Vector2((jc.width + 2 * jc.bleed) / jfp.tile, (jc.height + 2 * jc.bleed) / jfp.tile) },
+        detailScale: { value: jfp.detail === 'none' ? 0 : jfp.detailScale },
+      });
+      this.jacketOuter = outer;
+      this.jacketInner = new MeshStandardMaterial({ color: new Color(js.paperColor || '#f4f0e8'), roughness: 0.9 });
+    }
   }
 
-  /** (Re)assign every texture-driven map. */
-  applyTextures(tex: BookTextures | null): void {
-    const { spec, pages } = this.input;
-    const L = this.layout;
-    const comp = this.cache.cover(tex, L, spec.cover.finish, spec.cover.material);
-    const m = this.cover;
+  private applyComposite(m: MeshPhysicalMaterial, comp: CoverComposite, fp: FinishParams): void {
     m.map = comp.color;
     m.roughnessMap = comp.surface;
     m.metalnessMap = comp.surface;
     m.bumpMap = comp.bump;
     m.clearcoat = comp.hasClearcoat ? 1 : 0;
     m.clearcoatMap = comp.hasClearcoat ? comp.surface : null;
-    m.clearcoatRoughness = comp.hasGloss ? 0.05 : this.fp.clearcoatRoughness;
+    m.clearcoatRoughness = comp.hasGloss ? 0.05 : fp.clearcoatRoughness;
     m.iridescence = comp.holo ? 1 : 0;
     m.iridescenceMap = comp.holo;
     m.needsUpdate = true;
+  }
+
+  /** (Re)assign every texture-driven map. */
+  applyTextures(tex: BookTextures | null): void {
+    const { spec, pages } = this.input;
+    const L = this.layout;
+    this.applyComposite(this.cover, this.cache.cover(tex, L, spec.cover.finish, spec.cover.material), this.fp);
+    if (this.jacketOuter && this.input.jacket && this.jfp) {
+      const js = jacketSpec(spec);
+      this.applyComposite(this.jacketOuter, this.cache.jacket(tex, this.input.jacket, js.finish, js.paperColor || '#f4f0e8'), this.jfp);
+    }
 
     for (const t of this.leafAlpha) t.dispose();
     this.leafAlpha.length = 0;
@@ -856,6 +953,8 @@ export class BookMaterials {
     for (const t of this.owned) t.dispose();
     for (const t of this.leafAlpha) t.dispose();
     const mats = [this.cover, this.coverStock, this.lining, this.endpaper, this.paper, this.edge, this.blockTop, this.thread, this.headband, ...this.leafFront, ...this.leafBack];
+    if (this.jacketOuter) mats.push(this.jacketOuter);
+    if (this.jacketInner) mats.push(this.jacketInner);
     for (const m of mats) m.dispose();
   }
 }

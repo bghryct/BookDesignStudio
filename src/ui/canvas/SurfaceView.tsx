@@ -1,6 +1,7 @@
 import React, { useMemo } from 'react';
 import type { Element, Project } from '../../model/types';
-import type { BindingCalc } from '../../engine/binding';
+import type { PanelLayout } from './geometry';
+type BindingCalc = PanelLayout;
 import { compileElement, compilePage, layoutText, cutoutPath, elementMatrix, type CompileContext } from '../../render/compile';
 import { primsToSvg } from '../../render/svgString';
 import { rectPath, multiply, type Prim, type Matrix } from '../../render/primitives';
@@ -80,7 +81,7 @@ export function SurfaceView({ project, surface, calc, rasterScale }: Props) {
   const mctx: CompileContext = master ? { ...ctx, surface: `master:${master.id}:${surface.side}` } : ctx;
   const clipId = `clip-${surface.key.replace(/[^a-z0-9]/gi, '')}`;
   // On facing pages nothing crosses the spine: the left page is clipped at its right trim edge.
-  const facing = project.book.facing && surface.kind !== 'cover';
+  const facing = project.book.facing && surface.kind !== 'cover' && surface.kind !== 'jacket';
   const cx0 = facing && surface.side === 'right' ? 0 : -b;
   const cx1 = facing && surface.side === 'left' ? surface.w : surface.w + b;
 
@@ -100,7 +101,7 @@ export function SurfaceView({ project, surface, calc, rasterScale }: Props) {
     [vellum, partnerIndex, project, rasterScale, surface.key],
   );
 
-  const paper = page ? page.paperColor : surface.kind === 'cover' ? coverColor(project) : project.book.paper.color;
+  const paper = page ? page.paperColor : surface.kind === 'cover' ? coverColor(project) : surface.kind === 'jacket' ? project.book.jacket?.paperColor ?? '#f4f0e8' : project.book.paper.color;
   const paperRect = <rect x={-b} y={-b} width={surface.w + 2 * b} height={surface.h + 2 * b} fill={vellum ? mix(paper, '#ffffff', 0.35) : paper} opacity={vellum ? 1 - (page?.vellumOpacity ?? 0.5) * 0.75 : 1} />;
 
   const content = (
@@ -152,6 +153,7 @@ export function SurfaceView({ project, surface, calc, rasterScale }: Props) {
 
 function surfaceElements(project: Project, s: SurfaceDesc): Element[] {
   if (s.kind === 'cover') return project.cover.elements;
+  if (s.kind === 'jacket') return project.jacket?.elements ?? [];
   if (s.kind === 'master') {
     const [, id, side] = s.key.split(':');
     const m = project.masters.find((x) => x.id === id);

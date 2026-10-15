@@ -1,7 +1,7 @@
 /**
  * Page geometry: margin canons, modular grids, baseline grids and snap targets.
  */
-import type { BookSpec, GridSpec, Margins } from '../model/types';
+import type { BookSpec, GridSpec, Margins, PanelGrid } from '../model/types';
 
 export type PageSide = 'left' | 'right';
 
@@ -165,4 +165,51 @@ export function canonLines(spec: BookSpec): [number, number, number, number][] {
     [0, H, W, 0],       // page diagonals: outer-bottom → inner-top
     [W, 0, 2 * W, H],
   ];
+}
+
+/* -------------------------------------------------------------------------- */
+/* Grids on flat cover / jacket panels                                         */
+/* -------------------------------------------------------------------------- */
+
+export interface PanelGridGeometry {
+  /** Margin rectangle per decorated panel. */
+  blocks: { panel: string; x: number; y: number; w: number; h: number }[];
+  cols: { x: number; y: number; w: number; h: number }[];
+  rows: { x: number; y: number; w: number; h: number }[];
+  baselines: { x: number; w: number; y: number }[];
+  snapX: number[];
+  snapY: number[];
+}
+
+/**
+ * Margins, columns, rows and baselines inside each cover/jacket panel. `inner` is the edge
+ * facing the spine (or, on a flap, the fold); the spine itself gets head/foot margins only.
+ */
+export function panelGridLines(panels: { id: string; x: number; w: number }[], g: PanelGrid, height: number): PanelGridGeometry {
+  const out: PanelGridGeometry = { blocks: [], cols: [], rows: [], baselines: [], snapX: [], snapY: [] };
+  const spine = panels.find((p) => p.id === 'spine');
+  const spineCentre = spine ? spine.x + spine.w / 2 : panels.reduce((a, p) => a + p.x + p.w / 2, 0) / Math.max(1, panels.length);
+  for (const p of panels) {
+    if (p.id.startsWith('hinge') || p.id.endsWith('-fold') || p.w < 4) continue;
+    let x: number, w: number, y: number, h: number;
+    if (p.id === 'spine') {
+      x = p.x; w = p.w; y = g.spineMargin; h = height - 2 * g.spineMargin;
+    } else {
+      const innerOnRight = p.x + p.w / 2 < spineCentre;
+      const left = innerOnRight ? g.margins.outer : g.margins.inner;
+      const right = innerOnRight ? g.margins.inner : g.margins.outer;
+      x = p.x + left; w = p.w - left - right; y = g.margins.top; h = height - g.margins.top - g.margins.bottom;
+    }
+    if (w <= 1 || h <= 1) continue;
+    out.blocks.push({ panel: p.id, x, y, w, h });
+    out.snapX.push(x, x + w, x + w / 2);
+    out.snapY.push(y, y + h, y + h / 2);
+    if (p.id === 'spine') continue;
+    const nc = Math.max(1, Math.round(g.columns)), nr = Math.max(1, Math.round(g.rows));
+    const cw = (w - g.gutter * (nc - 1)) / nc, rh = (h - g.rowGutter * (nr - 1)) / nr;
+    if (nc > 1) for (let i = 0; i < nc; i++) { const cx = x + i * (cw + g.gutter); out.cols.push({ x: cx, y, w: cw, h }); out.snapX.push(cx, cx + cw); }
+    if (nr > 1) for (let i = 0; i < nr; i++) { const ry = y + i * (rh + g.rowGutter); out.rows.push({ x, y: ry, w, h: rh }); out.snapY.push(ry, ry + rh); }
+    if (g.baseline > 0.5) for (let by = y + g.baseline; by <= y + h + 0.01; by += g.baseline) out.baselines.push({ x, w, y: by });
+  }
+  return out;
 }

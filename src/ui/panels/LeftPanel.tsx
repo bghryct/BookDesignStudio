@@ -236,6 +236,7 @@ function FlowText({ onDone }: { onDone: () => void }) {
 
 function currentSurfaces(project: Project, view: string, spread: number, masterId: string | null): { key: string; label: string }[] {
   if (view === 'cover') return [{ key: 'cover', label: 'Cover' }];
+  if (view === 'jacket') return [{ key: 'jacket', label: 'Dust jacket' }];
   if (masterId) {
     const m = project.masters.find((x) => x.id === masterId);
     return m ? [{ key: masterKey(m.id, 'right'), label: `${m.name} · right` }, { key: masterKey(m.id, 'left'), label: `${m.name} · left` }] : [];
@@ -316,6 +317,7 @@ function LayersPanel() {
 
 function surfaceElementsDraftByKey(project: Project, key: string): Element[] | null {
   if (key === 'cover') return project.cover.elements;
+  if (key === 'jacket') return project.jacket?.elements ?? null;
   if (key.startsWith('page:')) return project.pages.find((p) => p.id === key.slice(5))?.elements ?? null;
   const [, id, side] = key.split(':');
   const m = project.masters.find((x) => x.id === id);

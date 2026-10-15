@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import clsx from 'clsx';
-import { Undo2, Redo2, Download, PanelLeft, PanelRight, FolderOpen, Save, FilePlus, BookOpen, Box, LayoutGrid, Book, ChevronDown, RotateCcw, Upload } from 'lucide-react';
+import { Undo2, Redo2, Download, PanelLeft, PanelRight, FolderOpen, Save, FilePlus, BookOpen, Box, LayoutGrid, Book, BookBookmark, ChevronDown, RotateCcw, Upload } from 'lucide-react';
 import { useStore, type View } from '../store/store';
 import { createDefaultProject } from '../model/defaults';
 import { saveProjectFile, loadProjectFile } from './projectIO';
@@ -9,7 +9,8 @@ import { makePage } from '../model/factory';
 
 const VIEWS: { id: View; label: string; icon: React.ReactNode; title: string }[] = [
   { id: 'spreads', label: 'Spreads', icon: <BookOpen size={14} />, title: 'Interior spreads & masters' },
-  { id: 'cover', label: 'Cover', icon: <Book size={14} />, title: 'Unwrapped cover / case / jacket' },
+  { id: 'cover', label: 'Cover', icon: <Book size={14} />, title: 'Unwrapped cover / case' },
+  { id: 'jacket', label: 'Jacket', icon: <BookBookmark size={14} />, title: 'Dust jacket — wraps the case, flaps fold inside the boards' },
   { id: '3d', label: '3D', icon: <Box size={14} />, title: 'Real-time 3D book' },
   { id: 'matrix', label: 'Matrix', icon: <LayoutGrid size={14} />, title: 'Generative layout matrix' },
 ];

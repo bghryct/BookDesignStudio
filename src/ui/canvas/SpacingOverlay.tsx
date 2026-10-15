@@ -1,6 +1,6 @@
 import React from 'react';
 import type { Element, Project, TextElement } from '../../model/types';
-import type { BindingCalc } from '../../engine/binding';
+import type { PanelLayout as BindingCalc } from './geometry';
 import { layoutText } from '../../render/compile';
 import type { LineInfo } from '../../engine/textLayout';
 import { sceneMatrix, type SurfaceDesc } from './geometry';
