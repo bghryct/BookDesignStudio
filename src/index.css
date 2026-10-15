@@ -1,0 +1,84 @@
+@import "tailwindcss";
+
+@theme {
+  --color-ink-950: #0e0d0f;
+  --color-ink-900: #151416;
+  --color-ink-850: #1a191c;
+  --color-ink-800: #201f22;
+  --color-ink-750: #262529;
+  --color-ink-700: #2e2d32;
+  --color-ink-600: #3b3a40;
+  --color-ink-500: #57555d;
+  --color-ink-400: #807c86;
+  --color-ink-300: #aaa6ad;
+  --color-ink-200: #d2ced3;
+  --color-ink-100: #eeeae5;
+  --color-rubric: #d9532f;
+  --color-rubric-dim: #a63d22;
+  --color-gold: #c9a227;
+  --color-paper: #f4eee2;
+  --color-board: #2a292e;
+  --font-ui: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  --font-serif: "BDS EB Garamond", "Iowan Old Style", Georgia, serif;
+  --font-mono: "BDS IBM Plex Mono", ui-monospace, Menlo, monospace;
+}
+
+:root {
+  color-scheme: dark;
+}
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  background: var(--color-ink-950);
+  color: var(--color-ink-100);
+  font-family: var(--font-ui);
+  font-size: 12px;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+}
+
+* { box-sizing: border-box; }
+
+::selection { background: color-mix(in srgb, var(--color-rubric) 45%, transparent); }
+
+/* Quiet, thin scrollbars for panels */
+.scroll-thin { scrollbar-width: thin; scrollbar-color: var(--color-ink-600) transparent; }
+.scroll-thin::-webkit-scrollbar { width: 8px; height: 8px; }
+.scroll-thin::-webkit-scrollbar-thumb { background: var(--color-ink-600); border-radius: 8px; border: 2px solid transparent; background-clip: content-box; }
+
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 16px;
+  background: transparent;
+  cursor: pointer;
+}
+input[type="range"]::-webkit-slider-runnable-track { height: 2px; background: var(--color-ink-600); border-radius: 2px; }
+input[type="range"]::-moz-range-track { height: 2px; background: var(--color-ink-600); border-radius: 2px; }
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none; width: 11px; height: 11px; margin-top: -4.5px; border-radius: 50%;
+  background: var(--color-ink-100); border: 2px solid var(--color-ink-900); box-shadow: 0 0 0 1px var(--color-ink-500);
+}
+input[type="range"]::-moz-range-thumb { width: 9px; height: 9px; border-radius: 50%; background: var(--color-ink-100); border: 2px solid var(--color-ink-900); }
+input[type="range"]:focus-visible { outline: none; }
+input[type="range"]:focus-visible::-webkit-slider-thumb { box-shadow: 0 0 0 2px var(--color-rubric); }
+
+input[type="color"] { -webkit-appearance: none; border: none; padding: 0; background: none; }
+input[type="color"]::-webkit-color-swatch-wrapper { padding: 0; }
+input[type="color"]::-webkit-color-swatch { border: none; border-radius: 3px; }
+
+.checker {
+  background-image: linear-gradient(45deg, #3a3940 25%, transparent 25%), linear-gradient(-45deg, #3a3940 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, #3a3940 75%), linear-gradient(-45deg, transparent 75%, #3a3940 75%);
+  background-size: 8px 8px;
+  background-position: 0 0, 0 4px, 4px -4px, -4px 0;
+}
+
+.pasteboard {
+  background-color: #2b2a2f;
+  background-image: radial-gradient(rgba(255,255,255,0.035) 1px, transparent 1px);
+  background-size: 16px 16px;
+}
+
+.smallcaps { font-variant-caps: all-small-caps; letter-spacing: 0.08em; }

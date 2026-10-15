@@ -1,0 +1,389 @@
+/**
+ * Element → display list compiler, plus the text-layout service (threads, masters, tokens).
+ * Results are memoised on element identity (immer keeps unchanged elements identical), the
+ * font-load version and the page context, so editing one frame never re-lays the whole book.
+ */
+import type {
+  Element, Project, TextElement, ShapeElement, ImageElement, PathElement, CutoutElement, DrawingElement, SurfaceKey, BookSpec,
+} from '../model/types';
+import type { GroupPrim, Matrix, PathPrim, Prim } from './primitives';
+import { ellipsePath, multiply, rectPath, rotate, translate, polylinePath, IDENTITY } from './primitives';
+import { layoutStory, frameSpecOf, type FrameLayout, type TokenContext } from '../engine/textLayout';
+import { ensureFamily, resolveFont, measure, fontMetrics, useFontStore } from '../engine/fonts';
+import { textBlock, type PageSide } from '../engine/grid';
+import type { GenContext } from '../engine/generators/context';
+import { generatePattern, generateOrnament, generateInitial, generateOverprint, generateGradient, generateGridType, generateRule } from '../engine/generators';
+import { renderStrokes } from '../engine/brushes';
+import { parseSvgCached, svgPrims, svgMarkupFromDataUrl } from './svgImport';
+import { transformPath } from '../lib/pathData';
+import { findElement, pageSide } from '../model/surfaces';
+import { getImage } from './images';
+import { mix, parseColor } from '../lib/color';
+
+/* -------------------------------------------------------------------------- */
+/* Generator context                                                           */
+/* -------------------------------------------------------------------------- */
+
+export const genContext: GenContext = {
+  font: (family, weight = 400, italic = false) => {
+    void ensureFamily(family);
+    return resolveFont({ family, weight, italic });
+  },
+  measure: (text, font, size) => measure(text, font, size),
+  metrics: (font) => {
+    const m = fontMetrics(font);
+    return { ascender: m.ascender, descender: m.descender, capHeight: m.capHeight, xHeight: m.xHeight };
+  },
+};
+
+/* -------------------------------------------------------------------------- */
+/* Context                                                                     */
+/* -------------------------------------------------------------------------- */
+
+export interface CompileContext {
+  project: Project;
+  surface: SurfaceKey;
+  /** The page being rendered (also for master items, which repeat per page). */
+  pageIndex: number | null;
+  side: PageSide;
+}
+
+function tokensFor(project: Project, pageIndex: number | null): TokenContext {
+  const b = project.book;
+  return { page: (pageIndex ?? 0) + 1, pages: project.pages.length, title: b.title, subtitle: b.subtitle, author: b.author, publisher: b.publisher };
+}
+
+function gridFor(spec: BookSpec, side: PageSide, el: Element, surface: SurfaceKey) {
+  if (surface === 'cover' || spec.grid.baseline < 1) return null;
+  const block = textBlock(spec, side);
+  const line0 = block.y + spec.grid.baselineOffset;
+  const inc = spec.grid.baseline;
+  const origin = ((((line0 - el.y) % inc) + inc) % inc);
+  return { origin, increment: inc };
+}
+
+/* -------------------------------------------------------------------------- */
+/* Text layout service                                                         */
+/* -------------------------------------------------------------------------- */
+
+interface ChainCache { members: Element[]; book: BookSpec; version: number; tokens: string; layouts: Map<string, FrameLayout> }
+const chainCache = new WeakMap<Element, ChainCache>();
+const singleCache = new WeakMap<Element, Map<string, FrameLayout>>();
+
+interface ThreadIndex { prev: Map<string, string>; byId: Map<string, { el: TextElement; pageIndex: number | null; surface: SurfaceKey }> }
+const threadIndexCache = new WeakMap<Project, ThreadIndex>();
+
+function threadIndex(project: Project): ThreadIndex {
+  let idx = threadIndexCache.get(project);
+  if (idx) return idx;
+  const prev = new Map<string, string>();
+  const byId = new Map<string, { el: TextElement; pageIndex: number | null; surface: SurfaceKey }>();
+  project.pages.forEach((p, pi) => {
+    for (const e of p.elements) if (e.type === 'text') byId.set(e.id, { el: e, pageIndex: pi, surface: `page:${p.id}` });
+  });
+  for (const e of project.cover.elements) if (e.type === 'text') byId.set(e.id, { el: e, pageIndex: null, surface: 'cover' });
+  for (const { el } of byId.values()) if (el.flowNext && byId.has(el.flowNext)) prev.set(el.flowNext, el.id);
+  idx = { prev, byId };
+  threadIndexCache.set(project, idx);
+  return idx;
+}
+
+/** Thread containing `id`, head first (cycle-safe). */
+export function threadOf(project: Project, id: string): string[] {
+  const { prev, byId } = threadIndex(project);
+  let head = id;
+  const seen = new Set<string>([head]);
+  while (prev.has(head) && !seen.has(prev.get(head)!)) { head = prev.get(head)!; seen.add(head); }
+  const chain: string[] = [];
+  const seen2 = new Set<string>();
+  for (let cur: string | null = head; cur && byId.has(cur) && !seen2.has(cur); cur = byId.get(cur)!.el.flowNext) {
+    chain.push(cur);
+    seen2.add(cur);
+  }
+  return chain;
+}
+
+export function layoutText(el: TextElement, ctx: CompileContext): FrameLayout {
+  void ensureFamily(el.style.fontFamily);
+  if (el.style.dropCap.enabled && el.style.dropCap.fontFamily) void ensureFamily(el.style.dropCap.fontFamily);
+  const version = useFontStore.getState().version;
+  const { project } = ctx;
+  const idx = threadIndex(project);
+  const threaded = idx.byId.has(el.id) && (idx.prev.has(el.id) || (el.flowNext && idx.byId.has(el.flowNext)));
+  if (threaded) {
+    const chain = threadOf(project, el.id).map((id) => idx.byId.get(id)!);
+    const head = chain[0].el;
+    const tokens = tokensFor(project, chain[0].pageIndex);
+    const tokensKey = JSON.stringify(tokens);
+    const cached = chainCache.get(head);
+    if (cached && cached.version === version && cached.book === project.book && cached.tokens === tokensKey &&
+      cached.members.length === chain.length && cached.members.every((m, i) => m === chain[i].el)) {
+      const hit = cached.layouts.get(el.id);
+      if (hit) return hit;
+    }
+    const frames = chain.map((c) => frameSpecOf(c.el, c.pageIndex != null ? gridFor(project.book, pageSide(project, c.pageIndex), c.el, c.surface) : null));
+    const results = layoutStory(head.text, head.style, frames, tokens);
+    const layouts = new Map<string, FrameLayout>();
+    chain.forEach((c, i) => layouts.set(c.el.id, results[i]));
+    chainCache.set(head, { members: chain.map((c) => c.el), book: project.book, version, tokens: tokensKey, layouts });
+    return layouts.get(el.id)!;
+  }
+  const tokens = tokensFor(project, ctx.pageIndex);
+  const grid = gridFor(project.book, ctx.side, el, ctx.surface);
+  const key = `${version}|${JSON.stringify(tokens)}|${grid ? `${grid.origin.toFixed(3)}/${grid.increment}` : '-'}`;
+  let m = singleCache.get(el);
+  if (!m) { m = new Map(); singleCache.set(el, m); }
+  const hit = m.get(key);
+  if (hit) return hit;
+  const [layout] = layoutStory(el.text, el.style, [frameSpecOf(el, grid)], tokens);
+  if (m.size > 24) m.clear();
+  m.set(key, layout);
+  return layout;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Element compilers                                                           */
+/* -------------------------------------------------------------------------- */
+
+function shapePath(el: ShapeElement): string {
+  const { w, h } = el;
+  switch (el.shape) {
+    case 'rect': return rectPath(0, 0, w, h, el.radius);
+    case 'ellipse': return ellipsePath(w / 2, h / 2, w / 2, h / 2);
+    case 'triangle': return polylinePath([[w / 2, 0], [w, h], [0, h]], true);
+    case 'polygon':
+    case 'star': {
+      const n = Math.max(3, Math.round(el.sides));
+      const pts: [number, number][] = [];
+      const count = el.shape === 'star' ? n * 2 : n;
+      for (let i = 0; i < count; i++) {
+        const a = -Math.PI / 2 + (i * 2 * Math.PI) / count;
+        const r = el.shape === 'star' && i % 2 ? el.innerRatio : 1;
+        pts.push([w / 2 + (Math.cos(a) * w * r) / 2, h / 2 + (Math.sin(a) * h * r) / 2]);
+      }
+      return polylinePath(pts, true);
+    }
+    case 'arc': {
+      const sweep = Math.max(0.01, Math.min(0.999, el.innerRatio)) * Math.PI * 2;
+      const pts: [number, number][] = [];
+      for (let i = 0; i <= 64; i++) {
+        const a = -Math.PI / 2 + (sweep * i) / 64;
+        pts.push([w / 2 + (Math.cos(a) * w) / 2, h / 2 + (Math.sin(a) * h) / 2]);
+      }
+      return polylinePath(pts, false);
+    }
+  }
+}
+
+function compileImage(el: ImageElement, project: Project): Prim[] {
+  const asset = el.assetId ? project.assets[el.assetId] : null;
+  if (!asset) {
+    // Classic placeholder: a light box with a diagonal cross.
+    return [
+      { t: 'path', d: rectPath(0, 0, el.w, el.h), fill: '#e7e1d4', stroke: '#b9b0a0', strokeWidth: 0.5 },
+      { t: 'path', d: `M0 0L${el.w} ${el.h}M${el.w} 0L0 ${el.h}`, stroke: '#b9b0a0', strokeWidth: 0.5 },
+    ];
+  }
+  const iw = asset.width || 1, ih = asset.height || 1;
+  let dw = el.w, dh = el.h;
+  if (el.fit !== 'fill') {
+    const s = (el.fit === 'cover' ? Math.max(el.w / iw, el.h / ih) : Math.min(el.w / iw, el.h / ih)) * Math.max(0.05, el.zoom);
+    dw = iw * s;
+    dh = ih * s;
+  }
+  const x = (el.w - dw) / 2 + (el.offsetX * Math.abs(dw - el.w)) / 2;
+  const y = (el.h - dh) / 2 + (el.offsetY * Math.abs(dh - el.h)) / 2;
+  if (el.duotone) {
+    const [dark, light] = el.duotone;
+    const D = parseColor(dark), L = parseColor(light);
+    return [{
+      t: 'raster', key: `duo:${asset.id}:${dark}:${light}:${x.toFixed(1)}:${y.toFixed(1)}:${dw.toFixed(1)}:${dh.toFixed(1)}`, x: 0, y: 0, w: el.w, h: el.h,
+      draw: (ctx, pxPerPt) => {
+        const img = getImage(asset.src);
+        if (!img) return;
+        const W = Math.max(1, Math.round(el.w * pxPerPt)), H = Math.max(1, Math.round(el.h * pxPerPt));
+        const c = document.createElement('canvas');
+        c.width = W; c.height = H;
+        const g = c.getContext('2d')!;
+        g.drawImage(img, x * pxPerPt, y * pxPerPt, dw * pxPerPt, dh * pxPerPt);
+        const data = g.getImageData(0, 0, W, H);
+        const p = data.data;
+        for (let i = 0; i < p.length; i += 4) {
+          const l = (0.299 * p[i] + 0.587 * p[i + 1] + 0.114 * p[i + 2]) / 255;
+          p[i] = D.r + (L.r - D.r) * l; p[i + 1] = D.g + (L.g - D.g) * l; p[i + 2] = D.b + (L.b - D.b) * l;
+        }
+        g.putImageData(data, 0, 0);
+        ctx.drawImage(c, 0, 0, el.w, el.h);
+      },
+    }];
+  }
+  return [{ t: 'image', href: asset.src, assetId: asset.id, x, y, w: dw, h: dh, clip: { x: 0, y: 0, w: el.w, h: el.h }, filter: el.grayscale ? 'grayscale' : null }];
+}
+
+function compilePath(el: PathElement): Prim[] {
+  const sx = el.vw ? el.w / el.vw : 1, sy = el.vh ? el.h / el.vh : 1;
+  const d = sx === 1 && sy === 1 ? el.d : transformPath(el.d, [sx, 0, 0, sy, 0, 0]);
+  return [{ t: 'path', d, fill: el.fill, stroke: el.stroke, strokeWidth: el.strokeWidth, dash: el.dash, cap: el.cap, join: el.join, fillRule: el.fillRule }];
+}
+
+export function cutoutPath(el: CutoutElement): string {
+  if (el.shape === 'ellipse') return ellipsePath(el.w / 2, el.h / 2, el.w / 2, el.h / 2);
+  if (el.shape === 'path' && el.d) return el.d;
+  return rectPath(0, 0, el.w, el.h, el.radius);
+}
+
+function compileDrawing(el: DrawingElement): Prim[] {
+  if (!el.strokes.length) return [];
+  return [{
+    t: 'raster', key: `draw:${el.id}:${el.strokes.length}:${el.strokes[el.strokes.length - 1].id}:${el.w.toFixed(1)}x${el.h.toFixed(1)}:${el.paperGrain}`,
+    x: 0, y: 0, w: el.w, h: el.h,
+    draw: (ctx, pxPerPt) => renderStrokes(ctx, el.strokes, { pxPerPt, paperGrain: el.paperGrain }),
+  }];
+}
+
+export function compileElementLocal(el: Element, ctx: CompileContext): Prim[] {
+  switch (el.type) {
+    case 'text': {
+      const layout = layoutText(el, ctx);
+      const out: Prim[] = [];
+      if (el.fill) out.push({ t: 'path', d: rectPath(0, 0, el.w, el.h), fill: el.fill });
+      out.push(...layout.prims);
+      return out;
+    }
+    case 'image': return compileImage(el, ctx.project);
+    case 'shape':
+      return [{ t: 'path', d: shapePath(el), fill: el.shape === 'arc' ? null : el.fill, stroke: el.stroke, strokeWidth: el.strokeWidth, dash: el.dash, cap: el.cap, join: el.join }];
+    case 'rule': return generateRule(el, genContext);
+    case 'path': return compilePath(el);
+    case 'svg': {
+      const asset = el.assetId ? ctx.project.assets[el.assetId] : null;
+      if (!asset) return [{ t: 'path', d: rectPath(0, 0, el.w, el.h), stroke: '#b9b0a0', strokeWidth: 0.5, dash: [3, 3] }];
+      const parsed = parseSvgCached(asset.id, svgMarkupFromDataUrl(asset.src));
+      if (parsed && parsed.paths.length) return svgPrims(parsed, el.w, el.h, el.fillOverride, el.strokeOverride);
+      return [{ t: 'image', href: asset.src, x: 0, y: 0, w: el.w, h: el.h }];
+    }
+    case 'pattern': void ensureFamily(el.fontFamily); return generatePattern(el, genContext);
+    case 'ornament': return generateOrnament(el, genContext);
+    case 'initial': void ensureFamily(el.fontFamily); return generateInitial(el, genContext);
+    case 'overprint': void ensureFamily(el.fontFamily); return generateOverprint(el, genContext);
+    case 'gradient': return generateGradient(el, genContext);
+    case 'gridtype': return generateGridType(el, genContext);
+    case 'cutout': return [{ t: 'path', d: cutoutPath(el), stroke: '#e5007e', strokeWidth: 0.6, dash: [4, 2], fill: null, role: 'dieline' }];
+    case 'drawing': return compileDrawing(el);
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Placement & memoisation                                                     */
+/* -------------------------------------------------------------------------- */
+
+export function elementMatrix(el: Element, offsetX = 0, offsetY = 0): Matrix {
+  let m: Matrix = translate(el.x + offsetX, el.y + offsetY);
+  if (el.rotation) m = multiply(m, rotate(el.rotation, el.w / 2, el.h / 2));
+  if (el.flipX || el.flipY) m = multiply(m, [el.flipX ? -1 : 1, 0, 0, el.flipY ? -1 : 1, el.flipX ? el.w : 0, el.flipY ? el.h : 0]);
+  return m;
+}
+
+const compiledCache = new WeakMap<Element, { key: string; prims: Prim[] }>();
+
+function contextKey(el: Element, ctx: CompileContext): string {
+  const v = useFontStore.getState().version;
+  if (el.type === 'image' || el.type === 'svg') return `${v}|${el.assetId ? (ctx.project.assets[el.assetId] ? 1 : 0) : 0}`;
+  return String(v);
+}
+
+/** Local primitives for an element (memoised; text is cached by the layout service). */
+export function compileElement(el: Element, ctx: CompileContext): Prim[] {
+  if (el.type === 'text') return compileElementLocal(el, ctx);
+  const key = contextKey(el, ctx);
+  const hit = compiledCache.get(el);
+  if (hit && hit.key === key) return hit.prims;
+  const prims = compileElementLocal(el, ctx);
+  compiledCache.set(el, { key, prims });
+  return prims;
+}
+
+/** Element wrapped in its placement group. */
+export function placedElement(el: Element, ctx: CompileContext, offsetX = 0, offsetY = 0): GroupPrim {
+  return {
+    t: 'group',
+    matrix: elementMatrix(el, offsetX, offsetY),
+    opacity: el.opacity,
+    blend: el.blend,
+    children: compileElement(el, ctx),
+  };
+}
+
+/* -------------------------------------------------------------------------- */
+/* Surfaces                                                                    */
+/* -------------------------------------------------------------------------- */
+
+export interface PageRenderOptions {
+  paper?: boolean;
+  master?: boolean;
+  dieLines?: boolean;
+  /** Restrict to elements with this finish (for 3D finish masks). */
+  finishFilter?: (el: Element) => boolean;
+}
+
+/** All primitives of a page in page coordinates (trim origin). */
+export function compilePage(project: Project, pageIndex: number, opts: PageRenderOptions = {}): Prim[] {
+  const page = project.pages[pageIndex];
+  if (!page) return [];
+  const side = pageSide(project, pageIndex);
+  const ctx: CompileContext = { project, surface: `page:${page.id}`, pageIndex, side };
+  const out: Prim[] = [];
+  const b = project.book.bleed;
+  if (opts.paper !== false) {
+    out.push({ t: 'path', d: rectPath(-b, -b, project.book.trimW + 2 * b, project.book.trimH + 2 * b), fill: page.material === 'vellum' ? mix(page.paperColor, '#ffffff', 0.4) : page.paperColor });
+  }
+  const accept = (el: Element) => !el.hidden && (opts.dieLines !== false || el.type !== 'cutout') && (!opts.finishFilter || opts.finishFilter(el));
+  if (opts.master !== false && page.masterId) {
+    const m = project.masters.find((x) => x.id === page.masterId);
+    if (m) {
+      const mctx: CompileContext = { ...ctx, surface: `master:${m.id}:${side}` };
+      for (const el of side === 'left' ? m.left : m.right) if (accept(el)) out.push(placedElement(el, mctx));
+    }
+  }
+  for (const el of page.elements) if (accept(el)) out.push(placedElement(el, ctx));
+  return out;
+}
+
+export function coverAnchorX(project: Project, el: Element, panels: { id: string; x: number }[]): number {
+  if (!el.anchor) return 0;
+  return panels.find((p) => p.id === el.anchor)?.x ?? 0;
+}
+
+/** Cover surface primitives in cover coordinates (origin = top-left of the flat cover, wrap outside). */
+export function compileCover(project: Project, calc: { panels: { id: string; x: number; w: number }[]; coverW: number; coverH: number; wrap: number }, opts: PageRenderOptions & { background?: string | null } = {}): Prim[] {
+  const out: Prim[] = [];
+  const ctx: CompileContext = { project, surface: 'cover', pageIndex: null, side: 'right' };
+  if (opts.background !== null) {
+    const w = calc.wrap;
+    out.push({ t: 'path', d: rectPath(-w, -w, calc.coverW + 2 * w, calc.coverH + 2 * w), fill: opts.background ?? coverBaseColor(project) });
+  }
+  for (const el of project.cover.elements) {
+    if (el.hidden || (opts.finishFilter && !opts.finishFilter(el))) continue;
+    out.push(placedElement(el, ctx, coverAnchorX(project, el, calc.panels), 0));
+  }
+  return out;
+}
+
+export function coverBaseColor(project: Project): string {
+  const f = project.book.cover.finish;
+  const t = project.book.binding.type;
+  if (t === 'case' || t === 'coptic' || f === 'cloth' || f === 'buckram' || f === 'leather') return project.book.cover.material;
+  return project.book.cover.material || '#f4efe4';
+}
+
+/** Locate the page context of an element anywhere in the project. */
+export function contextForElement(project: Project, id: string, fallbackPage: number | null = null): CompileContext | null {
+  const loc = findElement(project, id);
+  if (!loc) return null;
+  if (loc.pageIndex != null) return { project, surface: loc.key, pageIndex: loc.pageIndex, side: pageSide(project, loc.pageIndex) };
+  if (loc.key.startsWith('master:')) return { project, surface: loc.key, pageIndex: fallbackPage, side: loc.key.endsWith(':left') ? 'left' : 'right' };
+  return { project, surface: loc.key, pageIndex: null, side: 'right' };
+}
+
+export { IDENTITY };
+export type { PathPrim };
