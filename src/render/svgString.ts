@@ -3,7 +3,7 @@
  * Used by the editor (per element, memoised) and by the SVG export (whole pages / spreads).
  */
 import type { Paint, Prim, TextRun, PathPrim, ImagePrim, RasterPrim, GroupPrim, TextPrim } from './primitives';
-import { fontFeatureCss, fontVariationCss, shape, glyphPath, canOutline } from '../engine/fonts';
+import { fontFeatureCss, fontVariationCss, shape, glyphPath, canOutline, glyphKerns } from '../engine/fonts';
 
 export interface SvgOptions {
   /** Device pixels per pt used to rasterise RasterPrims. */
@@ -95,7 +95,9 @@ function runOutlines(r: TextRun, w: Writer): string | null {
   let x = 0;
   let d = '';
   const ls = r.letterSpacing ?? 0;
-  for (const g of shaped.glyphs) {
+  const gk = glyphKerns(shaped, r.kern);
+  for (let gi = 0; gi < shaped.glyphs.length; gi++) {
+    const g = shaped.glyphs[gi];
     const gp = glyphPath(r.font, g.id);
     if (gp && gp.d) {
       const ox = x + g.xOffset * r.size, oy = -g.yOffset * r.size;
@@ -108,7 +110,7 @@ function runOutlines(r: TextRun, w: Writer): string | null {
       }
       d += `<use href="#${id}" xlink:href="#${id}" transform="translate(${n(r.x + ox)} ${n(r.y + oy)}) scale(${n(k)} ${n(-k)})${r.font.oblique ? ' skewX(12)' : ''}"/>`;
     }
-    x += g.xAdvance * r.size + ls;
+    x += g.xAdvance * r.size + ls + (gk ? gk[gi] : 0);
   }
   return `<g fill="${r.color}"${runTransform(r)}>${d}</g>`;
 }
@@ -116,11 +118,14 @@ function runOutlines(r: TextRun, w: Writer): string | null {
 function textSvg(p: TextPrim, w: Writer): string {
   let out = '';
   for (const r of p.runs) {
-    if (w.opts.outlineText) {
+    // Kerned runs (optical or manual pairs) are drawn from outlines so they match the PDF exactly.
+    const kerned = !!r.kern && r.kern.some((k) => k);
+    if (w.opts.outlineText || kerned) {
       const o = runOutlines(r, w);
       if (o) { out += o; continue; }
     }
-    out += `<text x="${n(r.x)}" y="${n(r.y)}" fill="${r.color}" style="${runStyle(r)}"${runTransform(r)}>${esc(r.text)}</text>`;
+    const dx = kerned ? ` dx="${[0, ...r.kern!.slice(0, -1)].map(n).join(' ')}"` : '';
+    out += `<text x="${n(r.x)}" y="${n(r.y)}"${dx} fill="${r.color}" style="${runStyle(r)}"${runTransform(r)}>${esc(r.text)}</text>`;
   }
   return p.opacity != null && p.opacity < 1 || (p.blend && p.blend !== 'normal') ? `<g${common(p)}>${out}</g>` : out;
 }

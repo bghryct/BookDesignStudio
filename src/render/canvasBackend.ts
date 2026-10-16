@@ -5,7 +5,7 @@
  */
 import type { BlendMode } from '../model/types';
 import type { Paint, Prim, TextRun } from './primitives';
-import { shape, glyphPath, canOutline } from '../engine/fonts';
+import { shape, glyphPath, canOutline, glyphKerns } from '../engine/fonts';
 import { getImage, loadImage } from './images';
 
 export interface CanvasOptions {
@@ -65,8 +65,10 @@ function drawRun(ctx: CanvasRenderingContext2D, r: TextRun) {
   const ls = r.letterSpacing ?? 0;
   if (canOutline(r.text, r.font)) {
     const shaped = shape(r.text, r.font)!;
+    const gk = glyphKerns(shaped, r.kern);
     let x = 0;
-    for (const g of shaped.glyphs) {
+    for (let gi = 0; gi < shaped.glyphs.length; gi++) {
+      const g = shaped.glyphs[gi];
       const gp = glyphPath(r.font, g.id);
       if (gp && gp.d) {
         const k = r.size / gp.upm;
@@ -77,7 +79,7 @@ function drawRun(ctx: CanvasRenderingContext2D, r: TextRun) {
         ctx.fill(path2d(gp.d));
         ctx.restore();
       }
-      x += g.xAdvance * r.size + ls;
+      x += g.xAdvance * r.size + ls + (gk ? gk[gi] : 0);
     }
   } else {
     ctx.font = `${r.font.italic ? 'italic ' : ''}${r.font.weight} ${r.size}px ${r.font.css}`;

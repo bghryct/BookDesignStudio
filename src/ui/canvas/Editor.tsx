@@ -5,17 +5,17 @@ import type { BrushStroke, DrawingElement, Element, PathElement, Project, TextEl
 import { useStore, type Tool } from '../../store/store';
 import { spreadsOf, surfaceElementsDraft, findElement, COVER_KEY, JACKET_KEY, pageKey, masterKey, guidesOf } from '../../model/surfaces';
 import { computeBinding, computeJacket } from '../../engine/binding';
-import { computeGrid } from '../../engine/grid';
+import { computeGrid, pageColumns } from '../../engine/grid';
 import { makeElement, makeText, makeDrawing, makePath, makeOrnament, makeRule, makeMotif } from '../../model/factory';
 import { LIBRARY_MIME } from '../library/LibraryPanel';
 import { getItem, insertItem, targetFor } from '../library/insert';
 import { uid } from '../../lib/random';
 import { applyMatrix, multiply, translate, scale as scaleM } from '../../render/primitives';
-import { layoutText, threadOf } from '../../render/compile';
+import { layoutText, threadOf, crossesGutter } from '../../render/compile';
 import { renderStroke, simulatePressure, stabilize } from '../../engine/brushes';
 import { parsePath, serialize, type Seg } from '../../lib/pathData';
 import { SurfaceView } from './SurfaceView';
-import { SurfaceGuides, CanonGuides, CoverGuides, JacketGuides } from './Guides';
+import { SurfaceGuides, CanonGuides, CoverGuides, JacketGuides, SpreadGridGuides } from './Guides';
 import { Rulers, RULER } from './Rulers';
 import { TextStoryEditor } from './TextStoryEditor';
 import { SpacingOverlay } from './SpacingOverlay';
@@ -187,13 +187,19 @@ export function Editor({ mode }: { mode: 'spreads' | 'cover' | 'jacket' }) {
   const toScreen = (p: Pt): Pt => ({ x: p.x * zoom + pan.x, y: p.y * zoom + pan.y });
 
   const pick = (p: Pt, cycleFrom?: string): { el: Element; surface: SurfaceDesc } | null => {
-    const hits: { el: Element; surface: SurfaceDesc }[] = [];
+    const hits: { el: Element; surface: SurfaceDesc; z: number }[] = [];
+    // Stacking as drawn on the page under the pointer: a spread item from the facing page sits
+    // beneath this page's items (or above them when marked).
+    const under = mode === 'spreads' ? surfaceAt(surfaces, p, 0) : null;
     for (let i = allEls.length - 1; i >= 0; i--) {
       const { el, surface } = allEls[i];
       if (el.hidden || el.locked) continue;
-      if (hitElement(el, surface, calc, p, 4 / zoom)) hits.push({ el, surface });
+      if (!hitElement(el, surface, calc, p, 4 / zoom)) continue;
+      const z = !under || surface.key === under.key ? i : el.spreadAbove ? 1e6 + i : -1e6 + i;
+      hits.push({ el, surface, z });
     }
     if (!hits.length) return null;
+    hits.sort((a, b) => b.z - a.z);
     if (cycleFrom) {
       const i = hits.findIndex((h) => h.el.id === cycleFrom);
       if (i >= 0) return hits[(i + 1) % hits.length];
@@ -323,14 +329,26 @@ export function Editor({ mode }: { mode: 'spreads' | 'cover' | 'jacket' }) {
     if (tool === 'brush' || tool === 'eraser') {
       const brush = s.brush;
       s.checkpoint();
-      let target = single && single.el.type === 'drawing' && single.surface.key === surface.key ? single.el as DrawingElement : null;
+      // Keep painting into the selected drawing layer when the stroke starts inside it. A new layer
+      // on facing pages spans the whole spread (it lives on the left page and crosses the gutter).
+      let target: DrawingElement | null = null;
+      let layer = surface;
+      if (single && single.el.type === 'drawing') {
+        const bx = sceneBounds(single.el, single.surface, calc);
+        if (p.x >= bx.x && p.x <= bx.x + bx.w && p.y >= bx.y && p.y <= bx.y + bx.h) { target = single.el as DrawingElement; layer = single.surface; }
+      }
       if (!target) {
-        const b = surface.bleed;
-        target = makeDrawing({ name: 'Drawing', x: -b, y: -b, w: surface.w + 2 * b, h: surface.h + 2 * b });
-        s.update((d) => { surfaceElementsDraft(d as Project, surface.key)?.push(target as Draft<Element>); }, { history: false });
+        const pair = surfaces.filter((sf) => sf.kind === surface.kind && (sf.kind === 'page' || sf.kind === 'master'));
+        const spread = mode === 'spreads' && spec.facing && pair.length === 2;
+        layer = spread ? pair.find((sf) => sf.side === 'left') ?? surface : surface;
+        const b = layer.bleed;
+        target = makeDrawing({ name: spread ? 'Spread drawing' : 'Drawing', x: -b, y: -b, w: (spread ? 2 * layer.w : layer.w) + 2 * b, h: layer.h + 2 * b });
+        const key = layer.key;
+        const el = target;
+        s.update((d) => { surfaceElementsDraft(d as Project, key)?.push(el as Draft<Element>); }, { history: false });
         s.select([target.id]);
       }
-      const local = toLocal(target, surface, calc, p);
+      const local = toLocal(target, layer, calc, p);
       const mouse = e.pointerType === 'mouse';
       const pr = mouse ? 0.5 : e.pressure || 0.5;
       const stroke: BrushStroke = {
@@ -338,7 +356,7 @@ export function Editor({ mode }: { mode: 'spreads' | 'cover' | 'jacket' }) {
         flow: brush.flow, hardness: brush.hardness, grain: brush.grain, wetness: brush.wetness, angle: brush.angle,
         seed: Math.floor(Math.random() * 1e9), points: [local.x, local.y, brush.pressure ? pr : 0.6],
       };
-      inter.current = { k: 'draw', surface, elId: target.id, points: stroke.points, mouse, stroke };
+      inter.current = { k: 'draw', surface: layer, elId: target.id, points: stroke.points, mouse, stroke };
       drawLive();
       return;
     }
@@ -653,6 +671,8 @@ export function Editor({ mode }: { mode: 'spreads' | 'cover' | 'jacket' }) {
         const loc = findElement(d as Project, id);
         if (!loc) continue;
         const el = surfaceElementsDraft(d as Project, loc.key)![loc.index];
+        // Spread items stay with their page: they are drawn on both sides of the gutter anyway.
+        if (spec.facing && crossesGutter(el as Element, cur.surface.side, cur.surface.w)) continue;
         const cx = cur.surface.x + el.x + el.w / 2, cy = cur.surface.y + el.y + el.h / 2;
         const target = surfaces.find((sf) => sf.kind === 'page' && cx >= sf.x && cx <= sf.x + sf.w && cy >= sf.y - 200 && cy <= sf.y + sf.h + 200);
         if (!target || target.key === loc.key) continue;
@@ -698,8 +718,9 @@ export function Editor({ mode }: { mode: 'spreads' | 'cover' | 'jacket' }) {
     if (t === 'text') {
       if (click && surface.kind !== 'cover' && surface.kind !== 'jacket') {
         // Click inside a column: frame the column from the click to the foot of the text block.
+        // With a spread grid a column may run across the gutter, and so does the frame.
         const g = computeGrid(s.project.book, surface.side);
-        const col = g.cols.find((c) => x >= c.x - 2 && x <= c.x + c.w + 2) ?? { x, w: 200 };
+        const col = pageColumns(s.project.book, surface.side).find((c) => x >= c.x - 2 && x <= c.x + c.w + 2) ?? { x, w: 200 };
         x = col.x; w = col.w; h = Math.max(30, g.block.y + g.block.h - y);
       } else if (click) { w = 200; h = 60; }
       const head = s.selection.length === 1 ? findElement(s.project, s.selection[0])?.el : null;
@@ -931,6 +952,7 @@ export function Editor({ mode }: { mode: 'spreads' | 'cover' | 'jacket' }) {
           )}
           {mode === 'spreads' && surfaces.map((s) => <SurfaceGuides key={`g${s.key}`} project={project} surface={s} />)}
           {mode === 'spreads' && <CanonGuides project={project} x={0} y={0} />}
+          {mode === 'spreads' && surfaces.length === 2 && <SpreadGridGuides project={project} x={0} y={0} />}
           {spec.grid.showSpacing && <SpacingOverlay project={project} items={allEls} calc={calc} />}
           {mode === 'cover' && bindingCalc && surfaces[0] && <CoverGuides calc={bindingCalc} spec={spec} surface={surfaces[0]} showBleed={spec.grid.showBleed} />}
           {mode === 'jacket' && jacketCalc && surfaces[0] && <JacketGuides jc={jacketCalc} spec={spec} surface={surfaces[0]} showBleed={spec.grid.showBleed} />}

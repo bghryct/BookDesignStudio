@@ -8,7 +8,7 @@ import type {
 } from '../model/types';
 import type { GroupPrim, Matrix, PathPrim, Prim } from './primitives';
 import { ellipsePath, multiply, rectPath, rotate, translate, polylinePath, IDENTITY } from './primitives';
-import { layoutStory, frameSpecOf, type FrameLayout, type TokenContext } from '../engine/textLayout';
+import { layoutStory, frameSpecOf, type FrameLayout, type TokenContext, type StoryStyles } from '../engine/textLayout';
 import { ensureFamily, resolveFont, measure, fontMetrics, useFontStore } from '../engine/fonts';
 import { textBlock, type PageSide } from '../engine/grid';
 import type { GenContext } from '../engine/generators/context';
@@ -17,7 +17,7 @@ import { renderStrokes } from '../engine/brushes';
 import { getMotif, type MotifContext } from '../engine/motifs';
 import { parseSvgCached, svgPrims, svgMarkupFromDataUrl } from './svgImport';
 import { transformPath } from '../lib/pathData';
-import { findElement, pageSide } from '../model/surfaces';
+import { findElement, pageSide, facingOf } from '../model/surfaces';
 import { getImage } from './images';
 import { mix, parseColor } from '../lib/color';
 
@@ -67,7 +67,7 @@ function gridFor(spec: BookSpec, side: PageSide, el: Element, surface: SurfaceKe
 /* Text layout service                                                         */
 /* -------------------------------------------------------------------------- */
 
-interface ChainCache { members: Element[]; book: BookSpec; version: number; tokens: string; layouts: Map<string, FrameLayout> }
+interface ChainCache { members: Element[]; book: BookSpec; styles: string; version: number; tokens: string; layouts: Map<string, FrameLayout> }
 const chainCache = new WeakMap<Element, ChainCache>();
 const singleCache = new WeakMap<Element, Map<string, FrameLayout>>();
 
@@ -105,11 +105,23 @@ export function threadOf(project: Project, id: string): string[] {
   return chain;
 }
 
+/** The project's paragraph / character styles for the text engine, with a cache identity. */
+const stylesIds = new WeakMap<object, number>();
+let stylesCounter = 0;
+function storyStyles(project: Project): { styles: StoryStyles | null; key: string } {
+  const para = project.paragraphStyles ?? [], char = project.characterStyles ?? [];
+  if (!para.length && !char.length) return { styles: null, key: '-' };
+  const id = (o: object) => { let v = stylesIds.get(o); if (v == null) { v = ++stylesCounter; stylesIds.set(o, v); } return v; };
+  for (const d of [...para, ...char]) if (d.props.fontFamily) void ensureFamily(d.props.fontFamily);
+  return { styles: { para, char }, key: `${id(para)}/${id(char)}` };
+}
+
 export function layoutText(el: TextElement, ctx: CompileContext): FrameLayout {
   void ensureFamily(el.style.fontFamily);
   if (el.style.dropCap.enabled && el.style.dropCap.fontFamily) void ensureFamily(el.style.dropCap.fontFamily);
   const version = useFontStore.getState().version;
   const { project } = ctx;
+  const ss = storyStyles(project);
   const idx = threadIndex(project);
   const threaded = idx.byId.has(el.id) && (idx.prev.has(el.id) || (el.flowNext && idx.byId.has(el.flowNext)));
   if (threaded) {
@@ -118,26 +130,26 @@ export function layoutText(el: TextElement, ctx: CompileContext): FrameLayout {
     const tokens = tokensFor(project, chain[0].pageIndex);
     const tokensKey = JSON.stringify(tokens);
     const cached = chainCache.get(head);
-    if (cached && cached.version === version && cached.book === project.book && cached.tokens === tokensKey &&
+    if (cached && cached.version === version && cached.book === project.book && cached.styles === ss.key && cached.tokens === tokensKey &&
       cached.members.length === chain.length && cached.members.every((m, i) => m === chain[i].el)) {
       const hit = cached.layouts.get(el.id);
       if (hit) return hit;
     }
     const frames = chain.map((c) => frameSpecOf(c.el, c.pageIndex != null ? gridFor(project.book, pageSide(project, c.pageIndex), c.el, c.surface) : null));
-    const results = layoutStory(head.text, head.style, frames, tokens);
+    const results = layoutStory(head.text, head.style, frames, tokens, ss.styles);
     const layouts = new Map<string, FrameLayout>();
     chain.forEach((c, i) => layouts.set(c.el.id, results[i]));
-    chainCache.set(head, { members: chain.map((c) => c.el), book: project.book, version, tokens: tokensKey, layouts });
+    chainCache.set(head, { members: chain.map((c) => c.el), book: project.book, styles: ss.key, version, tokens: tokensKey, layouts });
     return layouts.get(el.id)!;
   }
   const tokens = tokensFor(project, ctx.pageIndex);
   const grid = gridFor(project.book, ctx.side, el, ctx.surface);
-  const key = `${version}|${JSON.stringify(tokens)}|${grid ? `${grid.origin.toFixed(3)}/${grid.increment}` : '-'}`;
+  const key = `${version}|${ss.key}|${JSON.stringify(tokens)}|${grid ? `${grid.origin.toFixed(3)}/${grid.increment}` : '-'}`;
   let m = singleCache.get(el);
   if (!m) { m = new Map(); singleCache.set(el, m); }
   const hit = m.get(key);
   if (hit) return hit;
-  const [layout] = layoutStory(el.text, el.style, [frameSpecOf(el, grid)], tokens);
+  const [layout] = layoutStory(el.text, el.style, [frameSpecOf(el, grid)], tokens, ss.styles);
   if (m.size > 24) m.clear();
   m.set(key, layout);
   return layout;
@@ -348,6 +360,54 @@ export interface PageRenderOptions {
   finishFilter?: (el: Element) => boolean;
 }
 
+/** Horizontal extent of an element in its surface coordinates (rotation and flips included). */
+export function elementXExtent(el: Element): [number, number] {
+  const m = elementMatrix(el);
+  const xs = [[0, 0], [el.w, 0], [0, el.h], [el.w, el.h]].map(([x, y]) => m[0] * x + m[2] * y + m[4]);
+  return [Math.min(...xs), Math.max(...xs)];
+}
+
+/** Does an item on a page of this side reach across the gutter onto the facing page? */
+export function crossesGutter(el: Element, side: PageSide, W: number): boolean {
+  const [x0, x1] = elementXExtent(el);
+  return side === 'left' ? x1 > W + 0.01 : x0 < -0.01;
+}
+
+/** An item of the facing page (or its master) that crosses the gutter onto this page. */
+export interface Crossover { el: Element; ctx: CompileContext; dx: number; above: boolean; master: boolean }
+
+function crossing(els: Element[], ctx: CompileContext, side: PageSide, W: number, dx: number, master: boolean): Crossover[] {
+  return els.filter((el) => !el.hidden && crossesGutter(el, side, W)).map((el) => ({ el, ctx, dx, above: !!el.spreadAbove, master }));
+}
+
+/**
+ * Spread items: everything on the facing page that reaches across the gutter, to be drawn on this
+ * page too (beneath this page's items, or above them when the item is marked so).
+ */
+export function crossovers(project: Project, pageIndex: number): Crossover[] {
+  const f = facingOf(project, pageIndex);
+  if (!f) return [];
+  const fp = project.pages[f.index];
+  const side = pageSide(project, f.index);
+  const W = project.book.trimW;
+  const ctx: CompileContext = { project, surface: `page:${fp.id}`, pageIndex: f.index, side };
+  const m = fp.masterId ? project.masters.find((x) => x.id === fp.masterId) : null;
+  return [
+    ...(m ? crossing(side === 'left' ? m.left : m.right, { ...ctx, surface: `master:${m.id}:${side}` }, side, W, f.dx, true) : []),
+    ...crossing(fp.elements, ctx, side, W, f.dx, false),
+  ];
+}
+
+/** The same for a master spread being edited: items of the other side crossing onto this one. */
+export function masterCrossovers(project: Project, masterId: string, side: PageSide): Crossover[] {
+  const m = project.masters.find((x) => x.id === masterId);
+  if (!m || !project.book.facing) return [];
+  const other: PageSide = side === 'left' ? 'right' : 'left';
+  const W = project.book.trimW;
+  const ctx: CompileContext = { project, surface: `master:${m.id}:${other}`, pageIndex: null, side: other };
+  return crossing(other === 'left' ? m.left : m.right, ctx, other, W, side === 'left' ? W : -W, true);
+}
+
 /** All primitives of a page in page coordinates (trim origin). */
 export function compilePage(project: Project, pageIndex: number, opts: PageRenderOptions = {}): Prim[] {
   const page = project.pages[pageIndex];
@@ -367,7 +427,10 @@ export function compilePage(project: Project, pageIndex: number, opts: PageRende
       for (const el of side === 'left' ? m.left : m.right) if (accept(el)) out.push(placedElement(el, mctx));
     }
   }
+  const xs = crossovers(project, pageIndex).filter((c) => (opts.master !== false || !c.master) && accept(c.el) && c.el.type !== 'cutout');
+  for (const c of xs) if (!c.above) out.push(placedElement(c.el, c.ctx, c.dx));
   for (const el of page.elements) if (accept(el)) out.push(placedElement(el, ctx));
+  for (const c of xs) if (c.above) out.push(placedElement(c.el, c.ctx, c.dx));
   return out;
 }
 

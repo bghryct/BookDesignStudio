@@ -1,6 +1,6 @@
 import type { Element, Project, SurfaceKey } from '../../model/types';
 import type { PageSide } from '../../engine/grid';
-import { computeGrid } from '../../engine/grid';
+import { computeGrid, spreadGrid } from '../../engine/grid';
 import { applyMatrix, invert, multiply, translate, type Matrix } from '../../render/primitives';
 import { elementMatrix } from '../../render/compile';
 import { coverGrid, jacketGrid } from '../../engine/binding';
@@ -96,6 +96,13 @@ export function snapTargets(project: Project, surface: SurfaceDesc, others: { el
     xs.push(...g.snapX);
     ys.push(...g.snapY);
     if (spec.grid.snapToBaseline) ys.push(...g.baselines);
+    // The spread grid's columns, mapped onto this page (they may lie across the gutter).
+    const sg = surface.kind === 'page' || surface.kind === 'master' ? spreadGrid(spec) : null;
+    if (sg) {
+      const dx = surface.side === 'right' ? -spec.trimW : 0;
+      for (const c of sg.cols) xs.push(c.x + dx, c.x + c.w + dx);
+      xs.push(sg.block.x + dx, sg.block.x + sg.block.w + dx);
+    }
   }
   // Ruler guides on this surface.
   if (!project.guidesHidden) {

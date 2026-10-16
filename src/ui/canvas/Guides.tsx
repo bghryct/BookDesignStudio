@@ -1,6 +1,6 @@
 import React from 'react';
 import type { BookSpec, PanelGrid, Project } from '../../model/types';
-import { computeGrid, canonLines, panelGridLines } from '../../engine/grid';
+import { computeGrid, canonLines, panelGridLines, spreadGrid } from '../../engine/grid';
 import { coverGrid, jacketGrid, type BindingCalc, type JacketCalc } from '../../engine/binding';
 import type { SurfaceDesc } from './geometry';
 
@@ -40,13 +40,27 @@ export function SurfaceGuides({ project, surface }: { project: Project; surface:
       {g.showGrid && grid.rows.length > 1 && grid.rows.map((r, i) => (
         <rect key={`r${i}`} x={block.x} y={r.y} width={block.w} height={r.h} stroke={ROW} {...hair} />
       ))}
-      {g.showGrid && grid.cols.length > 1 && grid.cols.map((c, i) => (
+      {g.showGrid && grid.cols.length > 1 && !spreadGrid(project.book) && grid.cols.map((c, i) => (
         <rect key={`c${i}`} x={c.x} y={block.y} width={c.w} height={block.h} stroke={COLUMN} {...hair} />
       ))}
       {g.showGrid && grid.cols2.map((c, i) => (
         <rect key={`c2${i}`} x={c.x} y={block.y} width={c.w} height={block.h} stroke={SECOND} {...hair} strokeDasharray="6 3" />
       ))}
       {g.showMargins && <rect x={block.x} y={block.y} width={block.w} height={block.h} stroke={MARGIN} {...hair} />}
+    </g>
+  );
+}
+
+/** The column grid across a facing spread (spread coordinates), with the fold marked. */
+export function SpreadGridGuides({ project, x, y }: { project: Project; x: number; y: number }) {
+  const sg = spreadGrid(project.book);
+  if (!sg || !project.book.grid.showGrid) return null;
+  return (
+    <g transform={`translate(${x} ${y})`} pointerEvents="none">
+      {sg.cols.map((c, i) => <rect key={i} x={c.x} y={c.y} width={c.w} height={c.h} stroke={COLUMN} {...hair} />)}
+      {sg.cols.filter((c) => c.x < sg.fold && c.x + c.w > sg.fold).map((c, i) => (
+        <rect key={`f${i}`} x={c.x} y={c.y} width={c.w} height={c.h} fill={COLUMN} opacity={0.06} />
+      ))}
     </g>
   );
 }

@@ -51,7 +51,9 @@ function build(project: Project, o: SvgExportOptions): Built {
   const slots = b.facing ? [sp.left, sp.right] : [sp.right];
   slots.forEach((pi, k) => {
     if (pi == null) return;
-    prims.push({ t: 'group', matrix: [1, 0, 0, 1, k * b.trimW, 0], clip: `M${-bleed} ${-bleed}H${b.trimW + bleed}V${b.trimH + bleed}H${-bleed}Z`, children: compilePage(project, pi, { dieLines: true }) });
+    // Each page keeps its outer bleed only, so the halves of a spread item meet at the gutter.
+    const x0 = k === 0 ? -bleed : 0, x1 = k === slots.length - 1 ? b.trimW + bleed : b.trimW;
+    prims.push({ t: 'group', matrix: [1, 0, 0, 1, k * b.trimW, 0], clip: `M${x0} ${-bleed}H${x1}V${b.trimH + bleed}H${x0}Z`, children: compilePage(project, pi, { dieLines: true }) });
   });
   const nums = slots.filter((x): x is number => x != null).map((x) => x + 1).join('-');
   return { prims, box: { x: -bleed, y: -bleed, w: b.trimW * slots.length + 2 * bleed, h: b.trimH + 2 * bleed }, name: `spread-${nums}` };

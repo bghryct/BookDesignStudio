@@ -474,7 +474,8 @@ export function shaperFor(ref: FontRef): FontkitFont | null {
 export interface Shaped {
   /** Advance in em. */
   advance: number;
-  glyphs: { id: number; xAdvance: number; xOffset: number; yOffset: number }[];
+  /** `units`: UTF-16 code units of the text this glyph covers (ligatures cover several). */
+  glyphs: { id: number; xAdvance: number; xOffset: number; yOffset: number; units: number }[];
   /** True when every code point had a glyph. */
   complete: boolean;
 }
@@ -502,6 +503,7 @@ export function shape(text: string, ref: FontRef): Shaped | null {
     xAdvance: run.positions[i].xAdvance / upm,
     xOffset: run.positions[i].xOffset / upm,
     yOffset: run.positions[i].yOffset / upm,
+    units: (g.codePoints ?? []).reduce((n: number, cp: number) => n + (cp > 0xffff ? 2 : 1), 0),
   }));
   const shaped: Shaped = { advance: glyphs.reduce((s, g) => s + g.xAdvance, 0), glyphs, complete };
   shapeCache.set(key, shaped);
@@ -550,6 +552,159 @@ export function glyphPath(ref: FontRef, glyphId: number): { d: string; upm: numb
     if (glyphPathCache.size > 20000) glyphPathCache.clear();
   }
   return { d, upm: fk.unitsPerEm };
+}
+
+/**
+ * Extra advance after each glyph, pt, from a run's per-character kerning (`kern[i]` follows the
+ * UTF-16 unit `i`). A ligature takes the kerning of every character it covers.
+ */
+export function glyphKerns(shaped: Shaped, kern: number[] | undefined): number[] | null {
+  if (!kern || !kern.some((k) => k)) return null;
+  let u = 0;
+  return shaped.glyphs.map((g) => {
+    let k = 0;
+    for (let j = 0; j < Math.max(1, g.units); j++) k += kern[u + j] ?? 0;
+    u += Math.max(1, g.units);
+    return k;
+  });
+}
+
+/* -------------------------------------------------------------------------- */
+/* Optical kerning                                                             */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Optical kerning measures the white between two glyph outlines instead of trusting the kern
+ * table: each glyph is cut into horizontal bands and the gap is averaged band by band, with
+ * deep openings (the arm of a T, the bowl of an L) counted only up to a limit. The pair is then
+ * moved toward the gap of two straight stems of the same case (nn / HH), so the colour of the
+ * line is even: the eye judges letter spacing by area, not by distance.
+ */
+const BANDS = 14;
+interface Profile { left: (number | null)[]; right: (number | null)[] }
+const profileCache = new Map<string, Profile | null>();
+const pairCache = new Map<string, number>();
+
+function glyphProfile(ref: FontRef, glyphId: number, zone: number): Profile | null {
+  const fk = shaperFor(ref);
+  if (!fk) return null;
+  const key = `${ref.face}|${axesKey(ref.axes)}|${glyphId}|${zone.toFixed(3)}`;
+  if (profileCache.has(key)) return profileCache.get(key)!;
+  let prof: Profile | null = null;
+  try {
+    const upm = fk.unitsPerEm;
+    const cmds = (fk.getGlyph(glyphId).path as unknown as { commands: { command: string; args: number[] }[] }).commands;
+    const left: (number | null)[] = Array(BANDS).fill(null);
+    const right: (number | null)[] = Array(BANDS).fill(null);
+    const top = zone * upm;
+    const add = (x: number, y: number) => {
+      if (y < 0 || y > top) return;
+      const b = Math.min(BANDS - 1, Math.floor((y / top) * BANDS));
+      const xe = x / upm;
+      if (left[b] == null || xe < left[b]!) left[b] = xe;
+      if (right[b] == null || xe > right[b]!) right[b] = xe;
+    };
+    let cx = 0, cy = 0, sx = 0, sy = 0;
+    const line = (x1: number, y1: number) => {
+      const n = Math.max(1, Math.ceil(Math.hypot(x1 - cx, y1 - cy) / (upm / 120)));
+      for (let i = 1; i <= n; i++) add(cx + ((x1 - cx) * i) / n, cy + ((y1 - cy) * i) / n);
+      cx = x1; cy = y1;
+    };
+    for (const c of cmds) {
+      const a = c.args;
+      if (c.command === 'moveTo') { cx = sx = a[0]; cy = sy = a[1]; add(cx, cy); }
+      else if (c.command === 'lineTo') line(a[0], a[1]);
+      else if (c.command === 'quadraticCurveTo') {
+        const x0 = cx, y0 = cy;
+        for (let i = 1; i <= 10; i++) { const t = i / 10, u = 1 - t; line(u * u * x0 + 2 * u * t * a[0] + t * t * a[2], u * u * y0 + 2 * u * t * a[1] + t * t * a[3]); }
+      } else if (c.command === 'bezierCurveTo') {
+        const x0 = cx, y0 = cy;
+        for (let i = 1; i <= 12; i++) {
+          const t = i / 12, u = 1 - t;
+          line(u * u * u * x0 + 3 * u * u * t * a[0] + 3 * u * t * t * a[2] + t * t * t * a[4], u * u * u * y0 + 3 * u * u * t * a[1] + 3 * u * t * t * a[3] + t * t * t * a[5]);
+        }
+      } else if (c.command === 'closePath') line(sx, sy);
+    }
+    prof = left.some((v) => v != null) ? { left, right } : null;
+  } catch {
+    prof = null;
+  }
+  profileCache.set(key, prof);
+  if (profileCache.size > 20000) profileCache.clear();
+  return prof;
+}
+
+/**
+ * White between two profiles (em): the mean gap over the bands, each band counted only up to
+ * `depth` beyond the pair's closest approach. Deep openings (the space under a T's arm, between
+ * the diagonals of A and V) then read as open, as they do to the eye.
+ */
+function pairGap(L: Profile, R: Profile, advL: number, depth: number): number | null {
+  const g: (number | null)[] = [];
+  let min = Infinity;
+  for (let b = 0; b < BANDS; b++) {
+    const l = L.right[b], r = R.left[b];
+    if (l == null && r == null) { g.push(null); continue; }
+    if (l == null || r == null) { g.push(Infinity); continue; }
+    const v = advL - l + r;
+    g.push(v);
+    if (v < min) min = v;
+  }
+  if (!Number.isFinite(min)) return null;
+  let sum = 0, n = 0;
+  for (const v of g) { if (v == null) continue; sum += Math.min(v, min + depth); n++; }
+  return n >= BANDS / 3 ? sum / n : null;
+}
+
+const letterClass = (ch: string): 'lc' | 'uc' | null => (/\p{Ll}/u.test(ch) ? 'lc' : /[\p{Lu}\p{Lt}\p{N}]/u.test(ch) ? 'uc' : null);
+
+/**
+ * Optical kerning for a run: extra advance (em) after each UTF-16 unit, or null when nothing
+ * changes. Each letter's share of white is what it has beside its own twin (as the type designer
+ * spaced it); a pair is moved until its white equals the sum of the two shares.
+ */
+export function opticalKerning(text: string, ref: FontRef): number[] | null {
+  const shaped = shape(text, ref);
+  if (!shaped || !shaped.complete || shaped.glyphs.length < 2) return null;
+  const m = fontMetrics(ref);
+  const xH = m.xHeight || 0.45, capH = m.capHeight || 0.68;
+  const depth = 0.15 * xH;
+  const starts: number[] = [];
+  let u = 0;
+  for (const g of shaped.glyphs) { starts.push(u); u += Math.max(1, g.units); }
+  const out = new Array<number>(text.length).fill(0);
+  let any = false;
+  const self = (id: number, adv: number, zone: number) => {
+    const p = glyphProfile(ref, id, zone);
+    return p ? pairGap(p, p, adv, depth) : null;
+  };
+  for (let i = 0; i + 1 < shaped.glyphs.length; i++) {
+    const gl = shaped.glyphs[i], gr = shaped.glyphs[i + 1];
+    const cl = letterClass(text[starts[i]] ?? ''), cr = letterClass(text[starts[i + 1]] ?? '');
+    if (!cl || !cr) continue;
+    const zone = cl === 'lc' || cr === 'lc' ? xH : capH;
+    const key = `${ref.face}|${axesKey(ref.axes)}|${featKey(ref.features)}|${gl.id}|${gr.id}|${cl}${cr}`;
+    let k = pairCache.get(key);
+    if (k == null) {
+      k = 0;
+      const pl = glyphProfile(ref, gl.id, zone), pr = glyphProfile(ref, gr.id, zone);
+      const gap = pl && pr ? pairGap(pl, pr, gl.xAdvance, depth) : null;
+      const sl = self(gl.id, gl.xAdvance, cl === 'lc' ? xH : capH), sr = self(gr.id, gr.xAdvance, cr === 'lc' ? xH : capH);
+      if (gap != null && sl != null && sr != null) {
+        // Gentle, with a dead band: small differences between well-spaced letters are left alone.
+        const d = ((sl + sr) / 2 - gap) * 0.6;
+        k = Math.max(-0.12, Math.min(0.05, Math.sign(d) * Math.max(0, Math.abs(d) - 0.025)));
+        k = Math.round(k * 500) / 500;
+      }
+      pairCache.set(key, k);
+      if (pairCache.size > 50000) pairCache.clear();
+    }
+    if (k) {
+      out[starts[i] + Math.max(1, gl.units) - 1] = k;
+      any = true;
+    }
+  }
+  return any ? out : null;
 }
 
 /** Bytes of a face (for PDF embedding / project export). */

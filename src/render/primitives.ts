@@ -79,6 +79,8 @@ export interface TextRun {
   color: string;
   /** Extra space after each glyph, pt. */
   letterSpacing?: number;
+  /** Pair kerning: extra advance after each UTF-16 unit of `text`, pt (manual + optical). */
+  kern?: number[];
   /** Rotation in degrees around (x, y) — used for sideways Latin in vertical text. */
   rotate?: number;
   /** Horizontal compression (tate-chū-yoko). */

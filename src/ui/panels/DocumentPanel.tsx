@@ -129,6 +129,23 @@ export function DocumentPanel() {
           <NumberField label="Micro-grid" value={book.grid.microDivisions} min={1} max={12} decimals={0} onChange={(v) => set((d) => { d.grid.microDivisions = Math.round(v); })} hint="Bosshard's dual grid: subdivisions per field" />
           <NumberField label="2nd system (Bosshard)" value={book.grid.secondaryColumns ?? 0} min={0} max={24} decimals={0} onChange={(v) => set((d) => { d.grid.secondaryColumns = Math.round(v); })} hint="A second column system on the same text block (e.g. 2 over 3); 0 = off. Shown dashed orange; items snap to both." />
         </Row>
+        {book.facing && (
+          <div className="rounded-md border border-ink-700 p-2">
+            <Toggle label="Grid across the spread" checked={(book.grid.spreadColumns ?? 0) > 0} onChange={(v) => set((d) => {
+              d.grid.spreadColumns = v ? Math.max(2, d.grid.columns * 2) : 0;
+              if (v && d.grid.spreadGutter == null) d.grid.spreadGutter = d.grid.gutter;
+            })} hint="One column system from outer margin to outer margin, so pictures and headings can run across the fold" />
+            {(book.grid.spreadColumns ?? 0) > 0 && (
+              <>
+                <Row className="mt-1.5">
+                  <NumberField label="Spread columns" value={book.grid.spreadColumns ?? 0} min={1} max={48} decimals={0} onChange={(v) => set((d) => { d.grid.spreadColumns = Math.max(1, Math.round(v)); })} />
+                  <NumberField label="Gutter" length value={book.grid.spreadGutter ?? book.grid.gutter} min={0} onChange={(v) => set((d) => { d.grid.spreadGutter = v; })} />
+                </Row>
+                <Hint>{(book.grid.spreadColumns ?? 0) % 2 === 0 ? 'Even: the middle gutter sits on the fold, so no column is cut by the binding.' : 'Odd: the middle column runs across the fold. Keep text out of it; use it for pictures.'} Rows, baselines and margins stay per page.</Hint>
+              </>
+            )}
+          </div>
+        )}
         <Button className="w-full" onClick={() => {
           const patch = lockGridToBaseline(s().project.book);
           set((d) => { if (patch.margins) d.margins = patch.margins; if (patch.grid) d.grid = patch.grid; });

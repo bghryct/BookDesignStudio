@@ -9,9 +9,10 @@ import { Section, Row, NumberField, Slider, Select, Toggle, ColorField, Segmente
 import { getFamilies, getFamily, getFace, resolveFont, useFontStore } from '../../engine/fonts';
 import { threadOf } from '../../render/compile';
 import { HYPHEN_LANGUAGES } from '../../engine/hyphenate';
+import { FrameStyleSection, StylesManager } from './StylesPanel';
+import type { KerningMode } from '../../model/types';
 
 const FEATURES: { tag: string; label: string; hint: string }[] = [
-  { tag: 'kern', label: 'Kerning', hint: 'Pair kerning (on by default)' },
   { tag: 'liga', label: 'Ligatures', hint: 'Standard ligatures fi fl ff' },
   { tag: 'dlig', label: 'Discretionary ligs', hint: 'ct st and historical ligatures' },
   { tag: 'hlig', label: 'Historical ligs', hint: 'Long s and period ligatures' },
@@ -38,7 +39,12 @@ export function TypePanel() {
   useFontStore((s) => s.version);
   const loc = selection.length === 1 ? findElement(project, selection[0]) : null;
   if (!loc || loc.el.type !== 'text') {
-    return <div className="p-4 text-[11.5px] leading-relaxed text-ink-400">Select a text frame to set its type. A threaded story shares one style, set on its first frame.</div>;
+    return (
+      <div>
+        <div className="p-4 text-[11.5px] leading-relaxed text-ink-400">Select a text frame to set its type. A threaded story shares one style, set on its first frame.</div>
+        <StylesManager />
+      </div>
+    );
   }
   const headId = threadOf(project, loc.el.id)[0] ?? loc.el.id;
   const head = (findElement(project, headId)?.el ?? loc.el) as TextElement;
@@ -57,8 +63,10 @@ function TypeControls({ el }: { el: TextElement }) {
   const supported = new Set(face?.features ?? []);
   const families = getFamilies();
 
+  const kerning: KerningMode = st.kerning ?? (st.features.kern === false ? 'none' : 'metrics');
   return (
     <div>
+      <FrameStyleSection el={el} />
       <Section title="Character" id="type-char">
         <Select label="Typeface" value={st.fontFamily} options={families.map((f) => ({ value: f.id, label: f.name, group: f.builtin ? cap(f.category) : 'Uploaded' }))} onChange={(v) => set((d) => { d.fontFamily = v; d.axes = {}; })} />
         <p className="text-[10.5px] leading-snug text-ink-400"><span className="text-ink-300">{fam.classification}.</span> {fam.note}</p>
@@ -82,6 +90,15 @@ function TypeControls({ el }: { el: TextElement }) {
           <NumberField label="Weight" value={st.weight} min={100} max={1000} step={10} decimals={0} onScrubStart={begin} onChange={(v) => set((d) => { d.weight = Math.round(v); })} />
           <div className="flex items-end"><Toggle label="Italic" checked={st.italic} onChange={(v) => set((d) => { d.italic = v; })} /></div>
         </Row>
+        <div>
+          <span className="mb-1 block text-[10.5px] text-ink-400">Kerning</span>
+          <Segmented<KerningMode> value={kerning} onChange={(v) => set((d) => { d.kerning = v; delete d.features.kern; })} options={[
+            { value: 'metrics', label: 'Metrics', title: 'The kerning pairs the type designer built into the font' },
+            { value: 'optical', label: 'Optical', title: 'Measured from the glyph outlines: evens the white between every pair, also for fonts with poor or no kern tables' },
+            { value: 'none', label: 'Off', title: 'Unkerned' },
+          ]} />
+          <p className="mt-1 text-[10px] leading-snug text-ink-500">Kern one pair by hand in the story editor: cursor between the letters, ⌥← tighter, ⌥→ looser (⇧ ×5).</p>
+        </div>
         <ColorField label="Colour" value={st.color} onChange={(v) => v && set((d) => { d.color = v; })} />
         <Select label="Case" value={st.textTransform} options={[{ value: 'none', label: 'As typed' }, { value: 'uppercase', label: 'CAPITALS' }, { value: 'lowercase', label: 'lowercase (Crouwel)' }, { value: 'small-caps', label: 'Small caps' }]} onChange={(v) => set((d) => { d.textTransform = v; })} />
       </Section>
@@ -147,16 +164,37 @@ function TypeControls({ el }: { el: TextElement }) {
           { value: 'justify-all', label: 'All', title: 'Justify all lines' },
         ]} />
         <Row>
-          <NumberField label="First-line indent" unit="pt" value={st.firstLineIndent} min={0} step={0.5} onScrubStart={begin} onChange={(v) => set((d) => { d.firstLineIndent = v; })} hint="One em is the classical indent" />
+          <NumberField label="First-line indent" unit="pt" value={st.firstLineIndent} min={-200} step={0.5} onScrubStart={begin} onChange={(v) => set((d) => { d.firstLineIndent = v; })} hint="One em is the classical indent; negative hangs the first line" />
           <NumberField label="Paragraph space" unit="pt" value={st.paragraphSpacing} min={0} step={0.5} onScrubStart={begin} onChange={(v) => set((d) => { d.paragraphSpacing = v; })} />
+          <NumberField label="Left indent" unit="pt" value={st.leftIndent ?? 0} min={0} step={0.5} onScrubStart={begin} onChange={(v) => set((d) => { d.leftIndent = v; })} />
+          <NumberField label="Right indent" unit="pt" value={st.rightIndent ?? 0} min={0} step={0.5} onScrubStart={begin} onChange={(v) => set((d) => { d.rightIndent = v; })} />
         </Row>
         <Toggle label="Indent first paragraph" checked={st.indentFirstParagraph} onChange={(v) => set((d) => { d.indentFirstParagraph = v; })} hint="Classical practice sets the first paragraph after a heading flush" />
         <Toggle label="Optical margin alignment" checked={st.opticalMargin} onChange={(v) => set((d) => { d.opticalMargin = v; })} hint="Hang punctuation and nudge A, T, V, W, Y into the margin so edges look straight" />
         <Toggle label="Lock to baseline grid" checked={st.baselineGrid} onChange={(v) => set((d) => { d.baselineGrid = v; })} hint="Every line on the document grid so recto and verso back up" />
         <Toggle label="Avoid one-word last lines" checked={st.avoidRunts} onChange={(v) => set((d) => { d.avoidRunts = v; })} />
-        <Toggle label="Hyphenate" checked={st.hyphenate} onChange={(v) => set((d) => { d.hyphenate = v; })} hint="Liang patterns; at least 2 letters before and 3 after a break" />
-        {st.hyphenate && <Select label="Language" value={st.language} options={HYPHEN_LANGUAGES.map((l) => ({ value: l.id, label: l.label }))} onChange={(v) => set((d) => { d.language = v; })} />}
         <Toggle label="First line in small caps" checked={st.firstLineSmallCaps} onChange={(v) => set((d) => { d.firstLineSmallCaps = v; })} />
+      </Section>
+
+      <Section title="Justification & hyphenation" id="type-hj" defaultOpen={false}>
+        <span className="block text-[10.5px] text-ink-400">Word spaces in justified lines, % of the desired space</span>
+        <Row>
+          <NumberField label="Minimum" unit="%" value={st.wordSpaceMin ?? 67} min={30} max={100} step={1} decimals={0} onScrubStart={begin} onChange={(v) => set((d) => { d.wordSpaceMin = v; })} />
+          <NumberField label="Maximum" unit="%" value={st.wordSpaceMax ?? 150} min={100} max={400} step={1} decimals={0} onScrubStart={begin} onChange={(v) => set((d) => { d.wordSpaceMax = v; })} hint="Narrow ranges give even colour; the breaker re-tries wider only when nothing fits" />
+        </Row>
+        <Toggle label="Hyphenate" checked={st.hyphenate} onChange={(v) => set((d) => { d.hyphenate = v; })} hint="Liang patterns for the chosen language" />
+        {st.hyphenate && (
+          <>
+            <Select label="Language" value={st.language} options={HYPHEN_LANGUAGES.map((l) => ({ value: l.id, label: l.label }))} onChange={(v) => set((d) => { d.language = v; })} />
+            <Row>
+              <NumberField label="Words longer than" value={st.hyphenMinWord ?? 5} min={3} max={15} decimals={0} onChange={(v) => set((d) => { d.hyphenMinWord = Math.round(v); })} />
+              <NumberField label="Consecutive hyphens" value={st.hyphenLimit ?? 0} min={0} max={9} decimals={0} onChange={(v) => set((d) => { d.hyphenLimit = Math.round(v); })} hint="0 = no limit. Bringhurst: no more than two in a row" />
+              <NumberField label="Letters before break" value={st.hyphenBefore ?? 2} min={1} max={6} decimals={0} onChange={(v) => set((d) => { d.hyphenBefore = Math.round(v); })} />
+              <NumberField label="Letters after break" value={st.hyphenAfter ?? 3} min={1} max={6} decimals={0} onChange={(v) => set((d) => { d.hyphenAfter = Math.round(v); })} />
+            </Row>
+            <Toggle label="Hyphenate capitalised words" checked={st.hyphenateCaps !== false} onChange={(v) => set((d) => { d.hyphenateCaps = v; })} hint="Off keeps names and sentence openings whole" />
+          </>
+        )}
       </Section>
 
       <Section title="Initial / drop cap" id="type-dropcap">
@@ -178,6 +216,8 @@ function TypeControls({ el }: { el: TextElement }) {
           </>
         )}
       </Section>
+
+      <StylesManager />
 
       <Section title="Direction & writing mode" id="type-dir" defaultOpen={false}>
         <Segmented value={st.writingMode} onChange={(v) => set((d) => {

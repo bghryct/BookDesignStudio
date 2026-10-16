@@ -37,6 +37,17 @@ export function pageSide(project: Project, pageIndex: number): PageSide {
   return recto !== rtl ? 'right' : 'left';
 }
 
+/**
+ * The page facing this one in its reader spread, and the x offset that maps the facing page's
+ * coordinates onto this page's (+W when the facing page is on the right, −W on the left).
+ */
+export function facingOf(project: Project, pageIndex: number): { index: number; dx: number } | null {
+  if (!project.book.facing || pageIndex <= 0) return null;
+  const partner = pageIndex % 2 === 1 ? pageIndex + 1 : pageIndex - 1;
+  if (partner < 1 || partner >= project.pages.length) return null;
+  return { index: partner, dx: pageSide(project, pageIndex) === 'left' ? project.book.trimW : -project.book.trimW };
+}
+
 export const pageKey = (pageId: ID): SurfaceKey => `page:${pageId}`;
 export const masterKey = (masterId: ID, side: PageSide): SurfaceKey => `master:${masterId}:${side}`;
 export const COVER_KEY: SurfaceKey = 'cover';

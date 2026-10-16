@@ -62,7 +62,7 @@ export function hyphenPoints(word: string, lang: string, minBefore = 2, minAfter
     return [];
   }
   if (word.length < minBefore + minAfter) return [];
-  const key = `${lang}|${word}`;
+  const key = `${lang}|${minBefore}|${minAfter}|${word}`;
   const hit = cache.get(key);
   if (hit) return hit;
   const out: number[] = [];

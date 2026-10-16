@@ -14,7 +14,7 @@ import type {
 import { Section, Row, NumberField, Slider, Select, Toggle, ColorField, TextInput, Button, IconButton, Hint, Segmented } from '../controls';
 import { PATTERN_PARAMS, OVERPRINT_PARAMS, ORNAMENT_PARAMS } from '../../engine/generators';
 import { getFamilies } from '../../engine/fonts';
-import { threadOf, layoutText, contextForElement } from '../../render/compile';
+import { threadOf, layoutText, contextForElement, crossesGutter } from '../../render/compile';
 import { importFiles } from '../importFiles';
 import { parseSvgCached, svgMarkupFromDataUrl, svgPrims } from '../../render/svgImport';
 import { makePath } from '../../model/factory';
@@ -24,7 +24,7 @@ import { getMotif } from '../../engine/motifs';
 import type { MotifElement } from '../../model/types';
 import { parsePath, pathBounds, serialize, transformSegs } from '../../lib/pathData';
 import { computeGrid, textBlock } from '../../engine/grid';
-import { pageSide } from '../../model/surfaces';
+import { pageSide, facingOf } from '../../model/surfaces';
 
 const BLENDS: BlendMode[] = ['normal', 'multiply', 'screen', 'overlay', 'darken', 'lighten', 'color-dodge', 'color-burn', 'hard-light', 'soft-light', 'difference', 'exclusion', 'hue', 'saturation', 'color', 'luminosity'];
 const FINISHES: { value: Finish; label: string }[] = [
@@ -107,6 +107,38 @@ function AlignButtons({ onAlign }: { onAlign: (m: 'l' | 'c' | 'r' | 't' | 'm' | 
   );
 }
 
+/** Fit an item to its page or across the spread, and choose how a gutter-crossing item stacks. */
+function SpreadTools({ el, project, set }: { el: Element; project: Project; set: (p: Partial<Element>) => void }) {
+  const loc = findElement(project, el.id);
+  const spec = project.book;
+  const master = loc?.key.startsWith('master:');
+  if (!loc || (loc.pageIndex == null && !master)) return null;
+  const side = loc.pageIndex != null ? pageSide(project, loc.pageIndex) : loc.key.endsWith(':left') ? 'left' : 'right';
+  const hasFacing = spec.facing && (master || (loc.pageIndex != null && !!facingOf(project, loc.pageIndex)));
+  const W = spec.trimW, H = spec.trimH, b = spec.bleed;
+  const x0 = side === 'left' ? 0 : -W; // the spread's left edge in this page's coordinates
+  const crosses = spec.facing && crossesGutter(el, side, W);
+  return (
+    <div>
+      <span className="mb-1 block text-[10.5px] text-ink-400">Page & spread</span>
+      <div className="grid grid-cols-3 gap-1">
+        <Button title="Cover the page to the bleed (not into the gutter)" onClick={() => set({ x: !spec.facing || side === 'left' ? -b : 0, y: -b, w: W + (spec.facing ? b : 2 * b), h: H + 2 * b, rotation: 0 })}>Fill page</Button>
+        <Button disabled={!hasFacing} title="Run across both pages, bleed to bleed" onClick={() => set({ x: x0 - b, y: -b, w: 2 * W + 2 * b, h: H + 2 * b, rotation: 0 })}>Fill spread</Button>
+        <Button disabled={!hasFacing} title="From the left page's outer margin to the right page's" onClick={() => {
+          const L = textBlock(spec, 'left'), R = textBlock(spec, 'right');
+          set({ x: x0 + L.x, w: W + R.x + R.w - L.x, rotation: 0 });
+        }}>Span text</Button>
+      </div>
+      {crosses && (
+        <div className="mt-2">
+          <span className="mb-1 block text-[10.5px] text-ink-400">Spread item · on the facing page it sits</span>
+          <Segmented value={el.spreadAbove ? 'above' : 'below'} onChange={(v) => set({ spreadAbove: v === 'above' })} options={[{ value: 'below', label: 'Beneath its items' }, { value: 'above', label: 'Above its items' }]} />
+        </div>
+      )}
+    </div>
+  );
+}
+
 function SinglePanel({ el, surfaceKey, project }: { el: Element; surfaceKey: string; project: Project }) {
   const { set, live, begin } = useEdit(el.id);
   const s = useStore.getState;
@@ -153,6 +185,7 @@ function SinglePanel({ el, surfaceKey, project }: { el: Element; surfaceKey: str
           <span className="mb-1 block text-[10.5px] text-ink-400">Align to {onCover ? 'cover' : 'text block'}</span>
           <AlignButtons onAlign={alignToPage} />
         </div>
+        {!onCover && <SpreadTools el={el} project={project} set={set} />}
       </Section>
       <Section title="Appearance" id="el-appearance">
         <Slider label="Opacity" value={el.opacity} min={0} max={1} onStart={begin} onChange={(v) => live({ opacity: v })} format={(v) => `${Math.round(v * 100)}%`} />

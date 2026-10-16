@@ -84,7 +84,64 @@ export interface TextStyle {
   dropCap: DropCapStyle;
   /** Avoid single-word last lines (re-breaks with a tighter fit). */
   avoidRunts: boolean;
+  /** Pair kerning: the font's own kern table, outline-based optical kerning, or none. */
+  kerning?: KerningMode;
+  /** Paragraph indents from the column edges, pt (a negative first-line indent hangs). */
+  leftIndent?: number;
+  rightIndent?: number;
+  /** Justification: smallest and largest word space, % of the desired space. */
+  wordSpaceMin?: number;
+  wordSpaceMax?: number;
+  /** Hyphenation zone: shortest word, letters kept before / after a break, consecutive hyphens (0 = no limit). */
+  hyphenMinWord?: number;
+  hyphenBefore?: number;
+  hyphenAfter?: number;
+  hyphenLimit?: number;
+  hyphenateCaps?: boolean;
 }
+
+export type KerningMode = 'metrics' | 'optical' | 'none';
+
+/** A named paragraph style. Unset properties inherit from the frame. */
+export interface ParagraphStyleProps {
+  fontFamily?: string;
+  fontSize?: number;
+  leading?: number;
+  weight?: number;
+  italic?: boolean;
+  tracking?: number;
+  color?: string;
+  align?: TextAlign;
+  firstLineIndent?: number;
+  leftIndent?: number;
+  rightIndent?: number;
+  spaceBefore?: number;
+  spaceAfter?: number;
+  textTransform?: TextStyle['textTransform'];
+  features?: Record<string, boolean>;
+  hyphenate?: boolean;
+  kerning?: KerningMode;
+}
+
+/** A named character style, applied to a run inside a paragraph. */
+export interface CharacterStyleProps {
+  fontFamily?: string;
+  weight?: number;
+  italic?: boolean;
+  /** Size relative to the paragraph, %. */
+  sizeScale?: number;
+  /** Added to the paragraph tracking, thousandths of an em. */
+  tracking?: number;
+  color?: string;
+  textTransform?: TextStyle['textTransform'];
+  position?: 'normal' | 'superscript' | 'subscript';
+  /** Raise (+) or lower (−) the run, pt. */
+  baselineShift?: number;
+  features?: Record<string, boolean>;
+}
+
+export interface ParagraphStyleDef { id: ID; name: string; props: ParagraphStyleProps }
+export interface CharacterStyleDef { id: ID; name: string; props: CharacterStyleProps }
 
 /* ------------------------------------------------------------------------- */
 /* Elements                                                                   */
@@ -113,6 +170,8 @@ export interface ElementBase {
   finish?: Finish;
   /** Cover / jacket only: panel the element is anchored to (x is relative to that panel). */
   anchor?: 'front-flap' | 'front' | 'spine' | 'back' | 'back-flap' | null;
+  /** Facing pages: an item crossing the gutter is drawn on the facing page beneath its items, or above them. */
+  spreadAbove?: boolean;
 }
 
 export interface TextElement extends ElementBase {
@@ -126,6 +185,8 @@ export interface TextElement extends ElementBase {
   /** Thread: overflow continues in this text element (any page). */
   flowNext: ID | null;
   fill: string | null;
+  /** Paragraph style the frame's base style follows (redefining the style updates the frame). */
+  paraStyle?: ID | null;
 }
 
 export interface ImageElement extends ElementBase {
@@ -491,6 +552,9 @@ export interface GridSpec {
   secondaryColumns?: number;
   /** Hochuli: tint loose / tight lines and mark hyphen ladders on the canvas. */
   showSpacing?: boolean;
+  /** Facing pages: one column grid across the spread, outer margin to outer margin (0 = off). */
+  spreadColumns?: number;
+  spreadGutter?: number;
 }
 
 export interface BookSpec {
@@ -555,6 +619,9 @@ export interface Project {
   swatches: Swatch[];
   assets: Record<ID, Asset>;
   fonts: UploadedFontMeta[];
+  /** Named paragraph and character styles (`[Name]` / `<Name>…</Name>` in stories). */
+  paragraphStyles?: ParagraphStyleDef[];
+  characterStyles?: CharacterStyleDef[];
 }
 
 /* ------------------------------------------------------------------------- */

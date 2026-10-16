@@ -14,9 +14,9 @@
  *
  * Output is display-list primitives positioned in frame-local pt.
  */
-import type { TextStyle, TextElement } from '../model/types';
+import type { TextStyle, TextElement, ParagraphStyleDef, CharacterStyleDef, ParagraphStyleProps, CharacterStyleProps } from '../model/types';
 import type { FontRef, Prim, TextRun } from '../render/primitives';
-import { resolveFont, measure, fontMetrics, faceSupports, useFontStore } from './fonts';
+import { resolveFont, measure, fontMetrics, faceSupports, useFontStore, opticalKerning } from './fonts';
 import { hyphenPoints } from './hyphenate';
 import { illuminatedFrame } from './generators/cleves';
 import { toRoman } from '../model/units';
@@ -33,6 +33,9 @@ export interface TokenContext {
   author: string;
   publisher: string;
 }
+
+/** The project's named styles, used by `[Name]` paragraph tags and `<Name>…</Name>` runs. */
+export interface StoryStyles { para: ParagraphStyleDef[]; char: CharacterStyleDef[] }
 
 export interface FrameSpec {
   w: number;
@@ -89,48 +92,106 @@ export function expandTokens(text: string, t: TokenContext): string {
   });
 }
 
-interface SpanStyle { italic: boolean; bold: boolean; sc: boolean }
-interface Piece { text: string; st: SpanStyle }
+interface SpanStyle { italic: boolean; bold: boolean; sc: boolean; cs: CharacterStyleProps | null }
+/** `kern[i]`: manual kerning after UTF-16 unit `i`, thousandths of an em. */
+interface Piece { text: string; st: SpanStyle; kern?: number[] }
 interface Word { pieces: Piece[]; text: string }
 type ParaKind = 'body' | 'h1' | 'h2' | 'break';
-interface Paragraph { kind: ParaKind; words: Word[]; first: boolean }
+interface Paragraph { kind: ParaKind; words: Word[]; first: boolean; style: TextStyle; pstyle: ParagraphStyleProps | null }
 
-/** `*italic*`, `**bold**`, `^small caps^`; `\*` escapes. Lines: `# `, `## `, `---`. */
-function parseStory(text: string, style: TextStyle): Paragraph[] {
+const PLAIN: SpanStyle = { italic: false, bold: false, sc: false, cs: null };
+
+/** The frame style with a paragraph style laid over it (unset properties inherit). */
+export function applyParagraphStyle(s: TextStyle, p: ParagraphStyleProps | null | undefined): TextStyle {
+  if (!p) return s;
+  const out: TextStyle = { ...s };
+  const keys = ['fontFamily', 'fontSize', 'leading', 'weight', 'italic', 'tracking', 'color', 'align', 'firstLineIndent', 'leftIndent', 'rightIndent', 'textTransform', 'hyphenate', 'kerning'] as const;
+  for (const k of keys) if (p[k] != null) (out as unknown as Record<string, unknown>)[k] = p[k];
+  // A new size without a new leading keeps the frame's proportion of leading to size.
+  if (p.fontSize != null && p.leading == null) out.leading = +((s.leading * p.fontSize) / s.fontSize).toFixed(2);
+  if (p.fontFamily != null && p.fontFamily !== s.fontFamily) out.axes = {};
+  if (p.features) out.features = { ...s.features, ...p.features };
+  return out;
+}
+
+const mergeCs = (stack: CharacterStyleProps[]): CharacterStyleProps | null =>
+  stack.length ? stack.reduce<CharacterStyleProps>((a, b) => ({ ...a, ...b, features: { ...(a.features ?? {}), ...(b.features ?? {}) } }), {}) : null;
+
+const nameKey = (n: string) => n.trim().toLowerCase();
+
+/**
+ * `*italic*`, `**bold**`, `^small caps^`; `\*` escapes. Lines: `# `, `## `, `---`.
+ * `[Style] ` at the start of a line applies a paragraph style, `<Style>…</Style>` (or `</>`) a
+ * character style, `{k:-20}` kerns the following pair by thousandths of an em.
+ */
+function parseStory(text: string, style: TextStyle, styles: StoryStyles | null): Paragraph[] {
+  const pmap = new Map((styles?.para ?? []).map((d) => [nameKey(d.name), d.props]));
+  const cmap = new Map((styles?.char ?? []).map((d) => [nameKey(d.name), d.props]));
   const paras: Paragraph[] = [];
   let afterBreak = true;
   for (const rawLine of text.replace(/\r\n?/g, '\n').split('\n')) {
-    const line = rawLine.replace(/\s+$/, '');
+    let line = rawLine.replace(/\s+$/, '');
     if (!line.trim()) { continue; }
+    let pstyle: ParagraphStyleProps | null = null;
+    const tag = /^\[([^\]]{1,60})\]\s*/.exec(line);
+    if (tag && pmap.has(nameKey(tag[1]))) {
+      pstyle = pmap.get(nameKey(tag[1]))!;
+      line = line.slice(tag[0].length);
+      if (!line.trim()) continue;
+    }
     let kind: ParaKind = 'body';
     let body = line;
     if (/^#\s/.test(line)) { kind = 'h1'; body = line.slice(2); }
     else if (/^##\s/.test(line)) { kind = 'h2'; body = line.slice(3); }
     else if (/^(-{3,}|\*\s\*\s\*|⁂)$/.test(line.trim())) { kind = 'break'; body = '⁂'; }
-    const words = parseInline(body, style);
-    paras.push({ kind, words, first: afterBreak });
+    const eff = applyParagraphStyle(style, pstyle);
+    const words = parseInline(body, eff, cmap);
+    paras.push({ kind, words, first: afterBreak, style: eff, pstyle });
     afterBreak = kind !== 'body';
   }
   return paras;
 }
 
-function parseInline(s: string, style: TextStyle): Word[] {
-  const st: SpanStyle = { italic: false, bold: false, sc: false };
+function parseInline(s: string, style: TextStyle, cmap: Map<string, CharacterStyleProps>): Word[] {
+  const st: SpanStyle = { ...PLAIN };
+  const csStack: CharacterStyleProps[] = [];
   const words: Word[] = [];
   let cur: Piece[] = [];
   let buf = '';
+  let kbuf: number[] = [];
   const flush = () => {
-    if (buf) cur.push({ text: buf, st: { ...st } });
+    if (buf) cur.push({ text: buf, st: { ...st }, kern: kbuf.some((v) => v) ? Array.from({ length: buf.length }, (_, i) => kbuf[i] ?? 0) : undefined });
     buf = '';
+    kbuf = [];
   };
   const endWord = () => {
     flush();
     if (cur.length) words.push({ pieces: cur, text: cur.map((p) => p.text).join('') });
     cur = [];
   };
+  // Kerning after the last character set so far (a kern at a word start widens the space).
+  const addKern = (n: number) => {
+    if (buf) { kbuf[buf.length - 1] = (kbuf[buf.length - 1] ?? 0) + n; return; }
+    const piece = cur.length ? cur[cur.length - 1] : words.length ? words[words.length - 1].pieces.at(-1) : undefined;
+    if (!piece) return;
+    piece.kern ??= new Array<number>(piece.text.length).fill(0);
+    piece.kern[piece.text.length - 1] += n;
+  };
   for (let i = 0; i < s.length; i++) {
     const ch = s[i];
     if (ch === '\\' && i + 1 < s.length) { buf += s[++i]; continue; }
+    if (ch === '{') {
+      const m = /^\{k:([+-]?\d+(?:\.\d+)?)\}/.exec(s.slice(i, i + 16));
+      if (m) { addKern(parseFloat(m[1])); i += m[0].length - 1; continue; }
+    }
+    if (ch === '<' && cmap.size) {
+      const m = /^<(\/?)([^<>/]{0,40})>/.exec(s.slice(i, i + 46));
+      if (m) {
+        const name = nameKey(m[2]);
+        if (m[1] && csStack.length && (!name || cmap.has(name))) { flush(); csStack.pop(); st.cs = mergeCs(csStack); i += m[0].length - 1; continue; }
+        if (!m[1] && cmap.has(name)) { flush(); csStack.push(cmap.get(name)!); st.cs = mergeCs(csStack); i += m[0].length - 1; continue; }
+      }
+    }
     if (ch === '*' && s[i + 1] === '*') { flush(); st.bold = !st.bold; i++; continue; }
     if (ch === '*') { flush(); st.italic = !st.italic; continue; }
     if (ch === '^') { flush(); st.sc = !st.sc; continue; }
@@ -138,12 +199,17 @@ function parseInline(s: string, style: TextStyle): Word[] {
     buf += ch;
   }
   endWord();
-  const tt = style.textTransform;
-  if (tt === 'uppercase' || tt === 'lowercase') {
-    for (const w of words) {
-      for (const p of w.pieces) p.text = tt === 'uppercase' ? p.text.toUpperCase() : p.text.toLowerCase();
-      w.text = w.pieces.map((p) => p.text).join('');
+  for (const w of words) {
+    let changed = false;
+    for (const p of w.pieces) {
+      const tt = p.st.cs?.textTransform && p.st.cs.textTransform !== 'none' ? p.st.cs.textTransform : style.textTransform;
+      if (tt !== 'uppercase' && tt !== 'lowercase') continue;
+      const next = tt === 'uppercase' ? p.text.toUpperCase() : p.text.toLowerCase();
+      if (next.length !== p.text.length) p.kern = undefined;
+      p.text = next;
+      changed = true;
     }
+    if (changed) w.text = w.pieces.map((p) => p.text).join('');
   }
   return words;
 }
@@ -152,7 +218,8 @@ function parseInline(s: string, style: TextStyle): Word[] {
 /* Measured items                                                              */
 /* -------------------------------------------------------------------------- */
 
-interface Seg { text: string; font: FontRef; size: number; ls: number; width: number; color: string }
+/** `kern`: extra advance after each UTF-16 unit, pt; `dy`: baseline shift, pt (up). */
+interface Seg { text: string; font: FontRef; size: number; ls: number; width: number; color: string; kern?: number[]; dy?: number }
 
 interface Box { t: 'box'; w: number; segs: Seg[]; word: number }
 interface Glue { t: 'glue'; w: number; st: number; sh: number }
@@ -171,12 +238,17 @@ interface ParaStyle {
   weight: number;
   tracking: number;
   forceSc: boolean;
+  left: number;
+  right: number;
 }
 
 function paraStyle(p: Paragraph, s: TextStyle): ParaStyle {
   const base: ParaStyle = {
-    size: s.fontSize, leading: s.leading, align: s.align, indent: p.first && !s.indentFirstParagraph ? 0 : s.firstLineIndent,
-    spaceBefore: p.first ? 0 : s.paragraphSpacing, spaceAfter: 0, weight: s.weight, tracking: s.tracking, forceSc: s.textTransform === 'small-caps',
+    size: s.fontSize, leading: s.leading, align: s.align,
+    // A negative first-line indent hangs, on every paragraph (lists, bibliographies).
+    indent: s.firstLineIndent < 0 ? s.firstLineIndent : p.first && !s.indentFirstParagraph ? 0 : s.firstLineIndent,
+    spaceBefore: p.first ? 0 : p.pstyle?.spaceBefore ?? s.paragraphSpacing, spaceAfter: p.pstyle?.spaceAfter ?? 0,
+    weight: s.weight, tracking: s.tracking, forceSc: s.textTransform === 'small-caps', left: s.leftIndent ?? 0, right: s.rightIndent ?? 0,
   };
   const centred = s.align === 'justify' || s.align === 'center' || s.align === 'justify-all';
   switch (p.kind) {
@@ -194,51 +266,78 @@ function paraStyle(p: Paragraph, s: TextStyle): ParaStyle {
 const isLower = (ch: string) => ch !== ch.toUpperCase() && ch === ch.toLowerCase();
 
 class ItemBuilder {
-  constructor(private style: TextStyle, private ps: ParaStyle) {}
+  private rtl: boolean;
+  constructor(private style: TextStyle, private ps: ParaStyle) { this.rtl = style.direction === 'rtl'; }
 
   font(st: SpanStyle, extraFeatures?: Record<string, boolean>): FontRef {
     const s = this.style;
+    const cs = st.cs;
     // Italic inside italic text returns to roman — the typographic convention for emphasis.
-    const italic = s.italic !== st.italic;
-    const weight = st.bold ? Math.min(900, Math.max(this.ps.weight + 250, 650)) : this.ps.weight;
-    const features = { ...s.features, ...(extraFeatures ?? {}) };
-    if (s.textTransform === 'uppercase') features.case = true;
-    return resolveFont({ family: s.fontFamily, weight, italic, axes: s.axes, features, size: this.ps.size });
+    const italic = (cs?.italic ?? s.italic) !== st.italic;
+    const w0 = cs?.weight ?? this.ps.weight;
+    const weight = st.bold ? Math.min(900, Math.max(w0 + 250, 650)) : w0;
+    const features = { ...s.features, ...(cs?.features ?? {}), ...(extraFeatures ?? {}) };
+    if (s.textTransform === 'uppercase' || cs?.textTransform === 'uppercase') features.case = true;
+    // Optical kerning replaces the font's pairs; "none" sets the type unkerned.
+    if ((s.kerning ?? 'metrics') !== 'metrics') features.kern = false;
+    const family = cs?.fontFamily ?? s.fontFamily;
+    return resolveFont({ family, weight, italic, axes: family === s.fontFamily ? s.axes : {}, features, size: this.ps.size });
+  }
+
+  /** One measured segment; manual (‰ em) and optical kerning become extra advance per character. */
+  private seg(text: string, font: FontRef, size: number, ls: number, color: string, dy: number, manual?: number[]): Seg {
+    let kern: number[] | undefined;
+    if (!this.rtl) {
+      const man = manual && manual.length === text.length && manual.some((v) => v) ? manual : null;
+      const opt = this.style.kerning === 'optical' ? opticalKerning(text, font) : null;
+      if (man || opt) kern = Array.from({ length: text.length }, (_, i) => ((man?.[i] ?? 0) / 1000) * size + (opt ? opt[i] * size : 0));
+    }
+    const kw = kern ? kern.reduce((a, b) => a + b, 0) : 0;
+    return { text, font, size, ls, width: measure(text, font, size) + ls * [...text].length + kw, color, kern, dy: dy || undefined };
   }
 
   /** Measure a piece of text in a span style, synthesising small caps when needed. */
-  segs(text: string, st: SpanStyle, sc: boolean): Seg[] {
+  segs(text: string, st: SpanStyle, sc: boolean, manual?: number[]): Seg[] {
     const ps = this.ps;
-    const color = this.style.color;
-    const ls = (ps.tracking / 1000) * ps.size;
-    if (!sc) {
-      const font = this.font(st);
-      return [{ text, font, size: ps.size, ls, width: measure(text, font, ps.size) + ls * [...text].length, color }];
+    const cs = st.cs;
+    let size = ps.size * ((cs?.sizeScale ?? 100) / 100);
+    let dy = cs?.baselineShift ?? 0;
+    let extra: Record<string, boolean> | undefined;
+    if (cs?.position === 'superscript' || cs?.position === 'subscript') {
+      // True superior / inferior figures when the font has them, else scaled and shifted.
+      const tag = cs.position === 'superscript' ? 'sups' : 'subs';
+      if (faceSupports(this.font(st, { [tag]: true }), tag)) extra = { [tag]: true };
+      else { dy += cs.position === 'superscript' ? size * 0.33 : -size * 0.14; size *= 0.62; }
     }
-    const trial = this.font(st, { smcp: true });
+    const color = cs?.color ?? this.style.color;
+    const ls = ((ps.tracking + (cs?.tracking ?? 0)) / 1000) * size;
+    sc = sc || cs?.textTransform === 'small-caps';
+    if (!sc) return [this.seg(text, this.font(st, extra), size, ls, color, dy, manual)];
+    const trial = this.font(st, { ...extra, smcp: true });
     if (faceSupports(trial, 'smcp')) {
       // Small caps want a touch of letter-spacing (Bringhurst §3.2.2).
-      const lsc = ls + 0.05 * ps.size;
-      return [{ text, font: trial, size: ps.size, ls: lsc, width: measure(text, trial, ps.size) + lsc * [...text].length, color }];
+      return [this.seg(text, trial, size, ls + 0.05 * size, color, dy, manual)];
     }
     // Synthetic small caps: lowercase → capitals at 72% with added tracking.
     const out: Seg[] = [];
-    const font = this.font(st);
+    const font = this.font(st, extra);
     let buf = '';
+    let start = 0, u = 0;
     let lower: boolean | null = null;
     const push = () => {
       if (!buf) return;
-      const size = lower ? ps.size * 0.72 : ps.size;
+      const sz = lower ? size * 0.72 : size;
       const t = lower ? buf.toUpperCase() : buf;
-      const l = ls + 0.05 * size;
-      out.push({ text: t, font, size, ls: l, width: measure(t, font, size) + l * [...t].length, color });
+      out.push(this.seg(t, font, sz, ls + 0.05 * sz, color, dy, t.length === buf.length ? manual?.slice(start, start + buf.length) : undefined));
       buf = '';
+      start = u;
     };
     for (const ch of text) {
       const lc = isLower(ch);
       if (lower !== null && lc !== lower) push();
       lower = lc;
       buf += ch;
+      u += ch.length;
     }
     push();
     return out;
@@ -249,21 +348,21 @@ class ItemBuilder {
     let off = 0;
     for (const p of word.pieces) {
       const a = Math.max(from, off), b = Math.min(to, off + p.text.length);
-      if (b > a) out.push(...this.segs(p.text.slice(a - off, b - off), p.st, sc || p.st.sc || this.ps.forceSc));
+      if (b > a) out.push(...this.segs(p.text.slice(a - off, b - off), p.st, sc || p.st.sc || this.ps.forceSc, p.kern?.slice(a - off, b - off)));
       off += p.text.length;
     }
     return out;
   }
 
   space(): number {
-    const font = this.font({ italic: false, bold: false, sc: false });
+    const font = this.font(PLAIN);
     const sp = measure(' ', font, this.ps.size);
     return sp * (1 + this.style.wordSpacing / 100) + (this.ps.tracking / 1000) * this.ps.size;
   }
 
   hyphen(word: Word, at: number): Seg {
     let off = 0;
-    let st: SpanStyle = { italic: false, bold: false, sc: false };
+    let st: SpanStyle = PLAIN;
     for (const p of word.pieces) {
       if (at <= off + p.text.length) { st = p.st; break; }
       off += p.text.length;
@@ -279,11 +378,14 @@ function buildItems(p: Paragraph, style: TextStyle, ps: ParaStyle, scWords: numb
   const items: Item[] = [];
   const sp = b.space();
   const justify = !ragged;
+  // Justification range for word spaces, % of the desired space (Bringhurst: keep it narrow).
+  const stretch = Math.max(0.05, (style.wordSpaceMax ?? 150) / 100 - 1);
+  const shrink = Math.max(0, Math.min(0.9, 1 - (style.wordSpaceMin ?? 67) / 100));
   if (ps.indent > 0) items.push({ t: 'box', w: ps.indent, segs: [], word: -1 });
   p.words.forEach((word, wi) => {
     if (wi > 0) {
       if (style.avoidRunts && wi === p.words.length - 1 && p.words.length > 3) items.push({ t: 'pen', w: 0, p: INF, f: false });
-      if (justify) items.push({ t: 'glue', w: sp, st: sp * 0.5, sh: sp * 0.33 });
+      if (justify) items.push({ t: 'glue', w: sp, st: sp * stretch, sh: sp * shrink });
       else {
         items.push({ t: 'glue', w: 0, st: sp * 3, sh: 0 });
         items.push({ t: 'pen', w: 0, p: 0, f: false });
@@ -298,8 +400,8 @@ function buildItems(p: Paragraph, style: TextStyle, ps: ParaStyle, scWords: numb
     if (style.hyphenate && p.kind === 'body') {
       // Hyphenate only the alphabetic core of the word.
       const m = text.match(/^([^\p{L}]*)(\p{L}[\p{L}'’]*\p{L})([^\p{L}]*)$/u);
-      if (m && m[2].length >= 5 && !/[A-Z]{2}/.test(m[2])) {
-        for (const at of hyphenPoints(m[2].toLowerCase(), style.language)) breaks.push({ at: m[1].length + at, hyph: true });
+      if (m && m[2].length >= (style.hyphenMinWord ?? 5) && !/[A-Z]{2}/.test(m[2]) && (style.hyphenateCaps !== false || !/^\p{Lu}/u.test(m[2]))) {
+        for (const at of hyphenPoints(m[2].toLowerCase(), style.language, style.hyphenBefore ?? 2, style.hyphenAfter ?? 3)) breaks.push({ at: m[1].length + at, hyph: true });
       }
     }
     breaks.sort((x, y) => x.at - y.at);
@@ -325,14 +427,15 @@ function buildItems(p: Paragraph, style: TextStyle, ps: ParaStyle, scWords: numb
 /* Knuth–Plass                                                                 */
 /* -------------------------------------------------------------------------- */
 
-interface KPNode { pos: number; line: number; fit: number; w: number; st: number; sh: number; dem: number; prev: KPNode | null }
+/** `hc`: consecutive lines ending in a hyphen up to this break. */
+interface KPNode { pos: number; line: number; fit: number; w: number; st: number; sh: number; dem: number; hc: number; prev: KPNode | null }
 
 const LINE_PENALTY = 10;
 const FLAGGED_DEMERITS = 3000;
 const FITNESS_DEMERITS = 3000;
 
-function knuthPlass(items: Item[], widthAt: (line: number) => number, tolerance: number): number[] | null {
-  let active: KPNode[] = [{ pos: -1, line: 0, fit: 1, w: 0, st: 0, sh: 0, dem: 0, prev: null }];
+function knuthPlass(items: Item[], widthAt: (line: number) => number, tolerance: number, hyphenLimit = 0): number[] | null {
+  let active: KPNode[] = [{ pos: -1, line: 0, fit: 1, w: 0, st: 0, sh: 0, dem: 0, hc: 0, prev: null }];
   let W = 0, ST = 0, SH = 0;
   const n = items.length;
 
@@ -351,7 +454,8 @@ function knuthPlass(items: Item[], widthAt: (line: number) => number, tolerance:
     if (it.t === 'box') { W += it.w; continue; }
     const legal = it.t === 'glue' ? i > 0 && items[i - 1].t === 'box' : it.p < INF;
     if (legal) {
-      const best = new Map<string, { dem: number; node: KPNode; fit: number }>();
+      const best = new Map<string, { dem: number; node: KPNode; fit: number; hc: number }>();
+      const flagged = it.t === 'pen' && it.f && it.p > -INF;
       const next: KPNode[] = [];
       for (const a of active) {
         const lineW = widthAt(a.line);
@@ -362,7 +466,8 @@ function knuthPlass(items: Item[], widthAt: (line: number) => number, tolerance:
         else if (w > lineW) { const sh = SH - a.sh; r = sh > 0 ? (lineW - w) / sh : -INF; }
         else r = 0;
         const forced = it.t === 'pen' && it.p === -INF;
-        if (r >= -1 && r <= tolerance) {
+        const hc = flagged ? a.hc + 1 : 0;
+        if (r >= -1 && r <= tolerance && !(hyphenLimit > 0 && hc > hyphenLimit)) {
           const bad = 100 * Math.abs(r) ** 3;
           const p = it.t === 'pen' ? it.p : 0;
           let dem = p >= 0 ? (LINE_PENALTY + bad) ** 2 + p * p : p > -INF ? (LINE_PENALTY + bad) ** 2 - p * p : (LINE_PENALTY + bad) ** 2;
@@ -371,9 +476,9 @@ function knuthPlass(items: Item[], widthAt: (line: number) => number, tolerance:
           const fit = r < -0.5 ? 0 : r <= 0.5 ? 1 : r <= 1 ? 2 : 3;
           if (Math.abs(fit - a.fit) > 1) dem += FITNESS_DEMERITS;
           dem += a.dem;
-          const key = `${a.line + 1}:${fit}`;
+          const key = `${a.line + 1}:${fit}:${hc}`;
           const cur = best.get(key);
-          if (!cur || dem < cur.dem) best.set(key, { dem, node: a, fit });
+          if (!cur || dem < cur.dem) best.set(key, { dem, node: a, fit, hc });
         }
         // Keep the node active unless the line is now overfull or a forced break passed it.
         if (!(r < -1 || forced)) next.push(a);
@@ -382,7 +487,7 @@ function knuthPlass(items: Item[], widthAt: (line: number) => number, tolerance:
         const totals = afterBreakTotals(i);
         for (const [key, b] of best) {
           const line = +key.split(':')[0];
-          next.push({ pos: i, line, fit: b.fit, ...totals, dem: b.dem, prev: b.node });
+          next.push({ pos: i, line, fit: b.fit, ...totals, dem: b.dem, hc: b.hc, prev: b.node });
         }
       }
       active = next;
@@ -427,8 +532,8 @@ function greedy(items: Item[], widthAt: (line: number) => number): number[] {
   return out;
 }
 
-function breakLines(items: Item[], widthAt: (line: number) => number): number[] {
-  return knuthPlass(items, widthAt, 2) ?? knuthPlass(items, widthAt, 8) ?? greedy(items, widthAt);
+function breakLines(items: Item[], widthAt: (line: number) => number, hyphenLimit = 0): number[] {
+  return knuthPlass(items, widthAt, 2, hyphenLimit) ?? knuthPlass(items, widthAt, 8, hyphenLimit) ?? knuthPlass(items, widthAt, 8) ?? greedy(items, widthAt);
 }
 
 /* -------------------------------------------------------------------------- */
@@ -508,7 +613,7 @@ function placeLine(items: Item[], line: Line, lineW: number, alignIn: TextStyle[
     const it = items[i];
     if (it.t === 'box') {
       for (const s of it.segs) {
-        runs.push({ x, y: baseline, text: s.text, font: s.font, size: s.size, color: s.color, letterSpacing: s.ls, width: s.width });
+        runs.push({ x, y: baseline - (s.dy ?? 0), text: s.text, font: s.font, size: s.size, color: s.color, letterSpacing: s.ls, width: s.width, kern: s.kern });
         x += s.width;
       }
       if (it.segs.length === 0) x += it.w;
@@ -518,7 +623,7 @@ function placeLine(items: Item[], line: Line, lineW: number, alignIn: TextStyle[
   }
   if (line.hyphen) {
     const h = line.hyphen;
-    runs.push({ x, y: baseline, text: h.text, font: h.font, size: h.size, color: h.color, letterSpacing: h.ls, width: h.width });
+    runs.push({ x, y: baseline - (h.dy ?? 0), text: h.text, font: h.font, size: h.size, color: h.color, letterSpacing: h.ls, width: h.width });
     x += h.width;
   }
   const width = x;
@@ -538,15 +643,20 @@ function placeLine(items: Item[], line: Line, lineW: number, alignIn: TextStyle[
   const merged: TextRun[] = [];
   for (const run of runs) {
     const prev = merged[merged.length - 1];
-    if (prev && sameFont(prev.font, run.font) && prev.size === run.size && prev.color === run.color && prev.letterSpacing === run.letterSpacing) {
+    if (prev && sameFont(prev.font, run.font) && prev.size === run.size && prev.color === run.color && prev.letterSpacing === run.letterSpacing && prev.y === run.y) {
       const gap = run.x - (prev.x + prev.width);
-      if (Math.abs(gap) < 0.01) { prev.text += run.text; prev.width += run.width; continue; }
+      // Joined runs keep their kerning, with a zero entry for the joining space.
+      const joinKern = (sep: string) => {
+        if (!prev.kern && !run.kern) return;
+        prev.kern = [...(prev.kern ?? new Array<number>(prev.text.length).fill(0)), ...new Array<number>(sep.length).fill(0), ...(run.kern ?? new Array<number>(run.text.length).fill(0))];
+      };
+      if (Math.abs(gap) < 0.01) { joinKern(''); prev.text += run.text; prev.width += run.width; continue; }
       if (mergeSpaces) {
         const sp = measure(' ', prev.font, prev.size) + (prev.letterSpacing ?? 0);
-        if (Math.abs(gap - sp) < 0.02) { prev.text += ' ' + run.text; prev.width += gap + run.width; continue; }
+        if (Math.abs(gap - sp) < 0.02) { joinKern(' '); prev.text += ' ' + run.text; prev.width += gap + run.width; continue; }
       }
     }
-    merged.push({ ...run });
+    merged.push({ ...run, kern: run.kern ? [...run.kern] : undefined });
   }
   return { runs: merged, width, ratio: r, chars, justified: false };
 }
@@ -576,12 +686,11 @@ function styleKey(s: TextStyle) {
   return JSON.stringify(s);
 }
 
-function prepare(text: string, style: TextStyle, firstWidth: number): Prepared {
-  const key = `${useFontStore.getState().version}|${styleKey(style)}|${Math.round(firstWidth)}|${text}`;
+function prepare(text: string, style: TextStyle, firstWidth: number, styles: StoryStyles | null): Prepared {
+  const key = `${useFontStore.getState().version}|${styleKey(style)}|${Math.round(firstWidth)}|${styles ? JSON.stringify(styles) : ''}|${text}`;
   const hit = storyCache.get(key);
   if (hit) return hit;
-  const paras = parseStory(text, style);
-  const ragged = style.align === 'left' || style.align === 'right' || style.align === 'center';
+  const paras = parseStory(text, style, styles);
 
   // Drop cap: take the first letter (plus an opening quote) of the first body paragraph.
   let dropCap: DropCapInfo | null = null;
@@ -615,22 +724,25 @@ function prepare(text: string, style: TextStyle, firstWidth: number): Prepared {
   }
 
   const prepared: PreparedPara[] = paras.map((para, i) => {
-    const ps = paraStyle(para, style);
+    const pst = para.style;
+    const ps = paraStyle(para, pst);
     if (dropCap && i === 0) ps.indent = 0;
-    let items = buildItems(para, style, ps, 0, ragged);
+    const ragged = ps.align === 'left' || ps.align === 'right' || ps.align === 'center';
+    let items = buildItems(para, pst, ps, 0, ragged);
     if (i === 0 && style.firstLineSmallCaps && para.kind === 'body') {
       // Iterate: set the words of line one in small caps until the line is stable.
       let scCount = 0;
+      const fw = firstWidth - ps.left - ps.right;
       for (let pass = 0; pass < 3; pass++) {
-        const widthAt = (ln: number) => (ln < (dropCap?.lines ?? 0) ? firstWidth - (dropCap!.boxW + style.dropCap.gap) : firstWidth);
-        const breaks = breakLines(items, widthAt);
+        const widthAt = (ln: number) => (ln < (dropCap?.lines ?? 0) ? fw - (dropCap!.boxW + style.dropCap.gap) : fw);
+        const breaks = breakLines(items, widthAt, pst.hyphenLimit ?? 0);
         const first = linesFromBreaks(items, breaks, 0)[0];
         let count = 0;
         for (let k = first.start; k < first.end; k++) { const it = items[k]; if (it.t === 'box' && it.word >= 0) count = it.word + 1; }
         if (first.hyphen) count = Math.max(0, count - 1);
         if (count === scCount) break;
         scCount = count;
-        items = buildItems(para, style, ps, scCount, ragged);
+        items = buildItems(para, pst, ps, scCount, ragged);
       }
     }
     return { para, ps, items, ragged };
@@ -709,8 +821,10 @@ function layoutFrame(prep: Prepared, style: TextStyle, frame: FrameSpec, cursor:
       items = pp.items.slice(k);
     }
     const offsetBase = pp.items.length - items.length;
-    const widthAt = (ln: number) => (ln < indentLines ? colW - indentW : colW);
-    const lines = linesFromBreaks(items, breakLines(items, widthAt), 0);
+    // Left / right indents, and a hanging (negative) first-line indent on the paragraph's first line.
+    const hang = startsPara ? Math.min(0, ps.indent) : 0;
+    const widthAt = (ln: number) => (ln < indentLines ? colW - indentW : colW) - ps.left - ps.right - (ln === 0 ? hang : 0);
+    const lines = linesFromBreaks(items, breakLines(items, widthAt, pp.para.style.hyphenLimit ?? 0), 0);
 
     if (y != null && startsPara) y += gridRound(ps.spaceBefore, grid);
 
@@ -730,7 +844,8 @@ function layoutFrame(prep: Prepared, style: TextStyle, frame: FrameSpec, cursor:
         break outer;
       }
       const indent = li < indentLines ? indentW : 0;
-      const placed = placeLine(items, line, colW - indent, ps.align, style.opticalMargin, rtl, baseline, colX + (rtl ? 0 : indent), mergeSpaces);
+      const h0 = li === 0 ? hang : 0;
+      const placed = placeLine(items, line, colW - indent - ps.left - ps.right - h0, ps.align, style.opticalMargin, rtl, baseline, colX + (rtl ? ps.right : indent + ps.left + h0), mergeSpaces);
       runs.push(...placed.runs);
       baselines.push(baseline);
       lineBoxes.push({ x: colX, y: baseline, w: colW, ratio: placed.ratio, chars: placed.chars, last: line.last, justified: placed.justified, hyphenated: !!line.hyphen });
@@ -883,7 +998,7 @@ export function frameSpecOf(el: TextElement, grid?: FrameSpec['grid']): FrameSpe
 }
 
 /** Lay out a story through one or more threaded frames. */
-export function layoutStory(text: string, style: TextStyle, frames: FrameSpec[], tokens: TokenContext): FrameLayout[] {
+export function layoutStory(text: string, style: TextStyle, frames: FrameSpec[], tokens: TokenContext, styles: StoryStyles | null = null): FrameLayout[] {
   const expanded = expandTokens(text, tokens);
   if (style.writingMode === 'vertical') {
     // Vertical stories are set per frame (threading of vertical text is not supported).
@@ -891,7 +1006,7 @@ export function layoutStory(text: string, style: TextStyle, frames: FrameSpec[],
   }
   const f0 = frames[0];
   const firstColW = f0 ? (f0.w - f0.inset * 2 - f0.columnGap * (Math.max(1, f0.columns) - 1)) / Math.max(1, f0.columns) : 100;
-  const prep = prepare(expanded, style, firstColW);
+  const prep = prepare(expanded, style, firstColW, styles && (styles.para.length || styles.char.length) ? styles : null);
   const out: FrameLayout[] = [];
   let cursor: Cursor | null = { para: 0, item: 0 };
   frames.forEach((frame, i) => {

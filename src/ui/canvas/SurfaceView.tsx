@@ -2,7 +2,7 @@ import React, { useMemo } from 'react';
 import type { Element, Project } from '../../model/types';
 import type { PanelLayout } from './geometry';
 type BindingCalc = PanelLayout;
-import { compileElement, compilePage, layoutText, cutoutPath, elementMatrix, type CompileContext } from '../../render/compile';
+import { compileElement, compilePage, layoutText, cutoutPath, elementMatrix, crossovers, masterCrossovers, type CompileContext } from '../../render/compile';
 import { primsToSvg } from '../../render/svgString';
 import { rectPath, multiply, type Prim, type Matrix } from '../../render/primitives';
 import { transformPath } from '../../lib/pathData';
@@ -80,7 +80,10 @@ export function SurfaceView({ project, surface, calc, rasterScale }: Props) {
   const masterEls = master ? (surface.side === 'left' ? master.left : master.right) : [];
   const mctx: CompileContext = master ? { ...ctx, surface: `master:${master.id}:${surface.side}` } : ctx;
   const clipId = `clip-${surface.key.replace(/[^a-z0-9]/gi, '')}`;
-  // On facing pages nothing crosses the spine: the left page is clipped at its right trim edge.
+  // Each page shows its own half of a spread; items crossing the gutter are drawn again on the
+  // facing page (below its items, or above when marked), so nothing is clipped at the spine.
+  const xs = surface.kind === 'page' && surface.pageIndex != null ? crossovers(project, surface.pageIndex)
+    : surface.kind === 'master' ? masterCrossovers(project, surface.key.split(':')[1], surface.side) : [];
   const facing = project.book.facing && surface.kind !== 'cover' && surface.kind !== 'jacket';
   const cx0 = facing && surface.side === 'right' ? 0 : -b;
   const cx1 = facing && surface.side === 'left' ? surface.w : surface.w + b;
@@ -108,9 +111,11 @@ export function SurfaceView({ project, surface, calc, rasterScale }: Props) {
     <>
       {paperRect}
       {masterEls.filter((e) => !e.hidden).map((el) => <MemoElement key={`m-${el.id}`} el={el} ctx={mctx} rasterScale={rasterScale} offsetX={0} />)}
+      {xs.filter((c) => !c.above).map((c) => <MemoElement key={`x-${c.el.id}`} el={c.el} ctx={c.ctx} rasterScale={rasterScale} offsetX={c.dx} />)}
       {els.filter((e) => !e.hidden).map((el) => (
         <MemoElement key={el.id} el={el} ctx={ctx} rasterScale={rasterScale} offsetX={anchorOffset(el, surface, calc)} />
       ))}
+      {xs.filter((c) => c.above).map((c) => <MemoElement key={`x-${c.el.id}`} el={c.el} ctx={c.ctx} rasterScale={rasterScale} offsetX={c.dx} />)}
     </>
   );
 

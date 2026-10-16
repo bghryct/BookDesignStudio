@@ -25,10 +25,10 @@ import { compileElement, elementMatrix, type CompileContext } from '../render/co
 import { renderToCanvas, preloadImages } from '../render/canvasBackend';
 import { parsePath } from '../lib/pathData';
 import { parseColor, rgbToCmyk, findSwatchCmyk } from '../lib/color';
-import { shape, glyphPath, canOutline, faceBytes, getFace } from '../engine/fonts';
+import { shape, glyphPath, canOutline, faceBytes, getFace, glyphKerns } from '../engine/fonts';
 import { computeBinding, computeJacket } from '../engine/binding';
 import { pageSide, spreadsOf } from '../model/surfaces';
-import { coverBaseColor } from '../render/compile';
+import { coverBaseColor, crossovers } from '../render/compile';
 
 export interface PdfOptions {
   scope: 'interior' | 'cover' | 'jacket' | 'spread';
@@ -373,13 +373,32 @@ async function emitRun(w: PageWriter, r: TextRun, alpha: number, blend: BlendMod
     await w.pendingImages();
     w.flush();
     const color = st.spot ? cmyk(...SPOTS[st.spot]?.cmyk ?? [0, 0, 0, 1]) : w.opts.colorMode === 'cmyk' ? cmyk(...w.cmykOf(r.color)) : (() => { const c = parseColor(r.color); return rgb(c.r / 255, c.g / 255, c.b / 255); })();
-    w.page.drawText(r.text, { x: 0, y: 0, size: r.size, font: pdfFont, color });
+    const shaped = shape(r.text, r.font)!;
+    const gk = glyphKerns(shaped, r.kern);
+    if (!gk) w.page.drawText(r.text, { x: 0, y: 0, size: r.size, font: pdfFont, color });
+    else {
+      // Kerned pairs: split the run where a kern falls, placing each piece from the whole run's
+      // advances so the text stays live (searchable) and lands exactly where the layout put it.
+      let x = 0, u = 0, from = 0, x0 = 0;
+      shaped.glyphs.forEach((g, i) => {
+        u += Math.max(1, g.units);
+        x += g.xAdvance * r.size + ls;
+        if (gk[i] || i === shaped.glyphs.length - 1) {
+          w.page.drawText(r.text.slice(from, u), { x: x0, y: 0, size: r.size, font: pdfFont, color });
+          x += gk[i];
+          from = u;
+          x0 = x;
+        }
+      });
+    }
     if (ls) w.push(setCharacterSpacing(0));
   } else if (canOutline(r.text, r.font)) {
     w.setColor(r.color, false, st.spot);
     const shaped = shape(r.text, r.font)!;
+    const gk = glyphKerns(shaped, r.kern);
     let x = 0;
-    for (const gl of shaped.glyphs) {
+    for (let gi = 0; gi < shaped.glyphs.length; gi++) {
+      const gl = shaped.glyphs[gi];
       const gp = glyphPath(r.font, gl.id);
       if (gp && gp.d) {
         const k = r.size / gp.upm;
@@ -390,7 +409,7 @@ async function emitRun(w: PageWriter, r: TextRun, alpha: number, blend: BlendMod
         w.push(drawObject(name));
         w.push(popGraphicsState());
       }
-      x += gl.xAdvance * r.size + ls;
+      x += gl.xAdvance * r.size + ls + (gk ? gk[gi] : 0);
     }
   } else {
     // System font / uncovered script: rasterise the run at print resolution.
@@ -749,7 +768,11 @@ export async function exportPdf(project: Project, opts: PdfOptions): Promise<Uin
         const m = project.masters.find((x) => x.id === pg.masterId);
         if (m) for (const el of side === 'left' ? m.left : m.right) await emitElement(w, el, { ...ctx, surface: `master:${m.id}:${side}` }, 0);
       }
+      // Spread items from the facing page reach across the gutter onto this one.
+      const xs = crossovers(project, pi).filter((c) => c.el.type !== 'cutout');
+      for (const c of xs) if (!c.above) await emitElement(w, c.el, c.ctx, c.dx);
       for (const el of pg.elements) await emitElement(w, el, ctx, 0);
+      for (const c of xs) if (c.above) await emitElement(w, c.el, c.ctx, c.dx);
       w.push(popGraphicsState());
     }
     drawMarks(w, 0, 0, contentW, b.trimH, bleed, '', '');

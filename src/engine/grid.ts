@@ -137,6 +137,30 @@ export function computeGrid(spec: BookSpec, side: PageSide): GridGeometry {
 }
 
 /**
+ * Facing pages: one column grid across the spread, from the left page's outer margin to the
+ * right page's (spread coordinates, x = 0 at the left page's fore-edge). With an even column count
+ * the middle gutter straddles the fold; with an odd count a column runs across it.
+ */
+export function spreadGrid(spec: BookSpec): { cols: Rect[]; block: Rect; fold: number } | null {
+  const n = Math.round(spec.grid.spreadColumns ?? 0);
+  if (!spec.facing || n < 1) return null;
+  const L = textBlock(spec, 'left'), R = textBlock(spec, 'right');
+  const x0 = L.x, x1 = spec.trimW + R.x + R.w;
+  const g = spec.grid.spreadGutter ?? spec.grid.gutter;
+  const cw = (x1 - x0 - g * (n - 1)) / n;
+  const cols = Array.from({ length: n }, (_, i) => ({ x: x0 + i * (cw + g), y: L.y, w: cw, h: L.h }));
+  return { cols, block: { x: x0, y: L.y, w: x1 - x0, h: L.h }, fold: spec.trimW };
+}
+
+/** The columns an editor tool should use on a page: the spread grid (in page coordinates) or the page grid. */
+export function pageColumns(spec: BookSpec, side: PageSide): Rect[] {
+  const sg = spreadGrid(spec);
+  if (!sg) return computeGrid(spec, side).cols.map((c) => ({ ...c, y: textBlock(spec, side).y, h: textBlock(spec, side).h }));
+  const dx = side === 'right' ? -spec.trimW : 0;
+  return sg.cols.map((c) => ({ ...c, x: c.x + dx }));
+}
+
+/**
  * Müller-Brockmann: make the field rows land on whole baselines, with one empty
  * line as the row gutter. Adjusts bottom margin, row gutter and baseline offset.
  */
