@@ -15,6 +15,8 @@ export type {
   LightingOptions,
   LightingPreset,
   PageInfo,
+  PanelArt,
+  TextureDemand,
 } from './types';
 export { SCENE_UNITS_PER_PT, MAX_TURN_LEAVES } from './layout';
 export { ANIMATION_INFO } from './animation';

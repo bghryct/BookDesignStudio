@@ -95,6 +95,8 @@ export interface FrameLayout {
   usedHeight?: number;
   /** Headings (# / ##) whose first line is set in this frame, for generated contents. */
   heads?: { level: 1 | 2; text: string }[];
+  /** Index terms ({ix:…}) set in this frame, for a generated index. */
+  marks?: string[];
 }
 
 /* -------------------------------------------------------------------------- */
@@ -139,7 +141,9 @@ interface DropCapInfo {
 const storyCache = new Map<string, Prepared>();
 
 function prepare(text: string, style: TextStyle, firstWidth: number, styles: StoryStyles | null): Prepared {
-  const key = `${useFontStore.getState().version}|${JSON.stringify(style)}|${Math.round(firstWidth)}|${styles ? JSON.stringify(styles) : ''}|${text}`;
+  // Images are keyed by id and size only: their data URLs are far too large to stringify.
+  const sk = styles ? JSON.stringify({ p: styles.para, c: styles.char, h: styles.hyphenation }) + Object.entries(styles.images ?? {}).map(([k, v]) => `${k}:${v.w}x${v.h}`).join(',') : '';
+  const key = `${useFontStore.getState().version}|${JSON.stringify(style)}|${Math.round(firstWidth)}|${sk}|${text}`;
   const hit = storyCache.get(key);
   if (hit) return hit;
   const paras = parseStory(text, style, styles);
@@ -183,7 +187,7 @@ function prepare(text: string, style: TextStyle, firstWidth: number, styles: Sto
     const ps = paraStyle(para, pst);
     if (dropCap && i === 0) ps.indent = 0;
     const ragged = ps.align === 'left' || ps.align === 'right' || ps.align === 'center';
-    let items = buildItems(para, pst, ps, 0, ragged, dict);
+    let items = buildItems(para, pst, ps, 0, ragged, dict, styles?.images);
     if (i === 0 && style.firstLineSmallCaps && para.kind === 'body') {
       // Iterate: set the words of line one in small caps until the line is stable.
       let scCount = 0;
@@ -197,7 +201,7 @@ function prepare(text: string, style: TextStyle, firstWidth: number, styles: Sto
         if (first.hyphen) count = Math.max(0, count - 1);
         if (count === scCount) break;
         scCount = count;
-        items = buildItems(para, pst, ps, scCount, ragged, dict);
+        items = buildItems(para, pst, ps, scCount, ragged, dict, styles?.images);
       }
     }
     return { para, ps, items, ragged };
@@ -271,7 +275,7 @@ function bandIntervals(x0: number, w: number, y0: number, y1: number, wraps: Wra
 
 const fnTokens: TokenContext = { page: 0, pages: 0, title: '', subtitle: '', author: '', publisher: '' };
 
-function layoutFrame(prep: Prepared, style: TextStyle, frame: FrameSpec, cursor: Cursor, isFirstFrame: boolean, bottomOverride?: number): { layout: FrameLayout; cursor: Cursor | null } {
+function layoutFrame(prep: Prepared, style: TextStyle, frame: FrameSpec, cursor: Cursor, isFirstFrame: boolean, bottomOverride?: number, opts: { stopBefore?: number } = {}): { layout: FrameLayout; cursor: Cursor | null } {
   const ins = frame.insets ?? { top: frame.inset, right: frame.inset, bottom: frame.inset, left: frame.inset };
   const cols = Math.max(1, Math.round(frame.columns));
   const colW = Math.max(1, (frame.w - ins.left - ins.right - frame.columnGap * (cols - 1)) / cols);
@@ -335,13 +339,16 @@ function layoutFrame(prep: Prepared, style: TextStyle, frame: FrameSpec, cursor:
   const dcPrims: { g: GroupPrim; col: number; para: number }[] = [];
   const lineRecs: { col: number; para: number; from: number; to: number; base: number; bottom: number; top: number }[] = [];
   const heads: { level: 1 | 2; text: string }[] = [];
+  const marks: string[] = [];
+  const images: { g: GroupPrim; col: number; para: number }[] = [];
+  const bands: Prim[] = [];
   let lineCount = 0;
   let hasDropCap = false;
 
   const flow: Flow = { col: 0, y: null, reserve: new Array(cols).fill(0), notes: Array.from({ length: cols }, () => []), used: new Array(cols).fill(false) };
 
   /** Slots for a paragraph from a flow position, generated on demand. */
-  const slotGen = (start: Flow, ps: ParaStyle, startsPara: boolean, maxFirst: number | null) => {
+  const slotGen = (start: Flow, ps: ParaStyle, startsPara: boolean, maxFirst: number | null, firstExtra = 0) => {
     const lead = gridLeading(ps.leading, gridFirst ? null : grid);
     const descent = ps.size * 0.22, ascent = body.ascender * ps.size;
     const slots: Slot[] = [];
@@ -353,6 +360,8 @@ function layoutFrame(prep: Prepared, style: TextStyle, frame: FrameSpec, cursor:
       for (let guard = 0; guard < 4000; guard++) {
         if (col >= cols || (spanning && col > start.col)) break;
         let baseline = y == null ? firstBaseline(ps) : y + lead;
+        // An anchored figure stands on its baseline: make room above it for its height.
+        if (firstExtra && slots.length === 0 && startsPara) baseline += firstExtra;
         if (gridFirst && slots.length === 0 && startsPara && y != null) baseline = snapUp(baseline, grid);
         const forced = maxFirst != null && col === start.col && inFirst >= maxFirst;
         if (forced || (y != null && baseline + descent > bottomOf(col) + 0.5) || (y == null && baseline > bottomOf(col) + 0.5)) {
@@ -398,7 +407,8 @@ function layoutFrame(prep: Prepared, style: TextStyle, frame: FrameSpec, cursor:
     }
     const ps = pp.ps;
     const dc = isFirstFrame && pp === prep.paras[0] && startsPara ? prep.dropCap : null;
-    const slot = slotGen(fl, ps, startsPara, maxFirst);
+    const fig = startsPara ? pp.para.figure : null;
+    const slot = slotGen(fl, ps, startsPara, maxFirst, fig ? Math.max(0, figureSize(fig).h - body.capHeight * ps.size) : 0);
     const hang = startsPara ? Math.min(0, ps.indent) : 0;
     const hereW = startsPara ? hereOffset(items) : null;
     const indentOf = (ln: number) => {
@@ -418,6 +428,14 @@ function layoutFrame(prep: Prepared, style: TextStyle, frame: FrameSpec, cursor:
     return { items, offsetBase, lines, slot, indentOf, widthAt, tabs, dc, startsPara };
   };
   type Plan = ReturnType<typeof plan>;
+
+  /** Size of an inline graphic as set (a % width is a share of the column). */
+  const figureSize = (o: NonNullable<Paragraph['figure']>) => {
+    const img = prep.styles?.images?.[o.id];
+    const ar = img && img.w > 0 ? img.h / img.w : 0.75;
+    const w = o.pct ? (o.pct / 100) * colW : o.w ?? (o.h != null ? o.h / ar : Math.min(160, (img?.w ?? 120) * 0.75));
+    return { w, h: o.h ?? w * ar, ar };
+  };
 
   const notesIn = (pp: PreparedPara, items: Item[], line: Line): Footnote[] => {
     if (!pp.para.footnotes.length) return [];
@@ -464,6 +482,7 @@ function layoutFrame(prep: Prepared, style: TextStyle, frame: FrameSpec, cursor:
   const commit = (pp: PreparedPara, pl: Plan, placed: { li: number; slot: Slot }[], paraNo: number) => {
     const pst = pp.para.style, ps = pp.ps;
     const builder = new ItemBuilder(pst, ps);
+    const seenIx = new Set<number>();
     const parts = new Map<number, { first: number; last: number; slot: Slot; runsFrom: number; runsTo: number; minX: number; maxX: number }>();
     for (const { li, slot } of placed) {
       const line = pl.lines[li];
@@ -476,7 +495,30 @@ function layoutFrame(prep: Prepared, style: TextStyle, frame: FrameSpec, cursor:
         baseline: slot.baseline, xOffset: xOff, mergeSpaces, lastLineAlign: pst.lastLineAlign, singleWord: pst.singleWordJustify,
         tabs: pl.tabs, leaderOrigin: xOff - colXAt(slot.col), leader: (t) => builder.leader(t),
       });
-      runs.push(...pl0.runs);
+      // Inline graphics become images standing on their baseline.
+      for (const r of pl0.runs) {
+        if (!r.obj) { runs.push(r); continue; }
+        const o = r.obj;
+        let { w, h } = o;
+        let x = r.x;
+        if (o.pct) {
+          const img = prep.styles?.images?.[o.assetId ?? ''];
+          w = (o.pct / 100) * lineW;
+          h = w * (img && img.w > 0 ? img.h / img.w : 0.75);
+          x = ps.align === 'center' ? xOff + (lineW - w) / 2 : ps.align === 'right' ? xOff + lineW - w : xOff;
+        }
+        const children: Prim[] = o.href
+          ? [{ t: 'image', href: o.href, x, y: r.y - h, w, h, assetId: o.assetId }]
+          : [{ t: 'path', d: `M${x} ${r.y - h}H${x + w}V${r.y}H${x}Z`, fill: '#e7e1d4', stroke: '#b9b0a0', strokeWidth: 0.5 }, { t: 'path', d: `M${x} ${r.y - h}L${x + w} ${r.y}M${x + w} ${r.y - h}L${x} ${r.y}`, stroke: '#b9b0a0', strokeWidth: 0.5 }];
+        images.push({ g: { t: 'group', matrix: [1, 0, 0, 1, 0, 0], children }, col: slot.col, para: paraNo });
+      }
+      // Index terms marked in the words of this line.
+      for (let i = line.start; i < line.end; i++) {
+        const it = pl.items[i];
+        if (it.t !== 'box' || it.word < 0) continue;
+        const wd = pp.para.words[it.word];
+        if (wd?.ix && !seenIx.has(it.word)) { seenIx.add(it.word); marks.push(...wd.ix); }
+      }
       if (pl.startsPara && li === 0 && (pp.para.kind === 'h1' || pp.para.kind === 'h2')) {
         heads.push({ level: pp.para.kind === 'h1' ? 1 : 2, text: pp.para.words.map((w) => w.text).join(' ') });
       }
@@ -574,10 +616,42 @@ function layoutFrame(prep: Prepared, style: TextStyle, frame: FrameSpec, cursor:
 
   let cur: Cursor | null = { ...cursor };
   let paraNo = 0;
+  // Start of the current band of columns (for heads that span the columns mid-story).
+  let band: { cursor: Cursor; top: number; runs: number; under: number; over: number; dc: number; images: number; recs: number; base: number; boxes: number; heads: number; marks: number; lines: number } | null = null;
+  const snapshot = (c: Cursor) => ({ cursor: { ...c }, top: colTop, runs: runs.length, under: under.length, over: over.length, dc: dcPrims.length, images: images.length, recs: lineRecs.length, base: baselines.length, boxes: lineBoxes.length, heads: heads.length, marks: marks.length, lines: lineCount });
   outer: while (cur && cur.para < prep.paras.length) {
+    if (opts.stopBefore != null && cur.para >= opts.stopBefore) break outer;
     const pp: PreparedPara = prep.paras[cur.para];
     const pst = pp.para.style, ps = pp.ps;
     const startsPara = cur.item === 0;
+    // A head that spans the columns mid-story: balance the columns above it, set it across the
+    // full width below them, and start a fresh band of columns underneath.
+    if (cols > 1 && startsPara && pst.spanColumns && !spanPhase && band && runs.length > band.runs && opts.stopBefore == null) {
+      const b = band;
+      const bandFrame: FrameSpec = { ...frame, insets: { ...ins, top: b.top }, verticalAlign: 'top', balance: true };
+      const reached = (r: { cursor: Cursor | null }) => !!r.cursor && r.cursor.para === cur!.para && r.cursor.item === 0;
+      const full = layoutFrame(prep, style, bandFrame, b.cursor, isFirstFrame, bottom, { stopBefore: cur.para });
+      if (reached(full)) {
+        let lo = b.top + style.leading, hi = bottom;
+        for (let k = 0; k < 14 && hi - lo > 0.5; k++) {
+          const mid = (lo + hi) / 2;
+          if (reached(layoutFrame(prep, style, bandFrame, b.cursor, isFirstFrame, mid, { stopBefore: cur.para }))) hi = mid; else lo = mid;
+        }
+        const bl = layoutFrame(prep, style, bandFrame, b.cursor, isFirstFrame, hi, { stopBefore: cur.para }).layout;
+        runs.length = b.runs; under.length = b.under; over.length = b.over; dcPrims.length = b.dc; images.length = b.images;
+        lineRecs.length = b.recs; baselines.length = b.base; lineBoxes.length = b.boxes; heads.length = b.heads; marks.length = b.marks; lineCount = b.lines;
+        bands.push(...bl.prims);
+        baselines.push(...bl.baselines);
+        lineBoxes.push(...bl.lines);
+        heads.push(...(bl.heads ?? []));
+        marks.push(...(bl.marks ?? []));
+        lineCount += bl.lineCount;
+        colTop = (bl.usedHeight ?? b.top) - ins.bottom + style.leading * 0.5;
+        flow.col = 0; flow.y = null; flow.reserve = new Array(cols).fill(0); flow.notes = Array.from({ length: cols }, () => []); flow.used = new Array(cols).fill(false);
+        spanPhase = true;
+        band = null;
+      }
+    }
     if (startsPara) {
       const startOn = pp.para.breakBefore ?? (pst.startOn && pst.startOn !== 'anywhere' ? pst.startOn : null);
       const frameEmpty = runs.length === 0 && flow.col === 0 && flow.y === null;
@@ -589,6 +663,7 @@ function layoutFrame(prep: Prepared, style: TextStyle, frame: FrameSpec, cursor:
     if (spanPhase && !spanning && (startsPara || flow.y !== null)) {
       spanPhase = false;
       if (flow.y != null && flow.col === 0) { colTop = flow.y + style.leading * 0.3; flow.y = null; }
+      band = snapshot(cur);
     }
     const base = cloneFlow(flow);
     let fl = cloneFlow(flow);
@@ -665,7 +740,7 @@ function layoutFrame(prep: Prepared, style: TextStyle, frame: FrameSpec, cursor:
     rec.base += dy; rec.top += dy; rec.bottom += dy;
   };
   const shiftGroups = (col: number, para: number, dy: number) => {
-    for (const list of [under, over, dcPrims]) for (const x of list) if (x.col === col && x.para === para) x.g.matrix![5] += dy;
+    for (const list of [under, over, dcPrims, images]) for (const x of list) if (x.col === col && x.para === para) x.g.matrix![5] += dy;
   };
 
   // Vertical alignment / justification — only when everything fits and no initial is anchored to the top.
@@ -696,8 +771,9 @@ function layoutFrame(prep: Prepared, style: TextStyle, frame: FrameSpec, cursor:
     }
   }
 
-  const prims: Prim[] = [];
+  const prims: Prim[] = [...bands];
   for (const x of under) prims.push(x.g);
+  for (const x of images) prims.push(x.g);
   for (const x of dcPrims) prims.push(x.g);
   if (runs.length) prims.push({ t: 'text', runs });
   for (const x of over) prims.push(x.g);
@@ -723,15 +799,15 @@ function layoutFrame(prep: Prepared, style: TextStyle, frame: FrameSpec, cursor:
   if (frame.columnRule && frame.columnRule.weight > 0 && cols > 1) {
     const r = frame.columnRule;
     const w = r.weight;
-    const yb = frame.balance ? Math.max(top, ...lineRecs.map((l) => l.bottom)) : frameBottom;
+    const yb = frame.balance ? Math.max(colTop, ...lineRecs.map((l) => l.bottom)) : frameBottom;
     for (let c = 0; c < cols - 1; c++) {
       const x = ins.left + (c + 1) * colW + c * frame.columnGap + frame.columnGap / 2;
-      prims.push({ t: 'path', d: `M${x} ${top}V${yb}`, stroke: r.color, strokeWidth: w, dash: r.style === 'dashed' ? [w * 4, w * 3] : r.style === 'dotted' ? [0.01, w * 2.5] : undefined, cap: r.style === 'dotted' ? 'round' : 'butt' });
+      prims.push({ t: 'path', d: `M${x} ${colTop}V${yb}`, stroke: r.color, strokeWidth: w, dash: r.style === 'dashed' ? [w * 4, w * 3] : r.style === 'dotted' ? [0.01, w * 2.5] : undefined, cap: r.style === 'dotted' ? 'round' : 'butt' });
     }
   }
 
   const usedBottom = flow.notes.some((n) => n.length) ? frameBottom : lineRecs.reduce((m, r) => Math.max(m, r.bottom), top);
-  return { layout: { prims, lineCount, overflow: !!cur, baselines, lines: lineBoxes, usedHeight: usedBottom + ins.bottom, heads }, cursor: cur };
+  return { layout: { prims, lineCount, overflow: !!cur, baselines, lines: lineBoxes, usedHeight: usedBottom + ins.bottom, heads, marks }, cursor: cur };
 }
 
 /** Balanced columns: the shortest column depth at which everything still fits. */
@@ -866,7 +942,7 @@ export function layoutStory(text: string, style: TextStyle, frames: FrameSpec[],
   const f0 = frames[0];
   const in0 = f0?.insets ? f0.insets.left + f0.insets.right : (f0?.inset ?? 0) * 2;
   const firstColW = f0 ? (f0.w - in0 - f0.columnGap * (Math.max(1, f0.columns) - 1)) / Math.max(1, f0.columns) : 100;
-  const useStyles = styles && (styles.para.length || styles.char.length || styles.hyphenation?.length) ? styles : null;
+  const useStyles = styles && (styles.para.length || styles.char.length || styles.hyphenation?.length || /\{img:/.test(expanded)) ? styles : null;
   const prep = prepare(expanded, style, firstColW, useStyles);
   const out: FrameLayout[] = [];
   let cursor: Cursor | null = { para: 0, item: 0 };

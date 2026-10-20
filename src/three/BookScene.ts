@@ -17,6 +17,7 @@ import {
   Scene,
   ShadowMaterial,
   SRGBColorSpace,
+  Vector2,
   Vector3,
   VSMShadowMap,
   WebGLRenderer,
@@ -44,7 +45,7 @@ import { ContactShadow } from './contactShadow';
 import { BookModel } from './geometry';
 import { SCENE_UNITS_PER_PT, computeLayout, type BookLayout } from './layout';
 import { LightRig, resolveLighting, type ResolvedLighting } from './lighting';
-import { BookMaterials, TextureCache, createCanvas } from './materials';
+import { BookMaterials, TextureCache, createCanvas, type PanelArt } from './materials';
 import type {
   AnimationInfo,
   AnimationMode,
@@ -57,6 +58,7 @@ import type {
   CameraPose,
   EnvironmentOptions,
   LightingOptions,
+  TextureDemand,
 } from './types';
 
 const DEFAULT_BACKGROUND = '#d9d4cb';
@@ -195,7 +197,8 @@ export class BookScene {
     // Variance shadow maps: blur radius gives a key light that reads like a large softbox.
     r.shadowMap.type = VSMShadowMap;
     r.shadowMap.autoUpdate = false;
-    this.cache = new TextureCache(Math.min(8, r.capabilities.getMaxAnisotropy()));
+    // Full anisotropic filtering keeps type crisp on pages seen at an angle.
+    this.cache = new TextureCache(r.capabilities.getMaxAnisotropy(), r.capabilities.maxTextureSize);
 
     this.backdropState = { ...DEFAULT_BACKDROP, color: opts?.background ?? DEFAULT_BACKGROUND };
     this.pmrem = new PMREMGenerator(r);
@@ -328,7 +331,10 @@ export class BookScene {
     this.lights.key.shadow.normalBias = 0.0006 * span;
     this.groundFade.value = reach;
     const L = this.layout;
-    this.contact.setArea(0, 0, span * 2.4, span * 2.4, (L ? Math.max(L.thick, L.coverH) * SCENE_UNITS_PER_PT : span) * 0.8);
+    // Contact shadow: what is near the floor (a book lying, the foot of one standing). It fades
+    // within a quarter of the book's height, so a book lifted off the table (float, drop-in) or
+    // a leaf in flight no longer leaves a black blob under it; the key light's shadow stays.
+    this.contact.setArea(0, 0, span * 2.4, span * 2.4, (L ? Math.max(L.thick * 2, L.coverH * 0.25) * SCENE_UNITS_PER_PT : span * 0.25));
     this.controls.minDistance = span * 0.2;
     this.controls.maxDistance = span * 12;
     this.renderer.shadowMap.needsUpdate = true;
@@ -665,7 +671,8 @@ export class BookScene {
         this.motion.updateMatrixWorld(true);
       }
     }
-    const key = [s.open, stage, lift, spin, tilt, s.jacket ?? 0].map((v) => v.toFixed(5)).join('|') + s.leaves.map((v) => v.toFixed(5)).join(',');
+    // Exact: two poses that merely round alike must not share shadows (frame-exact video).
+    const key = [s.open, stage, lift, spin, tilt, s.jacket ?? 0].join('|') + '#' + s.leaves.join(',');
     if (key !== this.lastPose) {
       this.lastPose = key;
       this.poseDirty = true;
@@ -781,6 +788,98 @@ export class BookScene {
   }
 
   /* ----------------------------------------------------------------------- */
+  /* Texture resolution                                                       */
+  /* ----------------------------------------------------------------------- */
+
+  /** Largest texture the GPU takes (px per side). */
+  get maxTextureSize(): number {
+    return this.renderer.capabilities.maxTextureSize;
+  }
+
+  /** Demand for the current camera on a viewport of vw × vh device pixels. */
+  private demandNow(vw: number, vh: number): TextureDemand {
+    const model = this.model;
+    if (!model) return { pages: [], coverFront: 0, jacketFront: 0 };
+    this.camera.updateMatrixWorld();
+    model.group.updateMatrixWorld(true);
+    const m = model.group.matrixWorld;
+    const v = new Vector3();
+    const toScreen = (a: number, y: number, z: number): [number, number] | null => {
+      v.set(a, y, z).applyMatrix4(m).project(this.camera);
+      if (v.z < -1 || v.z > 1 || Math.abs(v.x) > 1.15 || Math.abs(v.y) > 1.15) return null;
+      return [((v.x + 1) / 2) * vw, ((1 - v.y) / 2) * vh];
+    };
+    const eye = model.group.worldToLocal(this.camera.position.clone());
+    const d = model.textureDemand(toScreen, [eye.x, eye.y, eye.z]);
+    return {
+      pages: [...d.pages.entries()].map(([index, pxPerPt]) => ({ index, pxPerPt })).sort((p, q) => q.pxPerPt - p.pxPerPt),
+      coverFront: d.coverFront,
+      jacketFront: d.jacketFront,
+    };
+  }
+
+  /**
+   * What the book's textures need to look sharp (px per pt of page / cover art, 0 = not in view):
+   * for the live view, or — given a size — for a still rendered at width × height.
+   */
+  getTextureDemand(width?: number, height?: number): TextureDemand {
+    if (width == null || height == null) {
+      const size = this.renderer.getDrawingBufferSize(new Vector2());
+      return this.demandNow(size.x, size.y);
+    }
+    const position = this.camera.position.clone(), target = this.controls.target.clone(), aspect = this.camera.aspect;
+    const liveAspect = this.live.w / this.live.h;
+    if (this.manual || this.mode === 'none') this.applySample(this.staticSample());
+    this.camera.aspect = width / height;
+    this.camera.updateProjectionMatrix();
+    if (this.userCamera) this.refitUserCamera(liveAspect, width / height);
+    else this.frameCamera(this.sample);
+    const d = this.demandNow(width, height);
+    this.camera.position.copy(position);
+    this.controls.target.copy(target);
+    this.camera.aspect = aspect;
+    this.camera.updateProjectionMatrix();
+    this.camera.lookAt(target);
+    return d;
+  }
+
+  /** The most every texture needs over the current animation, rendered at width × height. */
+  getAnimationTextureDemand(width: number, height: number, samples = 48): TextureDemand {
+    if (this.mode === 'none' || this.manual) return this.getTextureDemand(width, height);
+    const position = this.camera.position.clone(), target = this.controls.target.clone(), aspect = this.camera.aspect;
+    this.camera.aspect = width / height;
+    this.camera.updateProjectionMatrix();
+    const D = this.getAnimationDuration();
+    const pages = new Map<number, number>();
+    let coverFront = 0, jacketFront = 0;
+    for (let i = 0; i < samples; i++) {
+      this.applyAt((D * i) / samples, true);
+      const d = this.demandNow(width, height);
+      for (const p of d.pages) pages.set(p.index, Math.max(pages.get(p.index) ?? 0, p.pxPerPt));
+      coverFront = Math.max(coverFront, d.coverFront);
+      jacketFront = Math.max(jacketFront, d.jacketFront);
+    }
+    this.applyAt(this.time, false);
+    this.camera.position.copy(position);
+    this.controls.target.copy(target);
+    this.camera.aspect = aspect;
+    this.camera.updateProjectionMatrix();
+    this.camera.lookAt(target);
+    return { pages: [...pages.entries()].map(([index, pxPerPt]) => ({ index, pxPerPt })).sort((p, q) => q.pxPerPt - p.pxPerPt), coverFront, jacketFront };
+  }
+
+  /** Sharper art for page `index` (index 0 = page 1); null restores the base art. */
+  setPageArt(index: number, canvas: HTMLCanvasElement | null): void {
+    if (this.materials?.setPageArt(index, canvas)) this.dirty = true;
+  }
+
+  /** Sharper art for the front panel of the cover or jacket (see PanelArt); null restores it. */
+  setPanelArt(which: 'cover' | 'jacket', art: PanelArt | null): void {
+    this.materials?.setPanelArt(which, art);
+    this.dirty = true;
+  }
+
+  /* ----------------------------------------------------------------------- */
   /* Rendering                                                                */
   /* ----------------------------------------------------------------------- */
 
@@ -793,7 +892,7 @@ export class BookScene {
     }
     const w = Math.max(1, Math.round(width));
     const h = Math.max(1, Math.round(height));
-    const pr = Math.min(2, Math.max(0.5, pixelRatio ?? (typeof window !== 'undefined' ? window.devicePixelRatio : 1)));
+    const pr = Math.min(3, Math.max(0.5, pixelRatio ?? (typeof window !== 'undefined' ? window.devicePixelRatio : 1)));
     const fromAspect = this.camera.aspect;
     this.live = { w, h, pr };
     this.renderer.setPixelRatio(pr);

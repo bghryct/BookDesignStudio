@@ -77,7 +77,7 @@ export const TABLE_ITEMS: LibraryItem[] = [
     id: 'table-ledger', designer: 'general', label: 'Table · ledger with totals',
     note: 'Banded rows, a solid head, a bold stub and a footer row of totals.',
     make: (c) => {
-      const t = sample(c, LEDGER, { name: 'Production costs', tableStyle: 'tbs-ledger', footerRows: 1 });
+      const t = sample(c, LEDGER, { name: 'Production costs', tableStyle: 'tbs-ledger', footerRows: 1, repeatFooter: false });
       t.cells[t.rows.length - 1].forEach((cell) => { cell.cellStyle = 'cs-total'; });
       return [t];
     },

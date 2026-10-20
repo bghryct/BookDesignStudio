@@ -65,7 +65,8 @@ const INSERTS: { group: string; items: { label: string; text: string; hint?: str
   ] },
   { group: 'Tabs & notes', items: [
     { label: 'Tab', text: '\t' }, { label: 'Right-indent tab', text: '{rtab}' }, { label: 'Indent to here', text: '{here}' },
-    { label: 'Footnote', text: '{fn:}', hint: 'Type the note inside the braces' }, { label: 'Page number', text: '{page}' }, { label: 'Roman page number', text: '{page:roman}' }, { label: 'Chapter (running head)', text: '{chapter}' }, { label: 'Book title', text: '{title}' },
+    { label: 'Footnote', text: '{fn:}', hint: 'Type the note inside the braces' }, { label: 'Endnote', text: '{en:}', hint: 'Collected at the end of the story' },
+    { label: 'Index entry', text: '{ix:}', hint: 'Type the index term inside the braces; term!subterm for a sub-entry' }, { label: 'Page number', text: '{page}' }, { label: 'Roman page number', text: '{page:roman}' }, { label: 'Chapter (running head)', text: '{chapter}' }, { label: 'Book title', text: '{title}' },
   ] },
   { group: 'Characters', items: [
     { label: '— em dash', text: '—' }, { label: '– en dash', text: '–' }, { label: '… ellipsis', text: '…' }, { label: '‘ ’ single quotes', text: '‘’' },
@@ -146,7 +147,7 @@ export function TextStoryEditor({ elementId, anchor, viewport }: { elementId: st
     const { selectionStart: a, selectionEnd: b, value } = ta;
     setText(value.slice(0, a) + str + value.slice(b));
     // Leave the caret inside an empty footnote / pair of quotes.
-    const back = str === '{fn:}' ? 1 : str === '‘’' || str === '“”' ? 1 : 0;
+    const back = str === '{fn:}' || str === '{en:}' || str === '{ix:}' ? 1 : str === '‘’' || str === '“”' ? 1 : 0;
     requestAnimationFrame(() => { ta.focus(); ta.setSelectionRange(a + str.length - back, a + str.length - back); });
   };
 
@@ -251,6 +252,20 @@ export function TextStoryEditor({ elementId, anchor, viewport }: { elementId: st
       {pop === 'para' && <ParaFormat onApply={(props) => { paraLocal(props); setPop(null); }} />}
       {pop === 'insert' && (
         <div className="scroll-thin max-h-52 overflow-y-auto border-b border-ink-700 px-2 py-1.5">
+          {Object.values(project.assets).some((a) => a.kind === 'image' || a.kind === 'svg') && (
+            <div className="mb-1.5">
+              <div className="mb-0.5 text-[9.5px] font-semibold uppercase tracking-[0.08em] text-ink-500">Images in the text · click: inline, ⇧-click: full-width figure</div>
+              <div className="flex flex-wrap gap-1">
+                {Object.values(project.assets).filter((a) => a.kind === 'image' || a.kind === 'svg').slice(0, 24).map((a) => (
+                  <button key={a.id} type="button" title={`${a.name} — inline in the line; ⇧-click for a figure the width of the column`}
+                    onClick={(e) => insert(e.shiftKey ? `\n{img:${a.id}; w:100%}\n` : `{img:${a.id}; h:${Math.round((head?.style.fontSize ?? 10) * 1.2)}}`)}
+                    className="h-10 w-10 overflow-hidden rounded border border-ink-700 bg-ink-900 hover:border-ink-400">
+                    <img src={a.src} alt="" className="h-full w-full object-contain" />
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
           {INSERTS.map((g) => (
             <div key={g.group} className="mb-1.5">
               <div className="mb-0.5 text-[9.5px] font-semibold uppercase tracking-[0.08em] text-ink-500">{g.group}</div>
@@ -335,6 +350,7 @@ function CharFormat({ onApply }: { onApply: (props: string | null) => void }) {
         {num('baselineShift', 'Shift pt')}
         {num('hScale', 'H-scale %', '100')}
         {num('skew', 'Skew °')}
+        {num('rotate', 'Rotate °')}
         <label><span className={lab}>Case</span>
           <select className={field} value={p.textTransform ?? ''} onChange={(e) => up('textTransform', e.target.value)}>
             <option value="">—</option><option value="uppercase">CAPS</option><option value="lowercase">lower</option><option value="small-caps">Sm. caps</option>

@@ -77,11 +77,12 @@ One shaping engine (fontkit) measures with the same font files the browser rende
 **Paragraphs**
 - Left, right, first-line and hanging indents; space before and after; drop caps of one to six letters with Cleves illuminations; first line in small caps.
 - **Rules and shading**: rules above and below (solid, dashed, dotted or double; column or text width; offsets and indents). Shading has padding, corner radius and a border.
-- **Lists**: bullets and numbering (1, a, i, I), nesting, start-at and continue, markers aligned on the point. Type `- `, `• `, `1. ` or `a) ` to start a list item.
+- **Lists**: bullets and numbering (1, a, i, I), nesting, multi-level numbers (2.1, 2.1.1), start-at and continue, markers aligned on the point. Type `- `, `• `, `1. ` or `a) ` to start a list item.
 - **Tabs**: left, centre, right and decimal stops with leaders that line up from line to line; default tab interval; right-indent tab (`{rtab}`) for contents pages; indent to here (`{here}`).
 - **Keeps**: keep with next, keep lines together, widows, orphans, start in the next column or frame, and column / frame breaks (`{col}`, `{frame}`).
 - **Baseline grid**: every line, or only the first line of each paragraph.
-- **Footnotes** (`{fn:…}`) are set at the foot of the column that holds the reference, under a separator rule. Numbering can be 1, i, a or * † ‡; a line whose note won't fit moves on with it.
+- **Footnotes** (`{fn:…}`) are set at the foot of the column that holds the reference, under a separator rule. Numbering can be 1, i, a or * † ‡; a line whose note won't fit moves on with it. **Endnotes** (`{en:…}`) are collected at the end of the story under a heading.
+- **Graphics in the text flow**: `{img:…}` sets an image inline in the line (it moves with the text), or on a line of its own as an anchored figure the width you give it (`w:100%` = the column), with room made above it. Pick them from the story editor's Insert menu.
 
 **Styles and local formatting**
 - **Paragraph and character styles**:
@@ -94,11 +95,11 @@ One shaping engine (fontkit) measures with the same font files the browser rende
   - tracking and colour
   - case, superscript and subscript (true `sups`/`subs` when the font has them), baseline shift
   - underline, strikethrough and highlight
-  - horizontal and vertical scale, skew, outline stroke
+  - horizontal and vertical scale, skew, character rotation, outline stroke
   - no-break, hyphenation language and OpenType features
 
 **Frames**
-- Columns with a column rule, **balanced columns**, heads that **span all columns**.
+- Columns with a column rule, **balanced columns**, heads that **span all columns** anywhere in the story (the columns above balance, a new band of columns starts below).
 - **Vertical justification** (top, middle, bottom, justify).
 - First-baseline options (cap height, ascent, x-height, leading, fixed) and insets per side.
 - **Fit the frame to its text**.
@@ -113,8 +114,12 @@ One shaping engine (fontkit) measures with the same font files the browser rende
   - Cells set by the same text engine as frames: every markup, style and kerning feature works.
   - Per-cell alignment (including decimal alignment on any character, shared down the column), vertical alignment, padding, fill, rotation, diagonals.
   - Figure styles: tabular/proportional × lining/old-style.
-- **Rules**: border, head, foot, row, column and stub rules with weight, colour and dash, per-edge overrides, and clean joins.
-- **Table and cell styles**, with presets: Tschichold book rules, Swiss grid, ledger zebra, full grid, tabular without rules.
+- **Rules**: border, head, foot, row, column and stub rules. Each is solid, dotted, dashed, double, thick–thin or thin–thick, with weight, colour and gap. Per-edge overrides, and two-line rules nest properly at corners.
+- **Tables across frames and pages**: thread a table on into further frames, or let the panel continue it on the next page.
+  - Body rows flow on, and header and footer rows repeat (with InDesign's skip-first / skip-last options).
+  - Rows stay whole unless you allow tall rows to break.
+  - Merged rows travel together.
+- **Table and cell styles** with a full property editor that updates every table using them. Presets include Tschichold book rules, Scotch rules, Swiss grid, ledger zebra, full grid, tabular without rules, and a grand-total cell style.
 - **Editing**: the table tool, CSV/TSV drop and paste, Tab / ⇧Tab between cells (a new row at the end), cell ranges, copy and paste as tab-separated data, and dragging column and row borders.
 
 **Tools**
@@ -122,6 +127,7 @@ One shaping engine (fontkit) measures with the same font files the browser rende
   - character and paragraph formatting popovers
   - an Insert menu for breaks, spaces, tabs, footnotes, tokens and typographic characters
   - ⇧↵ for a line break, ⇥ for a tab, ⌥←/→ for kerning
+- **Generate index** (Document panel): mark terms with `{ix:term}` or `{ix:term!subterm}`. The index lists each term with the pages it actually lands on, folds consecutive pages into ranges, groups terms by letter and sets them in two columns.
 - **Generate contents page** (Document panel): finds chapter titles and `#`/`##` headings, including those inside threaded stories, records the page each one is actually set on, and sets the contents with dot leaders. Run it again to refresh the page numbers.
 - **Find / change** across every story in the book, with GREP, `$1` groups and one-click clean-ups (straight → curly quotes, double spaces, ranges → en dashes, thin spaces before French punctuation).
 - RTL lines, and **vertical Japanese (tategaki)** with kinsoku rules, hanging 、。, vertical punctuation forms and tate-chū-yoko.

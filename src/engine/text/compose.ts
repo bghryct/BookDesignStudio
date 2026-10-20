@@ -14,7 +14,7 @@ import type { TextStyle } from '../../model/types';
 import type { FontRef, TextRun } from '../../render/primitives';
 import { resolveFont, measure, fontMetrics, faceSupports, opticalKerning } from '../fonts';
 import { hyphenPoints } from '../hyphenate';
-import { PLAIN, type Paragraph, type SpanStyle, type Word } from './story';
+import { PLAIN, type Paragraph, type SpanStyle, type Word, type StoryStyles } from './story';
 
 /* -------------------------------------------------------------------------- */
 /* Items                                                                       */
@@ -42,6 +42,10 @@ export interface Seg {
   deco?: RunDeco;
   /** A footnote reference (its text is the label). */
   fn?: boolean;
+  /** An inline graphic (its width is the image's; `pct` = % of the column, resolved when placed). */
+  obj?: { href: string; w: number; h: number; assetId?: string; pct?: number };
+  /** Character rotation, degrees. */
+  rot?: number;
 }
 
 export interface Box {
@@ -129,7 +133,21 @@ const FIXED_RE = /([ -  ])/;
 
 export class ItemBuilder {
   private rtl: boolean;
-  constructor(private style: TextStyle, private ps: ParaStyle) { this.rtl = style.direction === 'rtl'; }
+  constructor(private style: TextStyle, private ps: ParaStyle, private images: StoryStyles['images'] = undefined) { this.rtl = style.direction === 'rtl'; }
+
+  /** Size of an inline graphic: given width / height, the other from the image's proportions. */
+  objSeg(st: SpanStyle): Seg {
+    const o = st.obj!;
+    const img = this.images?.[o.id];
+    const ar = img && img.w > 0 ? img.h / img.w : 0.75;
+    let w = o.w ?? (o.h != null ? o.h / ar : Math.min(160, (img?.w ?? 120) * 0.75));
+    let h = o.h ?? w * ar;
+    if (o.pct) { w = 1; h = 1; }
+    return {
+      text: '', font: this.font(PLAIN), size: this.ps.size, ls: 0, width: w, glyphW: w, color: this.style.color, dy: o.shift || undefined,
+      obj: { href: img?.href ?? '', w, h, assetId: o.id, pct: o.pct },
+    };
+  }
 
   font(st: SpanStyle, extraFeatures?: Record<string, boolean>, size = this.ps.size): FontRef {
     const s = this.style;
@@ -161,6 +179,7 @@ export class ItemBuilder {
 
   /** Measure a piece of text in a span style: special spaces, small caps, positions, scaling. */
   segs(text: string, st: SpanStyle, sc: boolean, manual?: number[]): Seg[] {
+    if (st.obj) return [this.objSeg(st)];
     if (FIXED_RE.test(text)) {
       // Fixed-width spaces become blank segments of their exact width.
       const out: Seg[] = [];
@@ -202,6 +221,11 @@ export class ItemBuilder {
       };
     }
     sc = sc || cs?.textTransform === 'small-caps';
+    // Character rotation: every character its own run, turned about its centre.
+    if (cs?.rotate && !sc) {
+      const font = this.font(st, extra, size);
+      return [...text].map((ch) => ({ ...this.seg(ch, font, size, ls, color, look), rot: cs.rotate }));
+    }
     if (!sc) return [this.seg(text, this.font(st, extra, size), size, ls, color, look, manual)];
     const trial = this.font(st, { ...extra, smcp: true }, size);
     if (faceSupports(trial, 'smcp')) {
@@ -297,8 +321,8 @@ export function hyphenDictionary(list: string[] | undefined): Map<string, number
   return d;
 }
 
-export function buildItems(p: Paragraph, style: TextStyle, ps: ParaStyle, scWords: number, ragged: boolean, dict: Map<string, number[] | null> | null): Item[] {
-  const b = new ItemBuilder(style, ps);
+export function buildItems(p: Paragraph, style: TextStyle, ps: ParaStyle, scWords: number, ragged: boolean, dict: Map<string, number[] | null> | null, images?: StoryStyles['images']): Item[] {
+  const b = new ItemBuilder(style, ps, images);
   const items: Item[] = [];
   const sp = b.space();
   const justify = !ragged;
@@ -719,6 +743,7 @@ function runOf(s: Seg, x: number, baseline: number, extraLs = 0, scale = 1): Tex
   if (s.skew) r.skew = s.skew;
   if (s.stroke) r.stroke = s.stroke;
   if (s.deco) r.deco = s.deco;
+  if (s.rot) { r.rotate = s.rot; r.pivot = [x + width / 2, r.y - s.size * 0.33]; }
   return r;
 }
 
@@ -778,6 +803,11 @@ export function placeLine(items: Item[], line: Line, lineW: number, o: PlaceOpti
       const glyph = it.segs.reduce((a, g) => a + g.glyphW, 0);
       const scale = glyph > 0 ? 1 + (r > 0 ? r * it.gsSt : r * it.gsSh) / glyph : 1;
       for (const s of it.segs) {
+        if (s.obj) {
+          runs.push({ x, y: o.baseline - (s.dy ?? 0), text: '', font: s.font, size: s.size, color: s.color, width: s.width, obj: { ...s.obj } });
+          x += s.width;
+          continue;
+        }
         if (!s.text) { x += s.width; continue; }
         const run = runOf(s, x, o.baseline, lsExtra + letterFill, scale);
         runs.push(run);
@@ -817,12 +847,14 @@ export function placeLine(items: Item[], line: Line, lineW: number, o: PlaceOpti
   else if (align === 'center') x0 = (lineW - width) / 2 + (rp - lp) / 2;
   else x0 = -lp;
   for (const run of runs) {
+    const before = run.x;
     run.x = o.rtl ? o.xOffset + lineW - (run.x + x0 + run.width) : o.xOffset + run.x + x0;
+    if (run.pivot) run.pivot = [run.pivot[0] + run.x - before, run.pivot[1]];
     if (o.rtl) run.dir = 'rtl';
   }
   if (hereX != null) hereX += x0;
   const chars = runs.reduce((n, rr) => n + [...rr.text].length, 0) + Math.max(0, runs.length - 1);
-  if (o.rtl || justify || hasTabs || letterFill) return { runs, width, ratio: justify ? r : 0, chars, justified: justify, hereX };
+  if (o.rtl || justify || hasTabs || letterFill || runs.some((rr) => rr.obj || rr.rotate)) return { runs, width, ratio: justify ? r : 0, chars, justified: justify, hereX };
   // Ragged lines: merge words into one run per font so the SVG stays light. The glue equals
   // the font's own space advance, which is exactly what the browser will set.
   const merged: TextRun[] = [];

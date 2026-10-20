@@ -3,10 +3,13 @@
  * blurred twice and laid on the ground (after the three.js "contact shadows" technique).
  */
 import {
+  CustomBlending,
   Group,
+  MaxEquation,
   Mesh,
   MeshBasicMaterial,
   MeshDepthMaterial,
+  OneFactor,
   OrthographicCamera,
   PlaneGeometry,
   ShaderMaterial,
@@ -18,6 +21,9 @@ import {
 } from 'three';
 import { HorizontalBlurShader } from 'three/examples/jsm/shaders/HorizontalBlurShader.js';
 import { VerticalBlurShader } from 'three/examples/jsm/shaders/VerticalBlurShader.js';
+
+/** Scene units the depth camera sits below the shadow plane. */
+const CAM_BELOW = 0.006;
 
 export class ContactShadow {
   readonly group = new Group();
@@ -60,6 +66,15 @@ export class ContactShadow {
     };
     this.depthMat.depthTest = false;
     this.depthMat.depthWrite = false;
+    // Nearest surface wins (max), rather than stacking every layer above the floor: a sheet
+    // settling onto the ground then darkens the floor smoothly instead of popping a layer in.
+    this.depthMat.blending = CustomBlending;
+    this.depthMat.blendEquation = MaxEquation;
+    this.depthMat.blendEquationAlpha = MaxEquation;
+    this.depthMat.blendSrc = OneFactor;
+    this.depthMat.blendDst = OneFactor;
+    this.depthMat.blendSrcAlpha = OneFactor;
+    this.depthMat.blendDstAlpha = OneFactor;
     this.hBlur.depthTest = false;
     this.vBlur.depthTest = false;
   }
@@ -67,6 +82,8 @@ export class ContactShadow {
   /** Ground rectangle (scene units) centred at (x, z), catching shadows from objects up to `height`. */
   setArea(x: number, z: number, width: number, depth: number, height: number): void {
     this.group.position.set(x, 0.0015, z);
+    // The depth pass starts just below the floor, so whatever rests on it is always seen.
+    this.cam.position.y = -CAM_BELOW;
     this.plane.scale.set(width, -1, depth);
     this.blurPlane.scale.set(width, 1, depth);
     this.cam.left = -width / 2;
@@ -74,7 +91,7 @@ export class ContactShadow {
     this.cam.top = depth / 2;
     this.cam.bottom = -depth / 2;
     this.cam.near = 0;
-    this.cam.far = Math.max(0.05, height);
+    this.cam.far = Math.max(0.05, height) + CAM_BELOW;
     this.cam.updateProjectionMatrix();
   }
 

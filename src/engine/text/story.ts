@@ -18,10 +18,18 @@ import type {
 import { applyParagraphStyle, mergeCs, mergePara, parseCharProps, parseParaProps } from './props';
 import { toRoman } from '../../model/units';
 
-/** The project's named styles and hyphenation exceptions. */
-export interface StoryStyles { para: ParagraphStyleDef[]; char: CharacterStyleDef[]; hyphenation?: string[] }
+/** The project's named styles, hyphenation exceptions and images (for inline graphics). */
+export interface StoryStyles {
+  para: ParagraphStyleDef[];
+  char: CharacterStyleDef[];
+  hyphenation?: string[];
+  images?: Record<string, { href: string; w: number; h: number }>;
+}
 
-export interface SpanStyle { italic: boolean; bold: boolean; sc: boolean; cs: CharacterStyleProps | null; fn?: boolean }
+/** An inline graphic: `{img:assetId; w:120; h:80; shift:2}` (w may be a % of the column). */
+export interface InlineObj { id: string; w?: number; h?: number; pct?: number; shift?: number }
+
+export interface SpanStyle { italic: boolean; bold: boolean; sc: boolean; cs: CharacterStyleProps | null; fn?: boolean; obj?: InlineObj }
 /** `kern[i]`: manual kerning after UTF-16 unit `i`, thousandths of an em. */
 export interface Piece { text: string; st: SpanStyle; kern?: number[] }
 /** What separates a word from the one before it. */
@@ -34,6 +42,8 @@ export interface Word {
   here?: boolean;
   /** Discretionary hyphens (positions in `text`); they replace automatic hyphenation for the word. */
   shy?: number[];
+  /** Index entries marked in this word ({ix:term} or {ix:term!sub}). */
+  ix?: string[];
 }
 export type ParaKind = 'body' | 'h1' | 'h2' | 'break';
 export interface Footnote { n: number; label: string; text: string }
@@ -50,6 +60,8 @@ export interface Paragraph {
   breakBefore: 'column' | 'frame' | null;
   footnotes: Footnote[];
   hasTabs: boolean;
+  /** A paragraph holding nothing but one graphic: an anchored figure in the text flow. */
+  figure?: InlineObj | null;
 }
 
 export const PLAIN: SpanStyle = { italic: false, bold: false, sc: false, cs: null };
@@ -162,7 +174,7 @@ export function parseStory(text: string, style: TextStyle, styles: StoryStyles |
   const cmap = new Map((styles?.char ?? []).map((d) => [nameKey(d.name), d.props]));
   const paras: Paragraph[] = [];
   const counters: number[] = [];
-  const fn = { count: 0 };
+  const fn = { count: 0, en: 0, endnotes: [] as Footnote[] };
   let afterBreak = true;
   let pendingBreak: 'column' | 'frame' | null = null;
   for (const rawLine of text.replace(/\r\n?/g, '\n').split('\n')) {
@@ -216,16 +228,31 @@ export function parseStory(text: string, style: TextStyle, styles: StoryStyles |
           counters[lv] = Number.isFinite(n) ? n : (counters[lv] ?? 0) + 1;
         } else {
           counters[lv] = list.start != null ? list.start : (counters[lv] ?? 0) + 1;
-          marker = formatNumber(counters[lv], list.format) + (list.suffix ?? '.');
+          const path = list.hierarchical ? counters.slice(0, lv + 1).map((c) => c ?? 1) : [counters[lv]];
+          marker = path.map((c) => formatNumber(c, list!.format)).join('.') + (list.suffix ?? '.');
         }
       } else marker = list.bullet || '•';
     }
 
     body = applyRuleStyles(body, eff, cmap);
     const { words, footnotes, hasTabs } = parseInline(body, eff, cmap, fn);
-    paras.push({ kind, words, first: afterBreak, style: eff, pstyle, list, marker, level, breakBefore: pendingBreak, footnotes, hasTabs });
+    const only = words.length === 1 && words[0].pieces.length === 1 ? words[0].pieces[0].st.obj : undefined;
+    paras.push({ kind, words, first: afterBreak, style: eff, pstyle, list, marker, level, breakBefore: pendingBreak, footnotes, hasTabs, figure: only ?? null });
     pendingBreak = null;
     afterBreak = kind !== 'body';
+  }
+  // Endnotes: collected at the end of the story under a heading, numbered in order.
+  if (fn.endnotes.length) {
+    const noteStyle = applyParagraphStyle(style, { fontSize: style.fontSize * 0.85, leading: style.leading * 0.85, firstLineIndent: 0, align: style.align === 'justify' || style.align === 'justify-all' ? 'justify' : 'left', list: null });
+    const head = parseInline(style.endnoteHeading ?? 'Notes', style, cmap, fn);
+    paras.push({ kind: 'h2', words: head.words, first: false, style, pstyle: null, list: null, marker: null, level: 0, breakBefore: null, footnotes: [], hasTabs: false });
+    fn.endnotes.forEach((n, i) => {
+      const r = parseInline(n.text, noteStyle, cmap, fn);
+      const lab = { text: `${n.label}.`, st: { ...PLAIN } };
+      r.words.unshift({ pieces: [lab], text: lab.text, before: 'start' });
+      if (r.words[1]) r.words[1].before = 'space';
+      paras.push({ kind: 'body', words: r.words, first: i === 0, style: noteStyle, pstyle: { spaceBefore: style.leading * 0.2 }, list: null, marker: null, level: 0, breakBefore: null, footnotes: r.footnotes, hasTabs: false });
+    });
   }
   return paras;
 }
@@ -236,7 +263,7 @@ export function parseStory(text: string, style: TextStyle, styles: StoryStyles |
 
 const CODES: Record<string, string> = { nbsp: ' ', thin: ' ', hair: ' ', en: ' ', em: ' ', figure: ' ', punct: ' ', nnbsp: ' ', nbhy: '‑', third: ' ', quarter: ' ', sixth: ' ' };
 
-function parseInline(s: string, style: TextStyle, cmap: Map<string, CharacterStyleProps>, fn: { count: number }) {
+function parseInline(s: string, style: TextStyle, cmap: Map<string, CharacterStyleProps>, fn: { count: number; en: number; endnotes: Footnote[] }) {
   const st: SpanStyle = { ...PLAIN };
   const csStack: CharacterStyleProps[] = [];
   const words: Word[] = [];
@@ -247,6 +274,7 @@ function parseInline(s: string, style: TextStyle, cmap: Map<string, CharacterSty
   let sep: Sep | null = 'start';
   let here = false;
   let shy: number[] = [];
+  let ix: string[] = [];
   let hasTabs = false;
   const wordLen = () => cur.reduce((n, p) => n + p.text.length, 0) + buf.length;
 
@@ -258,10 +286,11 @@ function parseInline(s: string, style: TextStyle, cmap: Map<string, CharacterSty
   const pushWord = (force = false) => {
     flush();
     if (!cur.length && !force) return;
-    words.push({ pieces: cur, text: cur.map((p) => p.text).join(''), before: sep ?? 'none', here: here || undefined, shy: shy.length ? shy : undefined });
+    words.push({ pieces: cur, text: cur.map((p) => p.text).join(''), before: sep ?? 'none', here: here || undefined, shy: shy.length ? shy : undefined, ix: ix.length ? ix : undefined });
     cur = [];
     here = false;
     shy = [];
+    ix = [];
     sep = null;
   };
   const setSep = (k: Sep) => {
@@ -298,16 +327,47 @@ function parseInline(s: string, style: TextStyle, cmap: Map<string, CharacterSty
         i += m[0].length - 1;
         continue;
       }
-      if (s.startsWith('{fn:', i)) {
+      if (s.startsWith('{fn:', i) || s.startsWith('{en:', i) || s.startsWith('{ix:', i) || s.startsWith('{img:', i)) {
         let depth = 0, j = i;
         for (; j < s.length; j++) { if (s[j] === '{') depth++; else if (s[j] === '}' && --depth === 0) break; }
-        const content = s.slice(i + 4, j).trim();
+        const kind = s.slice(i + 1, s.indexOf(':', i));
+        const content = s.slice(s.indexOf(':', i) + 1, j).trim();
+        i = j;
+        if (kind === 'ix') {
+          // Index marker: attaches to the word being set (or the one just finished).
+          if (!content) continue;
+          if (buf || cur.length) ix.push(content);
+          else if (words.length) (words[words.length - 1].ix ??= []).push(content);
+          else ix.push(content);
+          continue;
+        }
+        if (kind === 'img') {
+          const parts = content.split(';').map((x) => x.trim()).filter(Boolean);
+          const obj: InlineObj = { id: parts[0] ?? '' };
+          for (const p of parts.slice(1)) {
+            const m = /^(w|width|h|height|shift)\s*:\s*([\d.]+)(%?)$/i.exec(p);
+            if (!m) continue;
+            const v = parseFloat(m[2]);
+            if (/^w/i.test(m[1])) { if (m[3]) obj.pct = v; else obj.w = v; }
+            else if (/^h/i.test(m[1])) obj.h = v;
+            else obj.shift = v;
+          }
+          flush();
+          cur.push({ text: '\uFFFC', st: { ...st, obj } });
+          continue;
+        }
+        flush();
+        if (kind === 'en') {
+          const n = ++fn.en;
+          const label = String(n);
+          cur.push({ text: label, st: { ...st, cs: mergeCs([...csStack, { position: 'superscript' }]) } });
+          fn.endnotes.push({ n, label, text: content });
+          continue;
+        }
         const n = ++fn.count;
         const label = footnoteLabel(n, style.footnoteNumbering);
-        flush();
         cur.push({ text: label, st: { ...st, cs: mergeCs([...csStack, { position: 'superscript' }]), fn: true } });
         footnotes.push({ n, label, text: content });
-        i = j;
         continue;
       }
     }

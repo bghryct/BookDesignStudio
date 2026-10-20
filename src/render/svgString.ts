@@ -80,7 +80,7 @@ function runStyle(r: TextRun): string {
 
 function runTransform(r: TextRun): string {
   const parts: string[] = [];
-  if (r.rotate) parts.push(`rotate(${n(r.rotate)} ${n(r.x)} ${n(r.y)})`);
+  if (r.rotate) parts.push(`rotate(${n(r.rotate)} ${n(r.pivot ? r.pivot[0] : r.x)} ${n(r.pivot ? r.pivot[1] : r.y)})`);
   const m = runMatrix(r);
   if (m) parts.push(`matrix(${m.map(n).join(' ')})`);
   return parts.length ? ` transform="${parts.join(' ')}"` : '';

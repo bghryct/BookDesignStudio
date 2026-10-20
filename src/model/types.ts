@@ -168,6 +168,8 @@ export interface TextStyle {
   footnoteNumbering?: 'decimal' | 'roman' | 'alpha' | 'symbols';
   footnoteScale?: number;
   footnoteRule?: boolean;
+  /** Endnotes ({en:…}) are collected at the end of the story under this heading. */
+  endnoteHeading?: string;
 }
 
 export type RagMode = 'natural' | 'swiss' | 'balanced' | 'wedge' | 'pattern';
@@ -205,6 +207,8 @@ export interface ListSpec {
   /** Numbers aligned right (on the full stop) or left. */
   align?: 'left' | 'right';
   level?: number;
+  /** Multi-level numbers that include the parent levels: 2.1, 2.2, 2.2.1 … */
+  hierarchical?: boolean;
 }
 
 export interface TabStop { pos: number; align: 'left' | 'center' | 'right' | 'decimal'; leader?: string; char?: string }
@@ -256,6 +260,8 @@ export interface CharacterStyleProps {
   noBreak?: boolean;
   /** Hyphenation language for the run. */
   language?: string;
+  /** Character rotation, degrees (each character turns about its own centre). */
+  rotate?: number;
 }
 
 export interface ParagraphStyleDef { id: ID; name: string; props: ParagraphStyleProps }

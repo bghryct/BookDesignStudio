@@ -55,6 +55,31 @@ export function untangle(p: Float64Array, n: number, reach = 14): void {
   }
 }
 
+/**
+ * Collapse fold-back spikes (a sample the polyline runs out to and straight back from, e.g. one
+ * left pinned at the apex of a crease too narrow for the sheet) onto the midpoint of its
+ * neighbours, in place.
+ */
+export function despike(p: Float64Array, n: number, passes = 3): void {
+  for (let pass = 0; pass < passes; pass++) {
+    let changed = false;
+    for (let i = 1; i < n - 1; i++) {
+      const ax = p[2 * i] - p[2 * i - 2], ay = p[2 * i + 1] - p[2 * i - 1];
+      const bx = p[2 * i + 2] - p[2 * i], by = p[2 * i + 3] - p[2 * i + 1];
+      const la = Math.hypot(ax, ay), lb = Math.hypot(bx, by);
+      if (la < 1e-9 || lb < 1e-9) continue;
+      const cos = (ax * bx + ay * by) / (la * lb);
+      const cx = p[2 * i + 2] - p[2 * i - 2], cy = p[2 * i + 3] - p[2 * i - 1];
+      if (cos < -0.85 && Math.hypot(cx, cy) < Math.min(la, lb)) {
+        p[2 * i] = (p[2 * i - 2] + p[2 * i + 2]) / 2;
+        p[2 * i + 1] = (p[2 * i - 1] + p[2 * i + 3]) / 2;
+        changed = true;
+      }
+    }
+    if (!changed) break;
+  }
+}
+
 const FOLD_N = 12;
 const FLAP_N = 6;
 export const JACKET_THICKNESS = mm(0.12);
@@ -68,6 +93,8 @@ export class JacketRig {
   private readonly baseBuf: Float64Array;
   private readonly flapW: number;
   private readonly height: number;
+  private readonly front: { x: number; w: number };
+  private readonly X: number[] = [];
 
   constructor(jc: JacketCalc, rtl: boolean, base: JacketBase, materials: Material[]) {
     this.base = base;
@@ -76,8 +103,9 @@ export class JacketRig {
     this.height = jc.height;
     const panel = (id: JacketPanel['id']) => jacketPanel(jc, rtl, id);
     const BF = panel('back-flap'), BFo = panel('back-fold'), FFo = panel('front-fold'), FF = panel('front-flap');
+    this.front = panel('front');
     // X (left-bound) for every sample: flap | fold | base | fold | flap.
-    const X: number[] = [];
+    const X: number[] = this.X;
     for (let i = 0; i < FLAP_N; i++) X.push(BF.x + (BF.w * i) / FLAP_N);
     for (let i = 0; i < FOLD_N; i++) X.push(BFo.x + (BFo.w * i) / FOLD_N);
     for (let i = 0; i < base.count; i++) X.push(base.x[i]);
@@ -93,11 +121,17 @@ export class JacketRig {
       top: (i, j) => [u(X[i]), 1 - (zs[j] + jc.height / 2 + jc.bleed) / totalH],
       bottom: zero,
       edge: zero,
-    }, (mid) => this.fillMid(mid));
+    }, (mid) => this.fillMid(mid), (i) => (this.isFront(i) ? 3 : 0));
     this.mesh = new Mesh(this.sheet.geometry, materials);
     this.mesh.castShadow = true;
     this.mesh.receiveShadow = true;
     this.mesh.frustumCulled = false;
+  }
+
+  /** The sheet quad between samples i and i + 1 lies on the front panel (material 3). */
+  isFront(i: number): boolean {
+    const F = this.front;
+    return this.X[i] >= F.x - 1e-6 && this.X[i + 1] <= F.x + F.w + 1e-6;
   }
 
   /** Re-pose from the book's current covering. */
@@ -190,6 +224,7 @@ export class JacketRig {
     if (b.constrain) {
       b.constrain(pts, ns, JACKET_THICKNESS / 2);
       untangle(pts, ns);
+      despike(pts, ns);
     }
     for (let j = 0; j < 2; j++) mid.set(pts, j * ns * 2);
   }

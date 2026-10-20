@@ -24,8 +24,32 @@ export type CellDiagonal = 'none' | 'down' | 'up' | 'cross';
 /** Figure style for numbers: tabular / proportional × lining / oldstyle (OpenType tnum·pnum, lnum·onum). */
 export type FigureStyle = 'default' | 'tabular-lining' | 'tabular-oldstyle' | 'proportional-lining' | 'proportional-oldstyle';
 
-/** A rule. Weight 0 = no rule. */
-export interface TableStroke { w: number; color: string; dash: number[] }
+/** How a rule is drawn: one line (optionally dashed with `dash`), dots, dashes, or two lines. */
+export type RuleStyle = 'solid' | 'dotted' | 'dashed' | 'double' | 'thick-thin' | 'thin-thick';
+
+/**
+ * A rule. Weight 0 = no rule. For two-line styles `w` is the combined weight of both lines and
+ * `gap` the space between them (thick–thin: two thirds and one third of the weight).
+ * Thick–thin puts the thick line above (or left), thin–thick below (or right).
+ */
+export interface TableStroke { w: number; color: string; dash: number[]; style?: RuleStyle; gap?: number }
+
+export const RULE_STYLES: { value: RuleStyle; label: string }[] = [
+  { value: 'solid', label: 'Solid' }, { value: 'dotted', label: 'Dotted' }, { value: 'dashed', label: 'Dashed' },
+  { value: 'double', label: 'Double' }, { value: 'thick-thin', label: 'Thick–thin' }, { value: 'thin-thick', label: 'Thin–thick' },
+];
+
+/** The style a stroke is drawn in (older strokes only carry a dash array). */
+export function ruleStyleOf(s: TableStroke): RuleStyle {
+  if (s.style) return s.style;
+  if (s.dash.length >= 2) return s.dash[0] < 0.1 ? 'dotted' : 'dashed';
+  return 'solid';
+}
+
+export const isMultiLine = (s: TableStroke) => { const k = ruleStyleOf(s); return k === 'double' || k === 'thick-thin' || k === 'thin-thick'; };
+export const gapOf = (s: TableStroke) => Math.max(0, s.gap ?? Math.max(0.5, s.w * 0.75));
+/** Total thickness across the rule, pt. */
+export const ruleExtent = (s: TableStroke) => (s.w <= 0 ? 0 : isMultiLine(s) ? s.w + gapOf(s) : s.w);
 
 export interface CellEdges { top?: TableStroke; right?: TableStroke; bottom?: TableStroke; left?: TableStroke }
 
@@ -149,6 +173,18 @@ export interface TableElement extends ElementBase {
   autoHeight: boolean;
   /** Body rows stretch to fill a taller frame. */
   fillHeight: boolean;
+  /** Thread: the table continues in this (empty) table frame, on this or a later page. */
+  flowNext?: ID | null;
+  /** Repeat the header rows at the top of every continuation frame (default on). */
+  repeatHeader?: boolean;
+  /** Leave the header out of the first frame (a 'continued' head shown only after a break). */
+  skipFirstHeader?: boolean;
+  /** Repeat the footer rows at the foot of every frame (default on; off = once, at the end). */
+  repeatFooter?: boolean;
+  /** Leave the footer out of the last frame. */
+  skipLastFooter?: boolean;
+  /** Let a tall row break across frames instead of moving whole to the next frame. */
+  breakRows?: boolean;
 }
 
 export interface CellRange { r0: number; c0: number; r1: number; c1: number }
@@ -160,6 +196,8 @@ export interface CellRange { r0: number; c0: number; r1: number; c1: number }
 const INK = '#1b1813';
 export const NO_RULE: TableStroke = { w: 0, color: INK, dash: [] };
 export const rule = (w: number, color = INK, dash: number[] = []): TableStroke => ({ w, color, dash });
+/** A rule in one of the named styles (double, thick–thin …) with an optional gap. */
+export const styledRule = (w: number, style: RuleStyle, gap?: number, color = INK): TableStroke => ({ w, color, dash: [], style, ...(gap != null ? { gap } : {}) });
 
 export const BASE_TABLE_STYLE: TableStyleProps = {
   borderTop: NO_RULE, borderBottom: NO_RULE, borderLeft: NO_RULE, borderRight: NO_RULE,
@@ -185,6 +223,7 @@ export const CELL_PRESETS: CellStyleDef[] = [
   { id: 'cs-figures', name: 'Figures', props: { align: 'decimal', figures: 'tabular-lining' } },
   { id: 'cs-total', name: 'Total', props: { weight: 650, edges: { top: rule(0.5) } } },
   { id: 'cs-note', name: 'Table note', props: { fontSize: 7.5, leading: 10, italic: true } },
+  { id: 'cs-grand-total', name: 'Grand total', props: { weight: 650, edges: { top: rule(0.5), bottom: styledRule(1.2, 'double', 0.8) } } },
   { id: 'cs-ledger-head', name: 'Ledger head', props: { textTransform: 'uppercase', tracking: 80, fontSize: 7, weight: 600, color: '#f4efe4', valign: 'middle' } },
 ];
 
@@ -214,6 +253,11 @@ export const TABLE_PRESETS: TableStyleDef[] = [
     id: 'tbs-tabular', name: 'Tabular, no rules (Bringhurst)',
     note: 'No rules at all: space, alignment and an italic head do the work. Rules are added only where the eye needs them.',
     props: { headerCell: 'cs-head-italic', stub: true, stubCell: null },
+  },
+  {
+    id: 'tbs-scotch', name: 'Scotch rules',
+    note: 'A thick–thin rule above, a fine rule under the heads and thin–thick to close: the classic Victorian book table.',
+    props: { borderTop: styledRule(1.5, 'thick-thin', 1), headerRule: rule(0.4), borderBottom: styledRule(1.5, 'thin-thick', 1), footerRule: rule(0.4), headerCell: 'cs-head' },
   },
 ];
 

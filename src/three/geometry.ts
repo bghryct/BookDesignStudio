@@ -191,7 +191,7 @@ class MeshBuilder {
 /* Static parts                                                               */
 /* ------------------------------------------------------------------------- */
 
-/** Covered board (case / coptic) in its closed position. Groups: 0 covering, 1 pastedown. */
+/** Covered board (case / coptic) in its closed position. Groups: 0 covering, 1 pastedown, 2 front panel. */
 function buildBoard(L: BookLayout, side: 'front' | 'back'): BufferGeometry {
   const mb = new MeshBuilder();
   const cm = L.cover;
@@ -207,7 +207,8 @@ function buildBoard(L: BookLayout, side: 'front' | 'back'): BufferGeometry {
   const e = (y: number) => Math.abs(yOut - y);
   const bw = L.boardW, bt = L.bt;
 
-  mb.face(0, [[A0, yOut, Z0], [A1, yOut, Z0], [A1, yOut, Z1], [A0, yOut, Z1]], [0, ny, 0], (p) => uv(Xp(p[0] - A0), p[2] - Z0));
+  // The front board's outer face is the front panel: its own material slot (sharper art).
+  mb.face(front ? 2 : 0, [[A0, yOut, Z0], [A1, yOut, Z0], [A1, yOut, Z1], [A0, yOut, Z1]], [0, ny, 0], (p) => uv(Xp(p[0] - A0), p[2] - Z0));
   mb.face(0, [[A1, yOut, Z0], [A1, yIn, Z0], [A1, yIn, Z1], [A1, yOut, Z1]], [1, 0, 0], (p) => uv(Xp(bw + e(p[1])), p[2] - Z0));
   mb.face(0, [[A0, yOut, Z0], [A1, yOut, Z0], [A1, yIn, Z0], [A0, yIn, Z0]], [0, 0, -1], (p) => uv(Xp(p[0] - A0), -e(p[1])));
   mb.face(0, [[A0, yOut, Z1], [A1, yOut, Z1], [A1, yIn, Z1], [A0, yIn, Z1]], [0, 0, 1], (p) => uv(Xp(p[0] - A0), bh + e(p[1])));
@@ -440,6 +441,8 @@ interface LeafRig {
   yRight: number;
   /** Arc length from the spine to the start of the gutter bend (stab: the stitched strip). */
   sc: number;
+  /** Current turn, 0 … 1. */
+  x: number;
   last: string;
 }
 
@@ -472,6 +475,9 @@ interface SoftCoverRig {
   sSpine1: number;
   last: string;
 }
+
+/** On-screen densities (px per pt) the textures need; 0 = not in view. */
+export interface TextureDensity { pages: Map<number, number>; coverFront: number; jacketFront: number }
 
 export interface BookBounds { a0: number; a1: number; y0: number; y1: number; z0: number; z1: number }
 
@@ -511,6 +517,7 @@ export class BookModel {
   private spineOutline: { p: Float64Array; n: Float64Array } | null = null;
   private phi: Float64Array = new Float64Array(0);
   private lastBoard = '';
+  private openAmount = 0;
   private boardTheta = 0;
   private jacket: JacketRig | null = null;
   private lastJacket = '';
@@ -582,7 +589,7 @@ export class BookModel {
     if (!outer || !inner) return;
     const base = L.family === 'soft' ? this.softJacketBase(jc) : this.boardJacketBase(jc);
     if (!base) return;
-    this.jacket = new JacketRig(jc, L.rtl, base, [outer, inner, inner]);
+    this.jacket = new JacketRig(jc, L.rtl, base, [outer, inner, inner, this.mats.jacketFront ?? outer]);
     this.group.add(this.jacket.mesh);
   }
 
@@ -614,7 +621,17 @@ export class BookModel {
       for (let k = 1; k <= Nj; k++) put(bez(back, k / Nj));
       for (let k = 1; k <= Ns; k++) put(spinePt(k / Ns));
       const front = this.frontJoint(S1, hdJ, theta, 0);
-      for (let k = 1; k <= Nj; k++) put(bez(front, k / Nj));
+      for (let k = 1; k <= Nj; k++) {
+        const q = bez(front, k / Nj);
+        // Over the joint cloth: its cover face, bridged across the groove (never inside it). In a
+        // tight crease at the top of the spine the offsets of this and of the spine then meet in a
+        // clean corner, which the jacket rig trims.
+        const c = this.clothFaceAt(k / Nj);
+        if (c) {
+          const d = (q[0] - c[0]) * c[2] + (q[1] - c[1]) * c[3];
+          put([c[0] + c[2] * Math.max(0, d), c[1] + c[3] * Math.max(0, d)]);
+        } else put(q);
+      }
       for (let k = 1; k < Nb; k++) put(rot(A0 + ((A1 - A0) * k) / (Nb - 1), thick));
     };
     // X from the closed pose: board panels by distance, the spine panel by arc length.
@@ -632,6 +649,21 @@ export class BookModel {
       else x[i] = F.x + ((closed[2 * i] - A0) / L.boardW) * F.w;
     }
     return { count, x, wrapT: L.bt, fill: (out) => fillAt(this.boardTheta, out), constrain: (mid, n, half) => this.constrainJacket(mid, n, half) };
+  }
+
+  /** Point on the front joint cloth's cover face at parameter t (0 spine … 1 board) and its normal. */
+  private clothFaceAt(t: number): [number, number, number, number] | null {
+    const h = this.hinge;
+    if (!h) return null;
+    const pos = h.geometry.getAttribute('position').array as Float32Array;
+    const f = clamp01(t) * (h.ns - 1);
+    const i = Math.min(h.ns - 2, Math.floor(f)), w = f - i;
+    const top = (k: number): [number, number] => [pos[3 * k], pos[3 * k + 1]];
+    const t0 = top(i), t1 = top(i + 1);
+    const a = t0[0] + (t1[0] - t0[0]) * w, y = t0[1] + (t1[1] - t0[1]) * w;
+    const ma = h.mid[2 * i] + (h.mid[2 * i + 2] - h.mid[2 * i]) * w, my = h.mid[2 * i + 1] + (h.mid[2 * i + 3] - h.mid[2 * i + 1]) * w;
+    const l = Math.hypot(a - ma, y - my) || 1;
+    return [a, y, (a - ma) / l, (y - my) / l];
   }
 
   /**
@@ -777,7 +809,7 @@ export class BookModel {
   private buildCase(bands: number[], headband: boolean, headbandHeight: number, squares: number): void {
     const L = this.L, m = this.mats;
     const cm = L.cover;
-    const coverMats = [m.cover, m.endpaper];
+    const coverMats = [m.cover, m.endpaper, m.coverFront];
     this.addMesh(buildBoard(L, 'back'), coverMats);
     const pivot = this.boardPivot();
     const front = this.addMesh(buildBoard(L, 'front'), coverMats, pivot);
@@ -981,7 +1013,7 @@ export class BookModel {
 
   private buildCoptic(stations: number[]): void {
     const L = this.L, m = this.mats;
-    const coverMats = [m.cover, m.endpaper];
+    const coverMats = [m.cover, m.endpaper, m.coverFront];
     this.addMesh(buildBoard(L, 'back'), coverMats);
     const pivot = this.boardPivot();
     const front = this.addMesh(buildBoard(L, 'front'), coverMats, pivot);
@@ -1063,8 +1095,8 @@ export class BookModel {
         sBack0: start.back, sSpine0: start.cornerB + Lc / 2, sSpine1: start.cornerF + Lc / 2, last: '',
       };
       this.poseSoftCover(0, 1);
-    });
-    this.addSheet(sheet, [m.cover, m.coverStock, m.coverStock]);
+    }, (i) => (s[i] >= start.front - 1e-6 && s[i + 1] <= frontEnd + 1e-6 ? 3 : 0));
+    this.addSheet(sheet, [m.cover, m.coverStock, m.coverStock, m.coverFront]);
     if (stab) {
       const thread = buildStabThread(L, holes);
       if (thread) this.addMesh(thread, m.thread);
@@ -1152,7 +1184,7 @@ export class BookModel {
       });
       const transparent = m.leafTransparent[k] ?? false;
       const mesh = this.addSheet(sheet, [m.leafFront[k], m.leafBack[k], m.edge], !transparent);
-      this.leaves.push({ k, sheet, mesh, yRight, sc, last: '' });
+      this.leaves.push({ k, sheet, mesh, yRight, sc, x: 0, last: '' });
     }
   }
 
@@ -1209,6 +1241,7 @@ export class BookModel {
   private poseLeaf(rig: LeafRig, x: number, gravity: number, amp: number): void {
     // Exact keys: a re-posed frame must reproduce its vertices bit for bit (video export).
     const key = `${x}|${gravity}|${amp}`;
+    rig.x = x;
     if (key === rig.last) return;
     rig.last = key;
     const L = this.L;
@@ -1253,6 +1286,7 @@ export class BookModel {
   setPose(open: number, leaves: number[], gravity: number): void {
     const L = this.L;
     const o = clamp01(open);
+    this.openAmount = o;
     const key = `${o}|${gravity}`;
     if (L.family === 'soft') this.poseSoftCover(o, gravity);
     else if (key !== this.lastBoard) {
@@ -1290,6 +1324,98 @@ export class BookModel {
       aheadAmp = amp;
       aheadIsLeaf = true;
     }
+  }
+
+  /**
+   * On-screen density (px per pt) of every page face in view, of the front cover panel and of
+   * the jacket's front panel, for the current pose: what their textures need to look sharp.
+   * `toScreen` maps an a-space point to pixels (null when behind the camera or well off screen);
+   * `eye` is the camera position in a-space. Pages hidden under other leaves are skipped.
+   */
+  textureDemand(toScreen: (a: number, y: number, z: number) => [number, number] | null, eye: [number, number, number]): TextureDensity {
+    const L = this.L;
+    const out: TextureDensity = { pages: new Map(), coverFront: 0, jacketFront: 0 };
+    const bump = (page: number, d: number) => { if (d > (out.pages.get(page) ?? 0)) out.pages.set(page, d); };
+    // Density of a grid of a-space points (rows × cols) with a facing test per point.
+    const grid = (pts: { p: [number, number, number]; n: [number, number, number] }[][], take: (front: boolean, d: number) => void) => {
+      const scr = pts.map((row) => row.map((q) => toScreen(q.p[0], q.p[1], q.p[2])));
+      for (let j = 0; j < pts.length; j++) for (let i = 0; i < pts[j].length; i++) {
+        const q = pts[j][i], sq = scr[j][i];
+        if (!sq) continue;
+        const front = (eye[0] - q.p[0]) * q.n[0] + (eye[1] - q.p[1]) * q.n[1] + (eye[2] - q.p[2]) * q.n[2] > 0;
+        for (const [jj, ii] of [[j, i + 1], [j + 1, i]] as const) {
+          const r = pts[jj]?.[ii], sr = scr[jj]?.[ii];
+          if (!r || !sr) continue;
+          const dist = Math.hypot(r.p[0] - q.p[0], r.p[1] - q.p[1], r.p[2] - q.p[2]);
+          if (dist > 1e-6) take(front, Math.hypot(sr[0] - sq[0], sr[1] - sq[1]) / dist);
+        }
+      }
+    };
+    const sheetGrid = (sh: SheetMesh, cols: number[], rows: number[], zOff = 0) => {
+      const pos = sh.geometry.getAttribute('position').array as Float32Array;
+      return rows.map((j) => cols.map((i) => {
+        const q = 2 * (j * sh.ns + i), v = 3 * (j * sh.ns + i);
+        const p: [number, number, number] = [sh.mid[q], sh.mid[q + 1], sh.z[j] + zOff];
+        return { p, n: [pos[v] - p[0], pos[v + 1] - p[1], pos[v + 2] - sh.z[j]] as [number, number, number] };
+      }));
+    };
+    const spread = (n: number, k: number) => Array.from({ length: k }, (_, i) => Math.round((i * (n - 1)) / (k - 1)));
+    // Leaves: resting ones show only the top of each stack; leaves in flight show both faces.
+    // A closed (or barely open) cover hides the pages.
+    const coverShut = this.openAmount < 0.02;
+    const resting = this.leaves.filter((r) => r.x <= 1e-4);
+    const turned = this.leaves.filter((r) => r.x >= 1 - 1e-4);
+    const firstRight = resting.length ? Math.min(...resting.map((r) => r.k)) : -1;
+    const lastLeft = turned.length ? Math.max(...turned.map((r) => r.k)) : -1;
+    for (const r of this.leaves) {
+      if (coverShut) break;
+      if (r.x <= 1e-4 && r.k !== firstRight) continue;
+      if (r.x >= 1 - 1e-4 && r.k !== lastLeft) continue;
+      const sh = r.sheet;
+      const rows = [0, Math.floor(sh.nz / 2), sh.nz - 1];
+      grid(sheetGrid(sh, spread(sh.ns, 10), rows), (front, d) => bump(2 * r.k + (front ? 0 : 1), d));
+    }
+    // The page on top of the static block, once every modelled leaf has moved off it.
+    if (!coverShut && this.leaves.every((r) => r.x > 1e-4)) {
+      const y1 = L.tbY1 - L.nTurn * L.c;
+      const pts = [-1, 0, 1].map((zn) => [0, 0.5, 1].map((f) => {
+        const a = L.spineA(y1) + (L.foreA(y1) - L.spineA(y1)) * f;
+        return { p: [a, y1, (zn * L.H) / 2] as [number, number, number], n: [0, 1, 0] as [number, number, number] };
+      }));
+      grid(pts, (front, d) => { if (front) bump(2 * L.nTurn, d); });
+    }
+    // Front cover panel (hidden under a jacket that is on).
+    const jacketOn = this.jacket !== null && Math.abs(this.jacket.mesh.position.z) < 0.5 * L.coverH;
+    if (!jacketOn) {
+      if (this.soft) {
+        const sh = this.soft.sheet;
+        const cols: number[] = [];
+        for (let i = 0; i < sh.ns; i++) if (sh.s[i] >= this.soft.frontEnd - L.W - 1e-6 && sh.s[i] <= this.soft.frontEnd + 1e-6) cols.push(i);
+        const pick = cols.length > 12 ? spread(cols.length, 12).map((k) => cols[k]) : cols;
+        if (pick.length > 1) grid(sheetGrid(sh, pick, [0, 1]), (front, d) => { if (front) out.coverFront = Math.max(out.coverFront, d); });
+      } else {
+        const th = this.boardTheta, c = Math.cos(th), sn = Math.sin(th);
+        const rot = (a: number, y: number): [number, number] => {
+          const da = a - L.pivotA, dy = y - L.pivotY;
+          return [L.pivotA + c * da - sn * dy, L.pivotY + sn * da + c * dy];
+        };
+        const n: [number, number, number] = [-sn, c, 0];
+        const pts = [0, 0.25, 0.5, 0.75, 1].map((fz) => [0, 0.25, 0.5, 0.75, 1].map((fa) => {
+          const q = rot(L.boardA0 + L.boardW * fa, L.thick);
+          return { p: [q[0], q[1], -L.boardH / 2 + L.boardH * fz] as [number, number, number], n };
+        }));
+        grid(pts, (front, d) => { if (front) out.coverFront = Math.max(out.coverFront, d); });
+      }
+    }
+    // Jacket front panel.
+    if (this.jacket) {
+      const sh = this.jacket.sheet;
+      const cols: number[] = [];
+      for (let i = 0; i < sh.ns - 1; i++) if (this.jacket.isFront(i)) cols.push(i);
+      const pick = cols.length > 12 ? spread(cols.length, 12).map((k) => cols[k]) : cols;
+      if (pick.length > 1) grid(sheetGrid(sh, pick, [0, 1], this.jacket.mesh.position.z), (front, d) => { if (front) out.jacketFront = Math.max(out.jacketFront, d); });
+    }
+    return out;
   }
 
   get turnableLeaves(): number {

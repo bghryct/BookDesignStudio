@@ -46,3 +46,73 @@ export function generateContents(): { entries: number; updated: boolean } {
   s.select([el.id]);
   return { entries: entries.length, updated: false };
 }
+
+/* -------------------------------------------------------------------------- */
+/* Generated index                                                             */
+/* -------------------------------------------------------------------------- */
+
+export const INDEX_NAME = 'Index (generated)';
+
+/** Index terms ({ix:term} / {ix:term!subterm}) with the pages they are set on. */
+export function indexEntries(project: Project): Map<string, { pages: Set<number>; subs: Map<string, Set<number>> }> {
+  const out = new Map<string, { pages: Set<number>; subs: Map<string, Set<number>> }>();
+  project.pages.forEach((p, i) => {
+    for (const e of p.elements) {
+      if (e.type !== 'text' || e.name === INDEX_NAME) continue;
+      const marks = layoutText(e, { project, surface: pageKey(p.id), pageIndex: i, side: pageSide(project, i) }).marks ?? [];
+      for (const m of marks) {
+        const [main, sub] = m.split('!').map((x) => x.trim());
+        if (!main) continue;
+        const key = main;
+        const rec = out.get(key) ?? { pages: new Set<number>(), subs: new Map<string, Set<number>>() };
+        if (sub) { const set = rec.subs.get(sub) ?? new Set<number>(); set.add(i + 1); rec.subs.set(sub, set); }
+        else rec.pages.add(i + 1);
+        out.set(key, rec);
+      }
+    }
+  });
+  return out;
+}
+
+/** 3, 4, 5, 9 → "3–5, 9". */
+function pageList(pages: Set<number>): string {
+  const ps = [...pages].sort((a, b) => a - b);
+  const parts: string[] = [];
+  for (let i = 0; i < ps.length; i++) {
+    let j = i;
+    while (j + 1 < ps.length && ps[j + 1] === ps[j] + 1) j++;
+    parts.push(j > i ? `${ps[i]}–${ps[j]}` : String(ps[i]));
+    i = j;
+  }
+  return parts.join(', ');
+}
+
+export function generateIndex(): { entries: number; updated: boolean } {
+  const s = useStore.getState();
+  const project = s.project;
+  const entries = [...indexEntries(project).entries()].sort((a, b) => a[0].localeCompare(b[0], undefined, { sensitivity: 'base' }));
+  const lines: string[] = ['[{size:15; leading:22; after:10; span}] ^Index^'];
+  let letter = '';
+  for (const [term, rec] of entries) {
+    const l = term[0].toUpperCase();
+    if (l !== letter) { letter = l; lines.push(`[{before:8; keep:2}] ^${l}^`); }
+    lines.push(`${term}${rec.pages.size ? `, ${pageList(rec.pages)}` : ''}`);
+    for (const [sub, pages] of [...rec.subs.entries()].sort((a, b) => a[0].localeCompare(b[0]))) lines.push(`[{left:10}] ${sub}, ${pageList(pages)}`);
+  }
+  const text = lines.join('\n');
+  let existing: Element | null = null;
+  for (const p of project.pages) { const e = p.elements.find((x) => x.name === INDEX_NAME); if (e) { existing = e; break; } }
+  if (existing) {
+    s.updateElement((existing as Element).id, { text } as Partial<TextElement>);
+    return { entries: entries.length, updated: true };
+  }
+  const sp = spreadsOf(project)[s.spread];
+  const pi = sp?.right ?? sp?.left ?? 0;
+  const b = textBlock(project.book, pageSide(project, pi));
+  const el = makeText({ name: INDEX_NAME, x: b.x, y: b.y, w: b.w, h: b.h, text, style: textStyle({ fontSize: 8.5, leading: 11, align: 'left', hyphenate: false, firstLineIndent: -10, leftIndent: 10, baselineGrid: false, features: { onum: true } }) });
+  el.columns = 2;
+  el.columnGap = 12;
+  s.addElement(pageKey(project.pages[pi].id), el);
+  s.select([el.id]);
+  return { entries: entries.length, updated: false };
+}

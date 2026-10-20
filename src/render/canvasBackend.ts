@@ -53,9 +53,10 @@ function paintStyle(ctx: CanvasRenderingContext2D, p: Paint): string | CanvasGra
 function drawRun(ctx: CanvasRenderingContext2D, r: TextRun) {
   ctx.save();
   if (r.rotate) {
-    ctx.translate(r.x, r.y);
+    const [px, py] = r.pivot ?? [r.x, r.y];
+    ctx.translate(px, py);
     ctx.rotate((r.rotate * Math.PI) / 180);
-    ctx.translate(-r.x, -r.y);
+    ctx.translate(-px, -py);
   }
   const m = runMatrix(r);
   if (m) ctx.transform(m[0], m[1], m[2], m[3], m[4], m[5]);

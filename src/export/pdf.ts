@@ -363,7 +363,8 @@ async function emitRun(w: PageWriter, r: TextRun, alpha: number, blend: BlendMod
   // Run-level transforms (sideways Latin in tategaki, tate-chū-yoko compression).
   if (r.rotate) {
     const a = (r.rotate * Math.PI) / 180, c = Math.cos(a), s = Math.sin(a);
-    w.push(concatTransformationMatrix(c, s, -s, c, r.x - c * r.x + s * r.y, r.y - s * r.x - c * r.y));
+    const [px, py] = r.pivot ?? [r.x, r.y];
+    w.push(concatTransformationMatrix(c, s, -s, c, px - c * px + s * py, py - s * px - c * py));
   }
   const rm = runMatrix(r);
   if (rm) w.push(concatTransformationMatrix(rm[0], rm[1], rm[2], rm[3], rm[4], rm[5]));

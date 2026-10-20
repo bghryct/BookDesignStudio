@@ -81,8 +81,11 @@ export interface TextRun {
   letterSpacing?: number;
   /** Pair kerning: extra advance after each UTF-16 unit of `text`, pt (manual + optical). */
   kern?: number[];
-  /** Rotation in degrees around (x, y) — used for sideways Latin in vertical text. */
+  /** Rotation in degrees around (x, y), or around `pivot` when given (character rotation). */
   rotate?: number;
+  pivot?: [number, number];
+  /** Layout-only: an inline image set in the line (turned into an image primitive by the frame). */
+  obj?: { href: string; w: number; h: number; assetId?: string; pct?: number };
   /** Horizontal scale about (x, y): tate-chū-yoko, glyph-scaling justification, character scale. */
   scaleX?: number;
   /** Vertical scale about the baseline, and false-italic skew in degrees. */

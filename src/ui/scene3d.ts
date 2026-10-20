@@ -20,12 +20,14 @@ interface SceneSettings {
   pose: CameraPose;
   showJacket: boolean;
   panel: boolean;
+  /** Texture sharpness and canvas pixel ratio: standard (lighter), high, ultra (sharpest). */
+  quality: 'standard' | 'high' | 'ultra';
 }
 
 const DEFAULTS: SceneSettings = {
   mode: 'showcase', loop: true, pagesToTurn: 4, speed: 1,
   lighting: 'studio', light: {}, backdrop: 'studio-sweep', color: '#d9d4cb', color2: '#b9b2a6', ground: true,
-  fov: 32, pose: 'angled', showJacket: true, panel: true,
+  fov: 32, pose: 'angled', showJacket: true, panel: true, quality: 'high',
 };
 
 function load(): SceneSettings {

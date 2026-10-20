@@ -52,7 +52,7 @@ const CHAR_KEYS: Record<string, keyof CharacterStyleProps> = {
   hscale: 'hScale', h: 'hScale', vscale: 'vScale', v: 'vScale', skew: 'skew', slant: 'skew',
   stroke: 'stroke', outline: 'stroke', strokewidth: 'strokeWidth', sw: 'strokeWidth',
   nobreak: 'noBreak', nb: 'noBreak',
-  lang: 'language', language: 'language',
+  lang: 'language', language: 'language', rotate: 'rotate', rot: 'rotate',
   features: 'features', ot: 'features',
 };
 
@@ -123,7 +123,9 @@ export function parseParaProps(src: string): ParagraphStyleProps {
     if (ALIGNS[k0] && v === true) { out.align = ALIGNS[k0]; continue; }
     if (k0 === 'swiss' || k0 === 'balanced' || k0 === 'wedge') { out.rag = k0; continue; }
     if (k0 === 'bullet' || k0 === 'bullets') { out.list = { type: 'bullet', bullet: typeof v === 'string' ? v : '•' }; continue; }
-    if (k0 === 'number' || k0 === 'numbered' || k0 === 'list') { out.list = { type: 'number', format: typeof v === 'string' && v !== 'number' ? v : 'decimal' }; continue; }
+    if (k0 === 'number' || k0 === 'numbered' || k0 === 'list') { out.list = { ...(out.list as object ?? {}), type: 'number', format: typeof v === 'string' && v !== 'number' ? v : 'decimal' }; continue; }
+    if (k0 === 'level') { out.list = { type: 'number', ...(out.list as object ?? {}), level: Number(v) || 0 }; continue; }
+    if (k0 === 'multi' || k0 === 'hierarchical') { out.list = { type: 'number', ...(out.list as object ?? {}), hierarchical: v !== false }; continue; }
     const k = PARA_KEYS[k0];
     if (!k) continue;
     if (k === 'align' || k === 'lastLineAlign' || k === 'singleWordJustify') out[k] = ALIGNS[String(v).toLowerCase()] === 'justify-all' && k !== 'align' ? 'justify' : ALIGNS[String(v).toLowerCase()] ?? v;
@@ -156,6 +158,7 @@ export function charPropsToString(p: CharacterStyleProps): string {
   add('hscale', p.hScale);
   add('vscale', p.vScale);
   add('skew', p.skew);
+  add('rotate', p.rotate);
   add('stroke', p.stroke);
   add('strokewidth', p.strokeWidth);
   if (p.noBreak) parts.push('nobreak');

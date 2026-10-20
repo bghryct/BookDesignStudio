@@ -7,7 +7,7 @@ import {
   type BackdropPreset, type CameraPose,
 } from '../three';
 import { computeBinding, computeJacket } from '../engine/binding';
-import { buildBookTextures, pageInfos } from '../render/bookTextures';
+import { buildBookTextures, pageInfos, TextureRefiner } from '../render/bookTextures';
 import { useFontStore } from '../engine/fonts';
 import { exportVideo, getVideoSupport, type VideoFormat, type VideoSupport } from '../export/video';
 import { downloadBlob, safeName } from './projectIO';
@@ -52,6 +52,10 @@ function sizeFor(o: OrientationId, longEdge: number) {
   return r.w >= r.h ? { w: even(longEdge), h: even((longEdge * r.h) / r.w) } : { w: even((longEdge * r.w) / r.h), h: even(longEdge) };
 }
 
+/** Canvas pixel-ratio cap per quality (the device's own ratio is used up to this). */
+const DPR_CAP = { standard: 1.5, high: 2, ultra: 3 } as const;
+const pixelRatio = (q: keyof typeof DPR_CAP) => Math.min(DPR_CAP[q] ?? 2, window.devicePixelRatio || 1);
+
 /** 35 mm-equivalent focal length for a vertical field of view (24 mm sensor height). */
 const focal = (fov: number) => Math.round(12 / Math.tan((fov * Math.PI) / 360));
 
@@ -67,6 +71,10 @@ export default function Viewer3D() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const sceneRef = useRef<BookScene | null>(null);
   const texRef = useRef<BookTextures | null>(null);
+  /** Re-rasterises what the camera sees at the density it needs (pages, front cover, jacket). */
+  const refinerRef = useRef<TextureRefiner | null>(null);
+  const qualityRef = useRef(st.quality);
+  qualityRef.current = st.quality;
   const [playing, setPlaying] = useState(true);
   const [open, setOpen] = useState(0);
   const [leaf, setLeaf] = useState(0);
@@ -107,13 +115,28 @@ export default function Viewer3D() {
       return;
     }
     sceneRef.current = sc;
+    const refiner = new TextureRefiner(sc);
+    refiner.quality = qualityRef.current;
+    refinerRef.current = refiner;
     const ro = new ResizeObserver(() => {
       const el = wrapRef.current;
-      if (el) sc.resize(el.clientWidth, el.clientHeight, Math.min(2, window.devicePixelRatio || 1));
+      if (el) sc.resize(el.clientWidth, el.clientHeight, pixelRatio(qualityRef.current));
     });
     if (wrapRef.current) ro.observe(wrapRef.current);
-    return () => { ro.disconnect(); sc.dispose(); sceneRef.current = null; };
+    // Sharpen what is in view as the camera settles (lighter while an animation plays).
+    const poll = window.setInterval(() => {
+      if (document.hidden || !sceneRef.current) return;
+      refiner.update(sc.getTextureDemand(), sc.isPlaying());
+    }, 400);
+    return () => { window.clearInterval(poll); ro.disconnect(); refiner.dispose(); refinerRef.current = null; sc.dispose(); sceneRef.current = null; };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Quality: texture sharpness and the canvas pixel ratio.
+  useEffect(() => {
+    const r = refinerRef.current, el = wrapRef.current;
+    if (r) r.quality = st.quality;
+    if (el) call((s) => s.resize(el.clientWidth, el.clientHeight, pixelRatio(st.quality)));
+  }, [st.quality]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Geometry follows the binding, page materials and the jacket.
   useEffect(() => {
@@ -121,6 +144,7 @@ export default function Viewer3D() {
     if (!s) return;
     s.setInput({ spec: project.book, calc, pages: infos, jacket });
     if (texRef.current) s.setTextures(texRef.current);
+    refinerRef.current?.reset(project, calc, jacket, texRef.current);
     applyAll();
     setAnims(call((x) => x.getAnimations()) ?? []);
   }, [project.book, calc, infos, jacket]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -135,6 +159,7 @@ export default function Viewer3D() {
         if (!tex || signal.cancelled) return;
         texRef.current = tex;
         scene()?.setTextures(tex);
+        refinerRef.current?.reset(project, calc, jacket, tex);
       } catch (e) {
         setError(`Could not render textures: ${(e as Error).message}`);
       } finally {
@@ -179,7 +204,7 @@ export default function Viewer3D() {
         // On narrow screens the panel floats over the canvas instead of squeezing it.
         <aside className={clsx('scroll-thin w-[268px] shrink-0 overflow-y-auto border-r border-ink-700 bg-ink-850', narrow && 'absolute inset-y-0 left-0 z-10 max-w-[85%] shadow-2xl')}>
           <ScenePanel anims={anims} startMode={startMode} hasJacket={hasJacket} />
-          <ExportPanel scene={sceneRef} wrap={wrapRef} title={project.book.title} onDone={() => { applyAll(); startMode(st.mode, playing); }} />
+          <ExportPanel scene={sceneRef} refiner={refinerRef} wrap={wrapRef} title={project.book.title} onDone={() => { applyAll(); startMode(st.mode, playing); }} />
         </aside>
       )}
       <div ref={wrapRef} className="relative min-w-0 flex-1" style={{ background: bgCss }}>
@@ -298,6 +323,9 @@ function ScenePanel({ anims, startMode, hasJacket }: { anims: AnimationInfo[]; s
       <Section title="Camera & pose" id="s3d-camera">
         <Slider label="Lens" value={st.fov} min={15} max={75} step={1} onChange={(v) => st.set({ fov: v })} format={(v) => `${focal(v)} mm`} hint="Longer lenses flatten perspective for product shots" />
         <Segmented value={st.pose} onChange={(v) => st.set({ pose: v })} options={[{ value: 'standing', label: 'Standing' }, { value: 'angled', label: 'Angled' }, { value: 'lying', label: 'Lying' }, { value: 'open', label: 'Open' }]} />
+        <span className="text-[10.5px] text-ink-400">Quality</span>
+        <Segmented value={st.quality} onChange={(v) => st.set({ quality: v })} options={[{ value: 'standard', label: 'Standard' }, { value: 'high', label: 'High' }, { value: 'ultra', label: 'Ultra' }]} />
+        <Hint>Pages and covers in view are re-rendered as sharp as the camera needs; exports always render at full sharpness. Ultra also renders the view at up to 3× pixel density.</Hint>
       </Section>
 
       <Section title="Dust jacket" id="s3d-jacket">
@@ -313,7 +341,7 @@ function ScenePanel({ anims, startMode, hasJacket }: { anims: AnimationInfo[]; s
 /* Export (stills & motion, any orientation)                                   */
 /* -------------------------------------------------------------------------- */
 
-function ExportPanel({ scene, wrap, title, onDone }: { scene: React.MutableRefObject<BookScene | null>; wrap: React.RefObject<HTMLDivElement | null>; title: string; onDone: () => void }) {
+function ExportPanel({ scene, refiner, wrap, title, onDone }: { scene: React.MutableRefObject<BookScene | null>; refiner: React.MutableRefObject<TextureRefiner | null>; wrap: React.RefObject<HTMLDivElement | null>; title: string; onDone: () => void }) {
   const st = useScene3D();
   const [orientation, setOrientation] = useState<OrientationId>('portrait');
   const [stillEdge, setStillEdge] = useState(2400);
@@ -329,7 +357,16 @@ function ExportPanel({ scene, wrap, title, onDone }: { scene: React.MutableRefOb
 
   const restore = () => {
     const s = scene.current, el = wrap.current;
-    if (s && el) s.resize(el.clientWidth, el.clientHeight, Math.min(2, window.devicePixelRatio || 1));
+    if (s && el) s.resize(el.clientWidth, el.clientHeight, pixelRatio(st.quality));
+  };
+  /** Exports render at full sharpness, whatever the live quality: sharpen first, hold while exporting. */
+  const sharpen = async (demand: Parameters<TextureRefiner['prepare']>[0]) => {
+    const r = refiner.current;
+    if (!r) return;
+    r.hold = true;
+    const q = r.quality;
+    r.quality = q === 'standard' ? 'high' : q;
+    try { await r.prepare(demand); } finally { r.quality = q; }
   };
 
   const still = async () => {
@@ -337,6 +374,7 @@ function ExportPanel({ scene, wrap, title, onDone }: { scene: React.MutableRefOb
     if (!s) return;
     const { w, h } = sizeFor(orientation, stillEdge);
     try {
+      await sharpen(s.getTextureDemand(w, h));
       const canvas = s.renderStill(w, h);
       const blob = await new Promise<Blob>((res) => canvas.toBlob((b) => res(b!), 'image/png'));
       downloadBlob(blob, `${safeName(title)}-${orientation}-${w}x${h}.png`);
@@ -344,6 +382,7 @@ function ExportPanel({ scene, wrap, title, onDone }: { scene: React.MutableRefOb
     } catch (e) {
       useStore.getState().notify(`Still export failed: ${(e as Error).message}`, 'error');
     } finally {
+      if (refiner.current) refiner.current.hold = false;
       restore();
     }
   };
@@ -359,12 +398,14 @@ function ExportPanel({ scene, wrap, title, onDone }: { scene: React.MutableRefOb
     const duration = s.getAnimationDuration() / st.speed;
     s.setAnimation(st.mode, { loop: false, pagesToTurn: st.pagesToTurn, duration });
     try {
+      await sharpen(s.getAnimationTextureDemand(w, h));
       const blob = await exportVideo(s, { format, width: w, height: h, fps, duration, onProgress: setProgress, signal: abort.current.signal });
       downloadBlob(blob, `${safeName(title)}-${st.mode}-${orientation}.${format}`);
       useStore.getState().notify(`${format.toUpperCase()} exported — ${w} × ${h}, ${(blob.size / 1e6).toFixed(1)} MB.`);
     } catch (e) {
       if ((e as Error).name !== 'AbortError') useStore.getState().notify(`Video export failed: ${(e as Error).message}`, 'error');
     } finally {
+      if (refiner.current) refiner.current.hold = false;
       setProgress(null);
       restore();
       onDone();

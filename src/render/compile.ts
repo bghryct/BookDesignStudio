@@ -132,12 +132,21 @@ export function threadOf(project: Project, id: string): string[] {
 /** The project's paragraph / character styles for the text engine, with a cache identity. */
 const stylesIds = new WeakMap<object, number>();
 let stylesCounter = 0;
+const imageMaps = new WeakMap<object, Record<string, { href: string; w: number; h: number }>>();
 function storyStyles(project: Project): { styles: StoryStyles | null; key: string } {
   const para = project.paragraphStyles ?? [], char = project.characterStyles ?? [], hyph = project.hyphenDictionary ?? [];
-  if (!para.length && !char.length && !hyph.length) return { styles: null, key: '-' };
+  const hasAssets = Object.keys(project.assets).length > 0;
+  if (!para.length && !char.length && !hyph.length && !hasAssets) return { styles: null, key: '-' };
   const id = (o: object) => { let v = stylesIds.get(o); if (v == null) { v = ++stylesCounter; stylesIds.set(o, v); } return v; };
   for (const d of [...para, ...char]) if (d.props.fontFamily) void ensureFamily(d.props.fontFamily);
-  return { styles: { para, char, hyphenation: hyph }, key: `${id(para)}/${id(char)}/${id(hyph)}` };
+  // Images for inline graphics ({img:id}): href and pixel size, keyed by asset id.
+  let images = imageMaps.get(project.assets);
+  if (!images) {
+    images = {};
+    for (const a of Object.values(project.assets)) images[a.id] = { href: a.src, w: a.width, h: a.height };
+    imageMaps.set(project.assets, images);
+  }
+  return { styles: { para, char, hyphenation: hyph, images }, key: `${id(para)}/${id(char)}/${id(hyph)}/${id(project.assets)}` };
 }
 
 /* Text wrap: items with a wrap setting push the text of frames on the same page aside. */
@@ -395,7 +404,7 @@ function bookKey(book: BookSpec): number {
 function contextKey(el: Element, ctx: CompileContext): string {
   const v = useFontStore.getState().version;
   if (el.type === 'motif') return `${v}|${bookKey(ctx.project.book)}`;
-  if (el.type === 'table') return tableContextKey(ctx, v);
+  if (el.type === 'table') return tableContextKey(ctx, v, el);
   if (el.type === 'image' || el.type === 'svg') return `${v}|${el.assetId ? (ctx.project.assets[el.assetId] ? 1 : 0) : 0}`;
   return String(v);
 }

@@ -6,6 +6,7 @@
  */
 import {
   CanvasTexture,
+  ClampToEdgeWrapping,
   Color,
   MeshPhysicalMaterial,
   MeshStandardMaterial,
@@ -23,7 +24,8 @@ import { hash2, rng } from '../lib/random';
 import { mix, parseColor } from '../lib/color';
 import { mm } from '../model/units';
 import { EDGE_TILE, type BookLayout } from './layout';
-import type { BookSceneInput, BookTextures, FinishKey, PageInfo } from './types';
+import type { BookSceneInput, BookTextures, FinishKey, PageInfo, PanelArt } from './types';
+export type { PanelArt } from './types';
 
 /* ------------------------------------------------------------------------- */
 /* Canvas helpers                                                             */
@@ -309,6 +311,9 @@ export interface SurfaceSource {
   /** Fill colour under (or instead of) the art. */
   base: string;
   anisotropy: number;
+  /** Working-size caps: longest edge (px) and total pixels (default 4096 px / 16 MP). */
+  maxPx?: number;
+  maxPixels?: number;
 }
 
 /** Same as composeCover for any printed wrapper (the dust jacket uses it too). */
@@ -320,7 +325,7 @@ export function composeSurface(src: SurfaceSource): CoverComposite {
   const art = src.art;
   if (art && art.width > 1 && art.height > 1) {
     // Cap the working size (the finishing pass is per-pixel): ≤ 4096 px and ≤ 6 MP.
-    const k = Math.min(1, 4096 / Math.max(art.width, art.height), Math.sqrt(6e6 / (art.width * art.height)));
+    const k = Math.min(1, (src.maxPx ?? 4096) / Math.max(art.width, art.height), Math.sqrt((src.maxPixels ?? 16e6) / (art.width * art.height)));
     w = Math.max(2, Math.round(art.width * k));
     h = Math.max(2, Math.round(art.height * k));
   } else {
@@ -653,7 +658,7 @@ export class TextureCache {
   private jacketComposite: CoverComposite | null = null;
   private jacketKey = '';
   private jacketTex: BookTextures | null = null;
-  constructor(public anisotropy: number) {}
+  constructor(public anisotropy: number, public maxTextureSize = 8192) {}
 
   /** Call when a new BookTextures arrives: reused canvases are re-uploaded, stale ones dropped. */
   refresh(tex: BookTextures | null): void {
@@ -760,6 +765,22 @@ vec2 detailDHdxy() {
   m.customProgramCacheKey = () => 'book-cover-detail-v1';
 }
 
+function coverMaterial(fp: FinishParams, sheenBase: string): MeshPhysicalMaterial {
+  return new MeshPhysicalMaterial({
+    color: 0xffffff,
+    roughness: 1,
+    metalness: 1,
+    sheen: fp.sheen,
+    sheenRoughness: fp.sheenRoughness,
+    sheenColor: new Color(mix(sheenBase, '#ffffff', 0.55)),
+    clearcoat: 0,
+    clearcoatRoughness: fp.clearcoatRoughness,
+    bumpScale: 2.2,
+    iridescenceIOR: 1.65,
+    iridescenceThicknessRange: [180, 650],
+  });
+}
+
 export class BookMaterials {
   readonly cover: MeshPhysicalMaterial;
   readonly coverStock: MeshStandardMaterial;
@@ -778,6 +799,19 @@ export class BookMaterials {
   /** Dust jacket: printed outside and plain inside (null when the book has no jacket). */
   readonly jacketOuter: MeshPhysicalMaterial | null = null;
   readonly jacketInner: MeshStandardMaterial | null = null;
+  /**
+   * The front panel of the cover / jacket: same look as the rest, but it can carry its own, much
+   * sharper art (camera-driven) mapped onto the panel's rectangle of the wrap.
+   */
+  readonly coverFront: MeshPhysicalMaterial;
+  readonly jacketFront: MeshPhysicalMaterial | null = null;
+  private readonly frontDetail: DetailUniforms;
+  private readonly jacketFrontDetail: DetailUniforms | null = null;
+  private readonly panelComp: { cover: CoverComposite | null; jacket: CoverComposite | null } = { cover: null, jacket: null };
+  private readonly panelArt: { cover: PanelArt | null; jacket: PanelArt | null } = { cover: null, jacket: null };
+  /** Sharper art for individual pages (index → texture), over the base page art. */
+  private readonly pageArt = new Map<number, CanvasTexture>();
+  private textures: BookTextures | null = null;
   private readonly owned: Texture[] = [];
   private readonly leafAlpha: Texture[] = [];
   private readonly detail: DetailUniforms;
@@ -805,20 +839,11 @@ export class BookMaterials {
       detailScale: { value: fp.detail === 'none' ? 0 : fp.detailScale },
     };
 
-    this.cover = new MeshPhysicalMaterial({
-      color: 0xffffff,
-      roughness: 1,
-      metalness: 1,
-      sheen: fp.sheen,
-      sheenRoughness: fp.sheenRoughness,
-      sheenColor: new Color(mix(caseColor, '#ffffff', 0.55)),
-      clearcoat: 0,
-      clearcoatRoughness: fp.clearcoatRoughness,
-      bumpScale: 2.2,
-      iridescenceIOR: 1.65,
-      iridescenceThicknessRange: [180, 650],
-    });
+    this.cover = coverMaterial(fp, caseColor);
     installDetailBump(this.cover, this.detail);
+    this.coverFront = coverMaterial(fp, caseColor);
+    this.frontDetail = { detailMap: this.detail.detailMap, detailRepeat: { value: this.detail.detailRepeat.value.clone() }, detailScale: this.detail.detailScale };
+    installDetailBump(this.coverFront, this.frontDetail);
 
     this.coverStock = new MeshStandardMaterial({ color: new Color(mix('#f4f1ea', caseColor, 0.06)), roughness: 0.9 });
     this.lining = new MeshStandardMaterial({ color: new Color(mix(caseColor, '#1a1612', 0.45)), roughness: 0.9 });
@@ -881,6 +906,15 @@ export class BookMaterials {
         detailScale: { value: jfp.detail === 'none' ? 0 : jfp.detailScale },
       });
       this.jacketOuter = outer;
+      const front = coverMaterial(jfp, '#ffffff');
+      const fd: DetailUniforms = {
+        detailMap: { value: jDetail },
+        detailRepeat: { value: new Vector2((jc.width + 2 * jc.bleed) / jfp.tile, (jc.height + 2 * jc.bleed) / jfp.tile) },
+        detailScale: { value: jfp.detail === 'none' ? 0 : jfp.detailScale },
+      };
+      installDetailBump(front, fd);
+      this.jacketFront = front;
+      this.jacketFrontDetail = fd;
       this.jacketInner = new MeshStandardMaterial({ color: new Color(js.paperColor || '#f4f0e8'), roughness: 0.9 });
     }
   }
@@ -898,14 +932,104 @@ export class BookMaterials {
     m.needsUpdate = true;
   }
 
+  /** The front panel material shows the sharper panel art when there is some, else the base composite. */
+  private applyFront(which: 'cover' | 'jacket', base: CoverComposite): void {
+    const m = which === 'cover' ? this.coverFront : this.jacketFront;
+    const detail = which === 'cover' ? this.frontDetail : this.jacketFrontDetail;
+    const fp = which === 'cover' ? this.fp : this.jfp;
+    if (!m || !detail || !fp) return;
+    const panel = this.panelComp[which];
+    const art = this.panelArt[which];
+    const full = this.wrapSize(which);
+    if (panel && art) {
+      this.applyComposite(m, panel, fp);
+      detail.detailRepeat.value.set(art.box.w / fp.tile, art.box.h / fp.tile);
+    } else {
+      this.applyComposite(m, base, fp);
+      detail.detailRepeat.value.set(full.w / fp.tile, full.h / fp.tile);
+    }
+  }
+
+  /** Whole wrap of the cover / jacket canvas: size and origin offset (turn-in or bleed), pt. */
+  private wrapSize(which: 'cover' | 'jacket'): { w: number; h: number; o: number } {
+    if (which === 'cover') {
+      const c = this.layout.cover;
+      return { w: c.totalW, h: c.totalH, o: c.wrap };
+    }
+    const jc = this.input.jacket;
+    return jc ? { w: jc.width + 2 * jc.bleed, h: jc.height + 2 * jc.bleed, o: jc.bleed } : { w: 1, h: 1, o: 0 };
+  }
+
+  /**
+   * Sharper art for the front panel of the cover or jacket: `art.canvas` (and finish masks) covers
+   * `art.box` of the wrap (pt, in the cover / jacket canvas frame, origin at the trim). null drops
+   * back to the base art.
+   */
+  setPanelArt(which: 'cover' | 'jacket', art: PanelArt | null): void {
+    const m = which === 'cover' ? this.coverFront : this.jacketFront;
+    const fp = which === 'cover' ? this.fp : this.jfp;
+    if (!m || !fp) return;
+    this.panelComp[which]?.dispose();
+    this.panelComp[which] = null;
+    this.panelArt[which] = art;
+    if (art) {
+      const spec = this.input.spec;
+      const baseColor = which === 'cover' ? spec.cover.material : (jacketSpec(spec).paperColor || '#f4f0e8');
+      const comp = composeSurface({
+        art: art.canvas, masks: art.masks, totalW: art.box.w, totalH: art.box.h, fp, base: baseColor,
+        anisotropy: this.cache.anisotropy, maxPx: this.cache.maxTextureSize, maxPixels: 80e6,
+      });
+      // Map the panel texture onto its rectangle of the wrap's UV space.
+      const full = this.wrapSize(which);
+      const u0 = (art.box.x + full.o) / full.w, u1 = (art.box.x + art.box.w + full.o) / full.w;
+      const v0 = 1 - (art.box.y + art.box.h + full.o) / full.h, v1 = 1 - (art.box.y + full.o) / full.h;
+      for (const t of [comp.color, comp.surface, comp.bump, comp.holo]) {
+        if (!t) continue;
+        t.repeat.set(1 / (u1 - u0), 1 / (v1 - v0));
+        t.offset.set(-u0 / (u1 - u0), -v0 / (v1 - v0));
+        t.wrapS = t.wrapT = ClampToEdgeWrapping;
+      }
+      this.panelComp[which] = comp;
+    }
+    const base = which === 'cover' ? this.cache.cover(this.textures, this.layout, this.input.spec.cover.finish, this.input.spec.cover.material) : null;
+    if (which === 'cover' && base) this.applyFront('cover', base);
+    else if (which === 'jacket' && this.input.jacket) {
+      const js = jacketSpec(this.input.spec);
+      this.applyFront('jacket', this.cache.jacket(this.textures, this.input.jacket, js.finish, js.paperColor || '#f4f0e8'));
+    }
+  }
+
+  /** Sharper art for page `index` (null: back to the base art). Returns true when the page is modelled. */
+  setPageArt(index: number, canvas: HTMLCanvasElement | null): boolean {
+    const L = this.layout;
+    const mat = index < 2 * L.nTurn ? (index % 2 === 0 ? this.leafFront : this.leafBack)[Math.floor(index / 2)] : index === 2 * L.nTurn ? this.blockTop : null;
+    if (!mat) return false;
+    this.pageArt.get(index)?.dispose();
+    this.pageArt.delete(index);
+    if (canvas) {
+      const t = colorTexture(canvas, this.cache.anisotropy);
+      this.pageArt.set(index, t);
+      mat.map = t;
+    } else {
+      mat.map = this.cache.page(this.textures?.pages[index] ?? null);
+    }
+    mat.needsUpdate = true;
+    return true;
+  }
+
   /** (Re)assign every texture-driven map. */
   applyTextures(tex: BookTextures | null): void {
     const { spec, pages } = this.input;
     const L = this.layout;
-    this.applyComposite(this.cover, this.cache.cover(tex, L, spec.cover.finish, spec.cover.material), this.fp);
+    this.textures = tex;
+    const coverComp = this.cache.cover(tex, L, spec.cover.finish, spec.cover.material);
+    this.applyComposite(this.cover, coverComp, this.fp);
+    this.applyFront('cover', coverComp);
     if (this.jacketOuter && this.input.jacket && this.jfp) {
       const js = jacketSpec(spec);
-      this.applyComposite(this.jacketOuter, this.cache.jacket(tex, this.input.jacket, js.finish, js.paperColor || '#f4f0e8'), this.jfp);
+      const jComp = this.cache.jacket(tex, this.input.jacket, js.finish, js.paperColor || '#f4f0e8');
+      this.applyComposite(this.jacketOuter, jComp, this.jfp);
+      this.applyFront('jacket', jComp);
     }
 
     for (const t of this.leafAlpha) t.dispose();
@@ -915,7 +1039,7 @@ export class BookMaterials {
     const configure = (mat: MeshStandardMaterial, pageIndex: number, otherIndex: number): boolean => {
       const info = pages[pageIndex];
       const canvas = art(pageIndex);
-      const mapTex = this.cache.page(canvas);
+      const mapTex = this.pageArt.get(pageIndex) ?? this.cache.page(canvas);
       const alphaCanvas = makeLeafAlpha(info, pages[otherIndex], canvas, L.W, L.H);
       const alphaTex = alphaCanvas ? new CanvasTexture(alphaCanvas) : null;
       if (alphaTex) {
@@ -942,7 +1066,7 @@ export class BookMaterials {
     // The page lying on top of the remaining block.
     const topIndex = 2 * L.nTurn;
     const topInfo = pages[topIndex];
-    const topTex = this.cache.page(art(topIndex));
+    const topTex = this.pageArt.get(topIndex) ?? this.cache.page(art(topIndex));
     this.blockTop.map = topTex;
     this.blockTop.color.set(topTex ? '#ffffff' : (topInfo?.paperColor || paperFallback));
     this.blockTop.roughness = PAPER_ROUGHNESS[topInfo?.material ?? 'paper'] ?? 0.86;
@@ -952,7 +1076,12 @@ export class BookMaterials {
   dispose(): void {
     for (const t of this.owned) t.dispose();
     for (const t of this.leafAlpha) t.dispose();
-    const mats = [this.cover, this.coverStock, this.lining, this.endpaper, this.paper, this.edge, this.blockTop, this.thread, this.headband, ...this.leafFront, ...this.leafBack];
+    for (const t of this.pageArt.values()) t.dispose();
+    this.pageArt.clear();
+    this.panelComp.cover?.dispose();
+    this.panelComp.jacket?.dispose();
+    const mats = [this.cover, this.coverFront, this.coverStock, this.lining, this.endpaper, this.paper, this.edge, this.blockTop, this.thread, this.headband, ...this.leafFront, ...this.leafBack];
+    if (this.jacketFront) mats.push(this.jacketFront);
     if (this.jacketOuter) mats.push(this.jacketOuter);
     if (this.jacketInner) mats.push(this.jacketInner);
     for (const m of mats) m.dispose();

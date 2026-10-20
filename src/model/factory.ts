@@ -210,7 +210,7 @@ export function cloneElement<T extends Element>(el: T, dx = 0, dy = 0): T {
   copy.id = uid(el.type.slice(0, 3));
   copy.x += dx;
   copy.y += dy;
-  if (copy.type === 'text') copy.flowNext = null;
+  if (copy.type === 'text' || copy.type === 'table') copy.flowNext = null;
   if (copy.type === 'drawing') copy.strokes = copy.strokes.map((s) => ({ ...s, id: uid('stk') }));
   return copy;
 }

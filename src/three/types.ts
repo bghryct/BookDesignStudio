@@ -113,3 +113,23 @@ export interface BookSceneOptions {
   background?: string;
   preserveDrawingBuffer?: boolean;
 }
+
+/**
+ * Texture density the book needs to look sharp in a given view (px per pt of the page / cover
+ * art); 0 = not in view. See BookScene.getTextureDemand.
+ */
+export interface TextureDemand {
+  /** Page faces in view (index 0 = page 1), sharpest need first. */
+  pages: { index: number; pxPerPt: number }[];
+  /** Front panel of the cover (case board, soft cover) and of the dust jacket. */
+  coverFront: number;
+  jacketFront: number;
+}
+
+/** Sharper art for the front panel of the cover / jacket wrap. */
+export interface PanelArt {
+  canvas: HTMLCanvasElement;
+  masks: Partial<Record<FinishKey, HTMLCanvasElement>>;
+  /** Rectangle of the wrap the canvas covers, pt (cover / jacket canvas frame, origin at the trim). */
+  box: { x: number; y: number; w: number; h: number };
+}

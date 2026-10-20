@@ -7,7 +7,7 @@ import React, { useRef, useState } from 'react';
 import clsx from 'clsx';
 import {
   TableCellsMerge, TableCellsSplit, BetweenHorizontalStart, BetweenHorizontalEnd, BetweenVerticalStart, BetweenVerticalEnd, Trash2,
-  FileUp, ClipboardPaste, ClipboardCopy, RotateCcw, Save, Pencil, X, AlignLeft, AlignCenter, AlignRight, AlignJustify, Plus,
+  FileUp, ClipboardPaste, ClipboardCopy, RotateCcw, Save, Pencil, X, AlignLeft, AlignCenter, AlignRight, AlignJustify, Link, Unlink,
 } from 'lucide-react';
 import { useStore } from '../../store/store';
 import type { Project, TextStyle } from '../../model/types';
@@ -17,19 +17,17 @@ import type {
 } from '../../model/table';
 import {
   resolveTableStyle, allTableStyles, allCellStyles, findTableStyle, findCellStyle, anchorsIn, anchorAt, mergeCells, unmergeCells, insertRows, deleteRows,
-  insertCols, deleteCols, parseDelimited, tableFromMatrix, fillCells, tableToCSV, figureFeatures, rule, colLetter, rangeLabel, mergeCellProps, TABLE_PRESETS, BASE_CELL,
+  insertCols, deleteCols, parseDelimited, tableFromMatrix, fillCells, tableToCSV, figureFeatures, rule, colLetter, rangeLabel, mergeCellProps, BASE_CELL,
 } from '../../model/table';
 import { Section, Row, NumberField, Select, Toggle, ColorField, Segmented, Button, IconButton, Hint, TextInput } from '../controls';
 import { getFamilies } from '../../engine/fonts';
-import { layoutTable, cellProps } from '../../render/table';
+import { layoutTable, cellProps, tableThreadOf, type TableThread } from '../../render/table';
+import { StrokeEdit, TableStylesLibrary } from './TableStyleEditor';
 import { contextForElement } from '../../render/compile';
 import { findElement, surfaceElementsDraft } from '../../model/surfaces';
 import { uid } from '../../lib/random';
-import { useTableUi, selectedTableRange } from '../canvas/TableTools';
+import { useTableUi, selectedTableRange, continueTableOnNextPage, unthreadTable } from '../canvas/TableTools';
 
-const DASHES: { label: string; value: number[] }[] = [
-  { label: 'Solid', value: [] }, { label: 'Dotted', value: [0.01, 2] }, { label: 'Dash 3·2', value: [3, 2] }, { label: 'Dash 6·3', value: [6, 3] }, { label: 'Hairline dots', value: [0.01, 1.2] },
-];
 const FIGURES: { value: FigureStyle; label: string }[] = [
   { value: 'default', label: 'As the font' }, { value: 'tabular-lining', label: 'Tabular lining' }, { value: 'tabular-oldstyle', label: 'Tabular oldstyle' },
   { value: 'proportional-lining', label: 'Proportional lining' }, { value: 'proportional-oldstyle', label: 'Proportional oldstyle' },
@@ -63,14 +61,27 @@ const clone = <T,>(v: T): T => JSON.parse(JSON.stringify(v)) as T;
 /* Panel                                                                       */
 /* -------------------------------------------------------------------------- */
 
-export function TablePanel({ el, project }: { el: TableElement; project: Project }) {
+export function TablePanel({ el: frame, project }: { el: TableElement; project: Project }) {
   useTableUi();
   const s = useStore.getState;
+  // A continuation frame shows (and edits) the table held by the first frame of its thread.
+  const th = tableThreadOf(project, frame.id);
+  const threaded = !!th && th.frames.length > 1;
+  const el = threaded ? th!.head : frame;
   const mut: Mut = (fn, history = true) => s().updateElement(el.id, (d) => fn(d as unknown as TableElement), { history });
   const T = resolveTableStyle(project, el);
-  const ctx = contextForElement(project, el.id, s().spread);
-  const L = layoutTable(el, { project, pageIndex: ctx?.pageIndex ?? null });
+  const ctx = contextForElement(project, frame.id, s().spread);
+  const L = layoutTable(frame, { project, pageIndex: ctx?.pageIndex ?? null });
   const g = selectedTableRange(el);
+  if (!el.rows.length || !el.cols.length) {
+    return (
+      <>
+        <Section title="Empty table frame" id="el-table-empty">
+          <Hint>This frame holds no table. Thread a table into it from another table's out-port (lower right), or delete it.</Hint>
+        </Section>
+      </>
+    );
+  }
   return (
     <>
       {g ? <CellsSection el={el} project={project} g={g} T={T} mut={mut} /> : (
@@ -78,13 +89,19 @@ export function TablePanel({ el, project }: { el: TableElement; project: Project
           <Hint>Click the selected table to pick a cell, ⇧-click or drag for a range. Double-click a cell (or start typing) to edit it; Tab moves on. Drag a column or row border to resize it.</Hint>
         </Section>
       )}
-      <StructureSection el={el} project={project} T={T} L={L} mut={mut} />
+      {threaded && th!.index > 0 && (
+        <div className="mx-3 my-2 rounded-md border border-[#5aa9e6]/50 bg-[#5aa9e6]/10 px-2 py-1.5 text-[11px] text-ink-200">Frame {th!.index + 1} of {th!.frames.length}: you are editing the table that starts in frame 1.</div>
+      )}
+      <StructureSection el={el} project={project} T={T} L={L} mut={mut} threaded={threaded} />
+      <ThreadSection frame={frame} head={el} th={th} mut={mut} />
       <TextSection el={el} project={project} mut={mut} />
       <RulesSection el={el} T={T} mut={mut} />
       <FillsSection el={el} project={project} T={T} mut={mut} />
       <ColumnsSection el={el} L={L} g={g} mut={mut} />
       <RowsSection el={el} L={L} g={g} mut={mut} />
-      <StylesLibrary project={project} />
+      <Section title="Table & cell styles" id="el-table-styles" defaultOpen={false}>
+        <TableStylesLibrary project={project} />
+      </Section>
     </>
   );
 }
@@ -112,7 +129,7 @@ function applyTableStyle(elId: string, id: string | null) {
   });
 }
 
-function StructureSection({ el, project, T, L, mut }: { el: TableElement; project: Project; T: TableStyleProps; L: ReturnType<typeof layoutTable>; mut: Mut }) {
+function StructureSection({ el, project, T, L, mut, threaded }: { el: TableElement; project: Project; T: TableStyleProps; L: ReturnType<typeof layoutTable>; mut: Mut; threaded: boolean }) {
   const s = useStore.getState;
   const fileRef = useRef<HTMLInputElement>(null);
   const [paste, setPaste] = useState<string | null>(null);
@@ -171,8 +188,8 @@ function StructureSection({ el, project, T, L, mut }: { el: TableElement; projec
         <NumberField label="Foot rows" value={el.footerRows} min={0} max={el.rows.length - el.headerRows} decimals={0} onChange={(v) => mut((t) => { t.footerRows = Math.round(v); })} hint="Footer rows (totals, notes) take the footer cell style and rule" />
       </Row>
       <Toggle label="Columns fill the frame width" checked={el.fitWidth} onChange={(v) => mut((t) => { t.fitWidth = v; })} hint="Proportional columns share what the fixed and automatic ones leave; without them every column scales" />
-      <Toggle label="Frame follows the table height" checked={el.autoHeight} onChange={(v) => mut((t) => { t.autoHeight = v; })} hint="Off: the frame keeps its height and rows that do not fit are overset" />
-      <Toggle label="Stretch body rows to the frame" checked={el.fillHeight} onChange={(v) => mut((t) => { t.fillHeight = v; })} hint="Spread a taller frame's extra height evenly over the body rows" />
+      {!threaded && <Toggle label="Frame follows the table height" checked={el.autoHeight} onChange={(v) => mut((t) => { t.autoHeight = v; })} hint="Off: the frame keeps its height and rows that do not fit are overset" />}
+      {!threaded && <Toggle label="Stretch body rows to the frame" checked={el.fillHeight} onChange={(v) => mut((t) => { t.fillHeight = v; })} hint="Spread a taller frame's extra height evenly over the body rows" />}
 
       <div className="space-y-1.5 rounded-md border border-ink-700 p-2">
         <Select
@@ -278,25 +295,6 @@ function TextSection({ el, project, mut }: { el: TableElement; project: Project;
 /* -------------------------------------------------------------------------- */
 /* Rules & fills                                                               */
 /* -------------------------------------------------------------------------- */
-
-function StrokeEdit({ label, value, overridden, onChange, onReset, nullable }: { label: string; value: TableStroke | null; overridden?: boolean; onChange: (s: TableStroke | null) => void; onReset?: () => void; nullable?: string }) {
-  const v = value ?? { w: 0, color: '#1b1813', dash: [] };
-  const dashKey = JSON.stringify(v.dash);
-  return (
-    <div>
-      <div className="mb-0.5 flex items-center gap-1 text-[10.5px] text-ink-400">
-        <span className="flex-1 truncate">{label}{overridden && <span className="ml-1 text-rubric" title="Overrides the table style">•</span>}</span>
-        {nullable && value == null && <span className="text-[10px] text-ink-500">{nullable}</span>}
-        {overridden && onReset && <button type="button" className="text-ink-500 hover:text-ink-200" title="Back to the table style" onClick={onReset}><RotateCcw size={11} /></button>}
-      </div>
-      <div className="grid grid-cols-[64px_1fr_78px] gap-1">
-        <NumberField value={v.w} unit="pt" min={0} max={12} step={0.25} onChange={(w) => onChange({ ...v, w })} />
-        <ColorField value={v.color} onChange={(c) => c && onChange({ ...v, color: c })} />
-        <Select value={DASHES.some((d) => JSON.stringify(d.value) === dashKey) ? dashKey : '[]'} options={DASHES.map((d) => ({ value: JSON.stringify(d.value), label: d.label }))} onChange={(d) => onChange({ ...v, dash: JSON.parse(d) })} />
-      </div>
-    </div>
-  );
-}
 
 const RULE_KEYS: { key: keyof TableStyleProps; label: string }[] = [
   { key: 'borderTop', label: 'Top of table' }, { key: 'headerRule', label: 'Below the head' }, { key: 'rowRule', label: 'Between rows' },
@@ -556,7 +554,7 @@ function CellsSection({ el, project, g, T, mut }: { el: TableElement; project: P
           { value: 'outline', label: 'Outline of the selection' }, { value: 'all', label: 'All edges' }, { value: 'top', label: 'Top' }, { value: 'bottom', label: 'Bottom' },
           { value: 'left', label: 'Left' }, { value: 'right', label: 'Right' }, { value: 'innerH', label: 'Inner horizontal' }, { value: 'innerV', label: 'Inner vertical' },
         ]} onChange={setEdgeTarget} />
-        <StrokeEdit label="Rule" value={edge} onChange={(v) => v && setEdge(v)} />
+        <StrokeEdit label="Rule" value={edge} onChange={setEdge} />
         <div className="grid grid-cols-3 gap-1">
           <Button variant="primary" onClick={() => applyEdges(edge)}>Apply</Button>
           <Button title="Remove the rule on these edges" onClick={() => applyEdges({ ...edge, w: 0 })}>No rule</Button>
@@ -587,55 +585,35 @@ function CellsSection({ el, project, g, T, mut }: { el: TableElement; project: P
 }
 
 /* -------------------------------------------------------------------------- */
-/* Style library                                                               */
+/* Flow across frames                                                          */
 /* -------------------------------------------------------------------------- */
 
-function describeCell(p: CellStyleProps): string {
-  const parts: string[] = [];
-  if (p.fontFamily) parts.push(getFamilies().find((f) => f.id === p.fontFamily)?.name ?? p.fontFamily);
-  if (p.fontSize) parts.push(`${p.fontSize} pt`);
-  if (p.weight && p.weight >= 600) parts.push('bold');
-  if (p.italic) parts.push('italic');
-  if (p.textTransform && p.textTransform !== 'none') parts.push(p.textTransform.replace('-', ' '));
-  if (p.figures && p.figures !== 'default') parts.push(p.figures.replace('-', ' '));
-  if (p.align) parts.push(p.align === 'decimal' ? 'decimal-aligned' : p.align);
-  if (p.valign && p.valign !== 'top') parts.push(p.valign);
-  if (p.fill) parts.push('filled');
-  if (p.edges && Object.keys(p.edges).length) parts.push('edges');
-  return parts.join(' · ') || 'inherits everything';
-}
-
-function StylesLibrary({ project }: { project: Project }) {
+function ThreadSection({ frame, head, th, mut }: { frame: TableElement; head: TableElement; th: TableThread | null; mut: Mut }) {
   const s = useStore.getState;
-  const tStyles = project.tableStyles ?? [];
-  const cStyles = project.cellStyles ?? [];
-  const addPresets = () => s().update((d) => {
-    const have = new Set((d.tableStyles ?? []).map((x) => x.id));
-    d.tableStyles = [...(d.tableStyles ?? []), ...TABLE_PRESETS.filter((x) => !have.has(x.id)).map(clone)];
-  });
+  const project = useStore((st) => st.project);
+  const n = th?.frames.length ?? 1, i = th?.index ?? 0;
+  const lastRef = th ? th.frames[th.frames.length - 1] : null;
+  const last = lastRef ? layoutTable(lastRef.el, { project, pageIndex: lastRef.pageIndex }) : null;
+  const L = layoutTable(frame, { project, pageIndex: th?.frames[i].pageIndex ?? null });
+  const body = L.rowMap.filter((r) => r >= head.headerRows && r < head.rows.length - head.footerRows);
   return (
-    <Section title="Table & cell styles" id="el-table-styles" defaultOpen={false}>
-      <span className="block text-[10.5px] text-ink-400">Table styles in this document</span>
-      {!tStyles.length && <Hint>None yet — pick a preset above (it is copied in) or save the table's look with “New”.</Hint>}
-      {tStyles.map((t, i) => (
-        <div key={t.id} className="flex items-center gap-1">
-          <TextInput className="flex-1" value={t.name} onChange={(v) => s().update((d) => { d.tableStyles![i].name = v; }, { history: false })} />
-          <IconButton title="Delete style (tables using it fall back to the preset of that name, or none)" onClick={() => s().update((d) => { d.tableStyles!.splice(i, 1); })}><Trash2 size={12} /></IconButton>
-        </div>
-      ))}
-      <Button className="w-full" onClick={addPresets}><Plus size={12} /> Add all presets to the document</Button>
-      <span className="block pt-1 text-[10.5px] text-ink-400">Cell styles in this document</span>
-      {!cStyles.length && <Hint>None yet — choose one in the Cells section, or make one from a formatted cell.</Hint>}
-      {cStyles.map((c, i) => (
-        <div key={c.id} className="space-y-0.5">
-          <div className="flex items-center gap-1">
-            <TextInput className="flex-1" value={c.name} onChange={(v) => s().update((d) => { d.cellStyles![i].name = v; }, { history: false })} />
-            <IconButton title="Delete style" onClick={() => s().update((d) => { d.cellStyles!.splice(i, 1); })}><Trash2 size={12} /></IconButton>
-          </div>
-          <p className="pl-1 text-[10px] text-ink-500">{describeCell(c.props)}</p>
-        </div>
-      ))}
-      <Hint>Cascade: table text ← column ← region cell style (head, body, foot, stub) ← cell style ← local formatting. Paragraph and character styles from the Type panel work inside cells too: [Style] at the start of a line, &lt;Style&gt;…&lt;/Style&gt; around words.</Hint>
+    <Section title="Flow across frames" id="el-table-flow">
+      <div className="flex items-center justify-between rounded-md border border-ink-700 bg-ink-900 px-2 py-1.5 text-[11px] text-ink-300">
+        <span>{n > 1 ? `Frame ${i + 1} of ${n}` : 'One frame'}{body.length ? ` · body rows ${Math.min(...body) + 1}–${Math.max(...body) + 1}` : ''}</span>
+        {last?.overset && <span className="font-medium text-[#e5483a]" title="Rows that fit no frame are not printed">Overset rows</span>}
+      </div>
+      <Button className="w-full" onClick={() => continueTableOnNextPage(frame.id)}><BetweenHorizontalEnd size={12} /> Continue in a new frame on the next page</Button>
+      <div className="grid grid-cols-2 gap-1">
+        <Button title="Then click an empty table frame, or an empty spot on a page" onClick={() => { s().setLinking(frame.id); s().notify('Click an empty table frame, or an empty spot on any page, to continue the table there (Esc cancels).'); }}><Link size={12} /> Thread to…</Button>
+        <Button disabled={!frame.flowNext} title="The frames after this one let go of the table" onClick={() => unthreadTable(frame.id)}><Unlink size={12} /> Unthread</Button>
+      </div>
+      <Toggle label="Repeat the head in every frame" checked={head.repeatHeader !== false} onChange={(v) => mut((t) => { t.repeatHeader = v; })} hint="Off: the head rows appear once, at the top of the table" />
+      <Toggle label="Skip the head in the first frame" checked={!!head.skipFirstHeader} onChange={(v) => mut((t) => { t.skipFirstHeader = v; })} hint="For a 'continued' head that only shows after a break" />
+      <Toggle label="Repeat the foot in every frame" checked={head.repeatFooter !== false} onChange={(v) => mut((t) => { t.repeatFooter = v; })} hint="Off: the foot rows appear once, at the end of the table (totals)" />
+      <Toggle label="Skip the foot in the last frame" checked={!!head.skipLastFooter} onChange={(v) => mut((t) => { t.skipLastFooter = v; })} />
+      <Toggle label="Allow rows to break across frames" checked={!!head.breakRows} onChange={(v) => mut((t) => { t.breakRows = v; })} hint="A row taller than the space left continues in the next frame; otherwise rows move whole (rows joined by a merged cell stay together)" />
+      <Hint>Rows never split unless allowed. The head and foot repeat as set; the table's rows live in its first frame, the others are empty frames it flows through.</Hint>
     </Section>
   );
 }
+

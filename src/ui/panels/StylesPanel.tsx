@@ -257,6 +257,7 @@ const CHAR_PROPS: PropDef[] = [
   { key: 'stroke', label: 'Outline colour', kind: 'color', def: '#2a2118' },
   { key: 'strokeWidth', label: 'Outline weight', kind: 'number', unit: 'pt', min: 0.05, max: 8, step: 0.05, def: 0.4 },
   { key: 'noBreak', label: 'No break', kind: 'bool', def: true },
+  { key: 'rotate', label: 'Character rotation', kind: 'number', unit: '°', min: -180, max: 180, step: 1, def: 90 },
 ];
 
 const FIGURES: { value: string; label: string; f: Record<string, boolean> }[] = [

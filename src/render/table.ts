@@ -4,12 +4,16 @@
  * and story markup as a text frame), aligns figures on the decimal, and compiles fills, rules,
  * diagonals and text to display-list primitives — which the editor, SVG, PDF, thumbnails and the
  * 3D book all draw.
+ *
+ * A table may run on through threaded table frames: the head frame holds the table, the rows are
+ * paginated over the frames (header and footer rows repeat, rows are kept whole or broken), and
+ * every frame compiles only its own slice.
  */
 import type { Project, TextStyle } from '../model/types';
 import type {
   TableElement, TableStyleProps, CellStyleProps, CellAlign, CellVAlign, CellRotation, CellDiagonal, TableStroke, CellEdges, Anchor,
 } from '../model/table';
-import { BASE_CELL, coverMap, anchorsOf, findCellStyle, mergeCellProps, resolveTableStyle, rowRegion, figureFeatures } from '../model/table';
+import { BASE_CELL, coverMap, anchorsOf, findCellStyle, mergeCellProps, resolveTableStyle, rowRegion, figureFeatures, ruleStyleOf, ruleExtent, gapOf } from '../model/table';
 import type { GroupPrim, Matrix, Prim, TextRun } from './primitives';
 import { rectPath } from './primitives';
 import { layoutStory, applyParagraphStyle, type FrameLayout, type FrameSpec, type StoryStyles, type TokenContext } from '../engine/textLayout';
@@ -17,31 +21,43 @@ import { ensureFamily, fontMetrics, measure, resolveFont, useFontStore } from '.
 
 export interface TableContext { project: Project; pageIndex: number | null }
 
-/** A cell as laid out (anchor cells only), table-local pt. */
+/** A cell as laid out in one frame (anchor cells only), frame-local pt. */
 export interface CellBox {
+  /** Anchor row / column in the table; `rs` counts the rows shown in this frame. */
   r: number; c: number; rs: number; cs: number;
   x: number; y: number; w: number; h: number;
   /** Text did not fit (fixed or clipped rows). */
   overflow: boolean;
+  /** The rest of a merged cell whose first row (and text) sits in an earlier frame. */
+  ghost?: boolean;
 }
 
 export interface TableLayout {
   colX: number[];
-  rowY: number[];
   colW: number[];
+  /** Row boundaries of the rows shown in this frame. */
+  rowY: number[];
+  /** Shown row → table row (header rows repeat in continuation frames). */
+  rowMap: number[];
+  /** Shown row → piece of a row broken across frames (-1 = whole row). */
+  rowPiece: number[];
+  /** Height of every table row. */
   rowH: number[];
+  /** Per table row: the least height its content needs. */
+  contentMin: number[];
   width: number;
+  /** Height of the rows shown in this frame. */
   height: number;
   /** Width the columns want without fitting the frame (auto + fixed + minimal fr). */
   naturalWidth: number;
-  /** Height before body rows are stretched to fill the frame. */
+  /** Height of the whole table before body rows are stretched to fill the frame. */
   naturalHeight: number;
-  /** Per row: the least height its content needs. */
-  contentMin: number[];
   hasFr: boolean;
-  /** Rows drawn (the rest are overset when the frame is fixed and too short). */
-  visibleRows: number;
+  /** Rows are left over after this, the last frame. */
   overset: boolean;
+  /** Position of this frame in its thread. */
+  frameIndex: number;
+  frameCount: number;
   cells: CellBox[];
   prims: Prim[];
 }
@@ -70,26 +86,101 @@ const idOf = (o: object | undefined | null): number => {
   return v;
 };
 
-/** Everything outside the element that a table's appearance depends on. */
-export function tableContextKey(ctx: TableContext, fontVersion = useFontStore.getState().version): string {
+/**
+ * Everything outside the element that a table's appearance depends on. With the element, a
+ * threaded frame's key also covers every frame of its thread (the head holds the rows).
+ */
+export function tableContextKey(ctx: TableContext, fontVersion = useFontStore.getState().version, el?: TableElement): string {
   const p = ctx.project;
-  return `${fontVersion}|${idOf(p.paragraphStyles)}|${idOf(p.characterStyles)}|${idOf(p.tableStyles)}|${idOf(p.cellStyles)}|${idOf(p.book)}|${ctx.pageIndex ?? '-'}|${p.pages.length}`;
+  const base = `${fontVersion}|${idOf(p.paragraphStyles)}|${idOf(p.characterStyles)}|${idOf(p.tableStyles)}|${idOf(p.cellStyles)}|${idOf(p.book)}|${ctx.pageIndex ?? '-'}|${p.pages.length}`;
+  if (!el) return base;
+  const th = tableThreadOf(p, el.id);
+  return th && th.frames.length > 1 ? `${base}|${th.frames.map((f) => idOf(f.el)).join(',')}` : base;
 }
 
-const layoutCache = new WeakMap<TableElement, { key: string; layout: TableLayout }>();
+/* -------------------------------------------------------------------------- */
+/* Threads                                                                     */
+/* -------------------------------------------------------------------------- */
+
+export interface TableFrameRef { el: TableElement; pageIndex: number | null; surface: string }
+export interface TableThread { head: TableElement; frames: TableFrameRef[]; index: number }
+
+interface TableIndex { byId: Map<string, TableFrameRef>; prev: Map<string, string> }
+const indexCache = new WeakMap<Project, TableIndex>();
+
+function tableIndex(project: Project): TableIndex {
+  let idx = indexCache.get(project);
+  if (idx) return idx;
+  const byId = new Map<string, TableFrameRef>();
+  project.pages.forEach((pg, pi) => { for (const e of pg.elements) if (e.type === 'table') byId.set(e.id, { el: e, pageIndex: pi, surface: `page:${pg.id}` }); });
+  for (const e of project.cover.elements) if (e.type === 'table') byId.set(e.id, { el: e, pageIndex: null, surface: 'cover' });
+  for (const e of project.jacket?.elements ?? []) if (e.type === 'table') byId.set(e.id, { el: e, pageIndex: null, surface: 'jacket' });
+  const prev = new Map<string, string>();
+  for (const { el } of byId.values()) if (el.flowNext && byId.has(el.flowNext) && el.flowNext !== el.id) prev.set(el.flowNext, el.id);
+  idx = { byId, prev };
+  indexCache.set(project, idx);
+  return idx;
+}
+
+/** The thread a table frame belongs to (head first, cycle-safe); null when not on a page / cover. */
+export function tableThreadOf(project: Project, id: string): TableThread | null {
+  const { byId, prev } = tableIndex(project);
+  if (!byId.has(id)) return null;
+  let head = id;
+  const seen = new Set<string>([head]);
+  while (prev.has(head) && !seen.has(prev.get(head)!)) { head = prev.get(head)!; seen.add(head); }
+  const frames: TableFrameRef[] = [];
+  const seen2 = new Set<string>();
+  for (let cur: string | null = head; cur && byId.has(cur) && !seen2.has(cur); cur = byId.get(cur)!.el.flowNext ?? null) {
+    frames.push(byId.get(cur)!);
+    seen2.add(cur);
+  }
+  const index = frames.findIndex((f) => f.el.id === id);
+  return index < 0 ? null : { head: frames[0].el, frames, index };
+}
+
+/** The table that holds the rows for a frame (the head of its thread, or the frame itself). */
+export function tableHead(project: Project, el: TableElement): TableElement {
+  const th = tableThreadOf(project, el.id);
+  return th && th.frames.length > 1 ? th.head : el;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Entry points                                                                */
+/* -------------------------------------------------------------------------- */
+
+const singleCache = new WeakMap<TableElement, { key: string; layout: TableLayout }>();
+const threadCache = new WeakMap<TableElement, { key: string; layouts: TableLayout[] }>();
 
 export function layoutTable(el: TableElement, ctx: TableContext): TableLayout {
+  const th = tableThreadOf(ctx.project, el.id);
+  if (th && th.frames.length > 1 && th.frames[th.index].el === el) {
+    const head = th.head;
+    const hctx: TableContext = { project: ctx.project, pageIndex: th.frames[0].pageIndex };
+    const key = `${tableContextKey(hctx)}|${th.frames.map((f) => idOf(f.el)).join(',')}`;
+    const hit = threadCache.get(head);
+    if (hit && hit.key === key) return hit.layouts[th.index];
+    let layouts: TableLayout[];
+    try {
+      layouts = computeThread(head, th.frames.map((f) => f.el), hctx);
+    } catch (err) {
+      console.error('Table layout failed', err);
+      layouts = th.frames.map((f) => emptyLayout(f.el));
+    }
+    threadCache.set(head, { key, layouts });
+    return layouts[th.index];
+  }
   const key = tableContextKey(ctx);
-  const hit = layoutCache.get(el);
+  const hit = singleCache.get(el);
   if (hit && hit.key === key) return hit.layout;
   let layout: TableLayout;
   try {
-    layout = computeLayout(el, ctx);
+    layout = computeSingle(el, ctx);
   } catch (err) {
     console.error('Table layout failed', err);
     layout = emptyLayout(el);
   }
-  layoutCache.set(el, { key, layout });
+  singleCache.set(el, { key, layout });
   return layout;
 }
 
@@ -97,11 +188,11 @@ export function compileTable(el: TableElement, ctx: TableContext): Prim[] {
   return layoutTable(el, ctx).prims;
 }
 
+/** An empty frame (a continuation not threaded to any table): nothing printed. */
 function emptyLayout(el: TableElement): TableLayout {
   return {
-    colX: [0, el.w], rowY: [0, el.h], colW: [el.w], rowH: [el.h], width: el.w, height: el.h, naturalWidth: el.w, naturalHeight: el.h,
-    contentMin: [el.h], hasFr: true, visibleRows: 0, overset: false, cells: [],
-    prims: [{ t: 'path', d: rectPath(0, 0, el.w, el.h), stroke: '#e5483a', strokeWidth: 0.5, dash: [3, 3] }],
+    colX: [0, el.w], colW: [el.w], rowY: [0], rowMap: [], rowPiece: [], rowH: [], contentMin: [], width: el.w, height: 0,
+    naturalWidth: el.w, naturalHeight: 0, hasFr: true, overset: false, frameIndex: 0, frameCount: 1, cells: [], prims: [],
   };
 }
 
@@ -292,6 +383,18 @@ function setText(text: string, style: TextStyle, w: number, h: number, valign: C
   return m;
 }
 
+/** Set a cell's story through several frames of one width (a row broken across table frames). */
+const framesCache = new Map<string, FrameLayout[]>();
+function setTextFrames(text: string, style: TextStyle, w: number, heights: number[], env: Env): FrameLayout[] {
+  const key = `${env.key}|${Math.round(w * 100)}|${heights.map((h) => Math.round(h * 100)).join(',')}|${JSON.stringify(style)}|${text}`;
+  const hit = framesCache.get(key);
+  if (hit) return hit;
+  const lays = layoutStory(text, style, heights.map((h) => frameOf(w, h, 'top')), env.tokens, env.styles);
+  if (framesCache.size > 1000) framesCache.clear();
+  framesCache.set(key, lays);
+  return lays;
+}
+
 /** Width of the longest word (the narrowest a column can get without breaking words). */
 function minContent(rc: ResolvedCell, env: Env): number {
   return setText(rc.text.replace(/[ \t]+/g, '\n'), rc.natStyle, BIG, BIG, 'top', env).width;
@@ -343,10 +446,55 @@ interface Env { tokens: TokenContext; styles: StoryStyles | null; key: string }
 
 const MIN_COL = 6;
 
-function computeLayout(el: TableElement, ctx: TableContext): TableLayout {
+/** Everything measured once per table and shared by all of its frames. */
+interface Measure {
+  el: TableElement;
+  T: TableStyleProps;
+  env: Env;
+  R: number;
+  C: number;
+  map: Int32Array;
+  cells: ResolvedCell[];
+  byKey: Map<number, ResolvedCell>;
+  colX: number[];
+  colW: number[];
+  rowH: number[];
+  contentMin: number[];
+  naturalWidth: number;
+  naturalHeight: number;
+  hasFr: boolean;
+  fitted: Map<ResolvedCell, Measured>;
+  /** One decimal position per column for the whole table: widest part before and after the marker. */
+  decimal: Map<number, { pre: number; post: number }>;
+  /** The row may break across frames (single-row cells, not fixed, no turned text). */
+  breakable: boolean[];
+  /** Least height of one piece of a broken row (padding and a line). */
+  minPiece: number[];
+  /** A merged cell crosses the boundary above this row: the rows travel together. */
+  joinedAbove: boolean[];
+}
+
+const rotated = (rc: ResolvedCell) => rc.rotation === 90 || rc.rotation === 270;
+const innerWOf = (M: Measure, rc: ResolvedCell) => Math.max(1, M.colX[rc.a.c + rc.a.cs] - M.colX[rc.a.c] - rc.pad.l - rc.pad.r);
+
+function computeSingle(el: TableElement, ctx: TableContext): TableLayout {
+  const M = measureTable(el, ctx, el.fillHeight);
+  if (!M) return emptyLayout(el);
+  const [slice] = paginate(M, [el.autoHeight ? Infinity : el.h]);
+  return renderSlice(M, slice, 0, 1);
+}
+
+function computeThread(head: TableElement, frames: TableElement[], ctx: TableContext): TableLayout[] {
+  const M = measureTable(head, ctx, false);
+  if (!M) return frames.map(emptyLayout);
+  const slices = paginate(M, frames.map((f) => Math.max(1, f.h)));
+  return slices.map((sl, i) => renderSlice(M, sl, i, frames.length));
+}
+
+function measureTable(el: TableElement, ctx: TableContext, fill: boolean): Measure | null {
   const project = ctx.project;
   const R = el.rows.length, C = el.cols.length;
-  if (!R || !C) return emptyLayout(el);
+  if (!R || !C || el.cells.length < R) return null;
   requestFamily(el.style.fontFamily);
   const T = resolveTableStyle(project, el);
   const para = project.paragraphStyles ?? [], char = project.characterStyles ?? [];
@@ -363,7 +511,6 @@ function computeLayout(el: TableElement, ctx: TableContext): TableLayout {
   const cells = anchors.map((a) => resolveCell(el, T, project, base, a));
   const byKey = new Map<number, ResolvedCell>();
   for (const rc of cells) byKey.set(rc.a.r * C + rc.a.c, rc);
-  const rotated = (rc: ResolvedCell) => rc.rotation === 90 || rc.rotation === 270;
 
   /* ---------------------------------------------------------------- columns */
   const natural = new Map<ResolvedCell, Measured>();
@@ -376,25 +523,22 @@ function computeLayout(el: TableElement, ctx: TableContext): TableLayout {
   const decimalDemand = new Map<number, { pre: number; post: number; pad: number }>();
   for (const rc of cells) {
     const col = el.cols[rc.a.c];
-    if (col.mode !== 'auto') continue;
-    if (rc.a.cs === 1) {
-      const m = nat(rc);
-      const pads = rc.pad.l + rc.pad.r;
-      autoDemand[rc.a.c] = Math.max(autoDemand[rc.a.c], (rotated(rc) ? m.height : m.width) + pads);
-      if (rc.align === 'decimal' && !rotated(rc)) {
-        const d = decimalDemand.get(rc.a.c) ?? { pre: 0, post: 0, pad: 0 };
-        for (const ln of decimalLines(m.layout, rc.decimalChar)) { d.pre = Math.max(d.pre, ln.pre - ln.start); d.post = Math.max(d.post, ln.post); }
-        d.pad = Math.max(d.pad, pads);
-        decimalDemand.set(rc.a.c, d);
-      }
+    if (col.mode !== 'auto' || rc.a.cs !== 1) continue;
+    const m = nat(rc);
+    const pads = rc.pad.l + rc.pad.r;
+    autoDemand[rc.a.c] = Math.max(autoDemand[rc.a.c], (rotated(rc) ? m.height : m.width) + pads);
+    if (rc.align === 'decimal' && !rotated(rc)) {
+      const d = decimalDemand.get(rc.a.c) ?? { pre: 0, post: 0, pad: 0 };
+      for (const ln of decimalLines(m.layout, rc.decimalChar)) { d.pre = Math.max(d.pre, ln.pre - ln.start); d.post = Math.max(d.post, ln.post); }
+      d.pad = Math.max(d.pad, pads);
+      decimalDemand.set(rc.a.c, d);
     }
   }
   for (const [c, d] of decimalDemand) autoDemand[c] = Math.max(autoDemand[c], d.pre + d.post + d.pad);
   // A merged cell across auto columns widens them evenly.
   for (const rc of cells) {
     if (rc.a.cs < 2) continue;
-    const span = el.cols.slice(rc.a.c, rc.a.c + rc.a.cs);
-    if (!span.every((col) => col.mode === 'auto')) continue;
+    if (!el.cols.slice(rc.a.c, rc.a.c + rc.a.cs).every((col) => col.mode === 'auto')) continue;
     const m = nat(rc);
     const need = (rotated(rc) ? m.height : m.width) + rc.pad.l + rc.pad.r;
     const have = autoDemand.slice(rc.a.c, rc.a.c + rc.a.cs).reduce((s, v) => s + v, 0);
@@ -466,84 +610,232 @@ function computeLayout(el: TableElement, ctx: TableContext): TableLayout {
     if (target >= 0) rowH[target] += need - have;
   }
   const naturalHeight = rowH.reduce((s, v) => s + v, 0);
-  if (el.fillHeight && naturalHeight < el.h - 0.01) {
+  if (fill && naturalHeight < el.h - 0.01) {
     let grow = [...Array(R).keys()].filter((r) => rowRegion(el, r) === 'body' && el.rows[r].mode !== 'fixed');
     if (!grow.length) grow = [...Array(R).keys()].filter((r) => el.rows[r].mode !== 'fixed');
     if (grow.length) { const add = (el.h - naturalHeight) / grow.length; for (const r of grow) rowH[r] += add; }
   }
-  const rowY = [0];
-  for (let r = 0; r < R; r++) rowY.push(rowY[r] + rowH[r]);
 
-  // Overset: a fixed-height frame shows the rows that fit (always at least one).
-  let visibleRows = R;
-  if (!el.autoHeight) {
-    visibleRows = 1;
-    while (visibleRows < R && rowY[visibleRows + 1] <= el.h + 0.5) visibleRows++;
+  /* ---------------------------------------------------------------- flow facts */
+  const decimal = new Map<number, { pre: number; post: number }>();
+  for (const rc of cells) {
+    if (rc.align !== 'decimal' || rc.a.cs !== 1 || rotated(rc)) continue;
+    const m = fitted.get(rc);
+    if (!m) continue;
+    const d = decimal.get(rc.a.c) ?? { pre: 0, post: 0 };
+    for (const ln of decimalLines(m.layout, rc.decimalChar)) { d.pre = Math.max(d.pre, ln.pre - ln.start); d.post = Math.max(d.post, ln.post); }
+    decimal.set(rc.a.c, d);
+  }
+  const joinedAbove = new Array<boolean>(R).fill(false);
+  for (const rc of cells) for (let r = rc.a.r + 1; r < rc.a.r + rc.a.rs; r++) joinedAbove[r] = true;
+  const breakable = el.rows.map((row, r) => row.mode !== 'fixed' && rowRegion(el, r) === 'body' && !joinedAbove[r] && !(r + 1 < R && joinedAbove[r + 1]));
+  const minPiece = new Array<number>(R).fill(0);
+  for (const rc of cells) {
+    if (rotated(rc)) breakable[rc.a.r] = false;
+    minPiece[rc.a.r] = Math.max(minPiece[rc.a.r], rc.pad.t + rc.pad.b + rc.style.leading);
   }
 
-  /* ---------------------------------------------------------------- cells */
+  return {
+    el, T, env, R, C, map, cells, byKey, colX, colW, rowH, contentMin, naturalWidth, naturalHeight, hasFr: frCols.length > 0,
+    fitted, decimal, breakable, minPiece, joinedAbove,
+  };
+}
+
+/* -------------------------------------------------------------------------- */
+/* Pagination over frames                                                      */
+/* -------------------------------------------------------------------------- */
+
+interface DisplayRow {
+  r: number;
+  h: number;
+  kind: 'header' | 'body' | 'footer';
+  /** Piece of a broken row (-1 = the whole row), and the heights of its pieces so far. */
+  piece: number;
+  cuts?: number[];
+}
+interface Slice { rows: DisplayRow[]; overset: boolean }
+
+/** Height still needed by a broken row after pieces of the given heights. */
+function restHeight(M: Measure, r: number, cuts: number[]): number {
+  let need = 0;
+  for (const rc of M.cells) {
+    if (rc.a.r !== r) continue;
+    const frames = [...cuts.map((h) => Math.max(1, h - rc.pad.t - rc.pad.b)), BIG];
+    const lays = setTextFrames(rc.text, rc.style, innerWOf(M, rc), frames, M.env);
+    const last = lays[lays.length - 1];
+    const h = last && last.baselines.length ? measureLayout(last, rc.style).height : 0;
+    need = Math.max(need, h + rc.pad.t + rc.pad.b);
+  }
+  return Math.max(need, 2);
+}
+
+/**
+ * Deal the rows out over frames of the given heights: header rows on top of each frame, footer
+ * rows at its foot, body rows whole (rows joined by a merged cell travel together), a row too
+ * tall for an empty frame set anyway, or broken across frames when the table allows it.
+ */
+function paginate(M: Measure, heights: number[]): Slice[] {
+  const { el, rowH, R } = M;
+  const hr = el.headerRows, fr = el.footerRows, bodyEnd = R - fr;
+  const sum = (a: number, b: number) => { let t = 0; for (let r = a; r < b; r++) t += rowH[r]; return t; };
+  const ftrH = sum(bodyEnd, R);
+  const repeatHeader = el.repeatHeader !== false, repeatFooter = el.repeatFooter !== false;
+  const midFooter = fr > 0 && repeatFooter;
+  const lastFooter = fr > 0 && (!repeatFooter || !el.skipLastFooter);
+  const groupEnd = (r: number) => { let e = r + 1; while (e < bodyEnd && M.joinedAbove[e]) e++; return e; };
+  const slices: Slice[] = [];
+  let cur = hr;
+  let carry: { r: number; cuts: number[] } | null = null;
+  let done = cur >= bodyEnd;
+  for (let i = 0; i < heights.length; i++) {
+    const H = heights[i];
+    const rows: DisplayRow[] = [];
+    if (done && i > 0) { slices.push({ rows, overset: false }); continue; }
+    let y = 0;
+    if (hr > 0 && (i === 0 ? !el.skipFirstHeader : repeatHeader)) {
+      for (let r = 0; r < hr; r++) { rows.push({ r, h: rowH[r], kind: 'header', piece: -1 }); y += rowH[r]; }
+    }
+    const room = (final: boolean) => H - ((final ? lastFooter : midFooter) ? ftrH : 0) - y;
+    let placed = 0;
+    while (!done) {
+      if (carry) {
+        const r = carry.r;
+        const rest = restHeight(M, r, carry.cuts);
+        if (rest <= room(r === bodyEnd - 1) + 0.01) {
+          rows.push({ r, h: rest, kind: 'body', piece: carry.cuts.length, cuts: [...carry.cuts] });
+          y += rest; placed++; carry = null; cur = r + 1; done = cur >= bodyEnd;
+          continue;
+        }
+        const h = room(false);
+        if (h >= M.minPiece[r] || placed === 0) {
+          const ph = Math.max(h, M.minPiece[r]);
+          carry.cuts.push(ph);
+          rows.push({ r, h: ph, kind: 'body', piece: carry.cuts.length - 1, cuts: [...carry.cuts] });
+          y += ph; placed++;
+        }
+        break;
+      }
+      const g = groupEnd(cur);
+      const gh = sum(cur, g);
+      if (gh <= room(g >= bodyEnd) + 0.01) {
+        for (let r = cur; r < g; r++) { rows.push({ r, h: rowH[r], kind: 'body', piece: -1 }); y += rowH[r]; }
+        placed += g - cur; cur = g; done = cur >= bodyEnd;
+        continue;
+      }
+      const h = room(false);
+      // Break only a row that would not fit a fresh frame either (or one that starts a frame).
+      const fresh = (heights[i + 1] ?? H) - (hr > 0 && repeatHeader ? sum(0, hr) : 0) - (midFooter ? ftrH : 0);
+      if (el.breakRows && g === cur + 1 && M.breakable[cur] && h >= M.minPiece[cur] && (placed === 0 || gh > fresh + 0.01)) {
+        carry = { r: cur, cuts: [h] };
+        rows.push({ r: cur, h, kind: 'body', piece: 0, cuts: [h] });
+        y += h; placed++;
+        break;
+      }
+      if (placed === 0) {
+        // Too tall for any frame: set it anyway (it overruns the frame) so the table moves on.
+        for (let r = cur; r < g; r++) { rows.push({ r, h: rowH[r], kind: 'body', piece: -1 }); y += rowH[r]; }
+        placed += g - cur; cur = g; done = cur >= bodyEnd;
+        if (!done) break;
+        continue;
+      }
+      break;
+    }
+    if (fr > 0 && (done && !carry ? lastFooter : midFooter)) for (let r = bodyEnd; r < R; r++) rows.push({ r, h: rowH[r], kind: 'footer', piece: -1 });
+    slices.push({ rows, overset: false });
+  }
+  if ((!done || carry) && slices.length) slices[slices.length - 1].overset = true;
+  return slices;
+}
+
+/* -------------------------------------------------------------------------- */
+/* One frame's slice → primitives                                              */
+/* -------------------------------------------------------------------------- */
+
+function renderSlice(M: Measure, slice: Slice, frameIndex: number, frameCount: number): TableLayout {
+  const { C, colX, cells, byKey, env } = M;
+  const rows = slice.rows;
+  const N = rows.length;
+  const rowY = [0];
+  for (const d of rows) rowY.push(rowY[rowY.length - 1] + d.h);
+  const disp = new Map<number, number>();
+  rows.forEach((d, i) => disp.set(d.r, i));
+
   const boxes: CellBox[] = [];
   const textRuns: TextRun[] = [];
   const groups: Prim[] = [];
   const decimalCells: { rc: ResolvedCell; lines: DecimalLine[]; runs: TextRun[]; x0: number; inner: number }[] = [];
+  const placeRuns = (rc: ResolvedCell, layout: FrameLayout, x0: number, y0: number, iw: number) => {
+    const runs = runsOf(layout.prims).map((run) => ({ ...run, x: run.x + x0, y: run.y + y0 }));
+    if (rc.align === 'decimal' && rc.a.cs === 1) {
+      const lines = decimalLines(layout, rc.decimalChar).map((ln) => ({ ...ln, y: ln.y + y0, pre: ln.pre + x0, start: ln.start + x0 }));
+      decimalCells.push({ rc, lines, runs, x0, inner: iw });
+    }
+    textRuns.push(...runs);
+    for (const p of layout.prims) if (p.t !== 'text') groups.push({ t: 'group', matrix: [1, 0, 0, 1, x0, y0], children: [p] });
+  };
+
   for (const rc of cells) {
     const { r, c, cs } = rc.a;
-    if (r >= visibleRows) continue;
-    const rs = Math.min(rc.a.rs, visibleRows - r);
-    const x = colX[c], y = rowY[r], w = colX[c + cs] - x, h = rowY[r + rs] - y;
+    let d0 = -1, d1 = -1;
+    for (let rr = r; rr < r + rc.a.rs; rr++) {
+      const d = disp.get(rr);
+      if (d == null) continue;
+      if (d0 < 0 || d < d0) d0 = d;
+      if (d > d1) d1 = d;
+    }
+    if (d0 < 0) continue;
+    const ghost = rows[d0].r !== r;
+    const piece = rows[d0].piece;
+    const x = colX[c], y = rowY[d0], w = colX[c + cs] - x, h = rowY[d1 + 1] - y;
+    const box: CellBox = { r, c, rs: d1 - d0 + 1, cs, x, y, w, h, overflow: false };
+    if (ghost) box.ghost = true;
+    boxes.push(box);
+    if (ghost) continue;
     const iw = Math.max(1, w - rc.pad.l - rc.pad.r), ih = Math.max(1, h - rc.pad.t - rc.pad.b);
     const x0 = x + rc.pad.l, y0 = y + rc.pad.t;
-    let overflow = false;
+    if (piece >= 0) {
+      // A piece of a row broken across frames: the story runs on from piece to piece.
+      const cuts = rows[d0].cuts ?? [h];
+      const lays = setTextFrames(rc.text, rc.style, iw, [...cuts.map((ch) => Math.max(1, ch - rc.pad.t - rc.pad.b)), BIG], env);
+      if (lays[piece]) placeRuns(rc, lays[piece], x0, y0, iw);
+      continue;
+    }
     if (!rotated(rc)) {
-      let m = fitted.get(rc) ?? setText(rc.text, rc.style, iw, BIG, 'top', env);
+      let m = M.fitted.get(rc) ?? setText(rc.text, rc.style, iw, BIG, 'top', env);
       let dy = 0;
       if (m.height <= ih + 0.5) {
         const slack = Math.max(0, ih - m.height);
         dy = rc.valign === 'middle' ? slack / 2 : rc.valign === 'bottom' ? slack : 0;
       } else {
         m = setText(rc.text, rc.style, iw, ih, 'top', env);
-        overflow = m.layout.overflow;
+        box.overflow = m.layout.overflow;
       }
       if (rc.rotation === 180) {
         // Upside down: set in place, then turned about the inner box.
         const flip: Matrix = [-1, 0, 0, -1, x0 + iw, y0 + ih];
         groups.push({ t: 'group', matrix: flip, children: shiftPrims(m.layout.prims, 0, ih - m.height - dy) });
-      } else {
-        const runs = runsOf(m.layout.prims).map((run) => ({ ...run, x: run.x + x0, y: run.y + y0 + dy }));
-        if (rc.align === 'decimal' && cs === 1) {
-          const lines = decimalLines(m.layout, rc.decimalChar).map((ln) => ({ ...ln, y: ln.y + y0 + dy, pre: ln.pre + x0, start: ln.start + x0 }));
-          decimalCells.push({ rc, lines, runs, x0, inner: iw });
-        }
-        textRuns.push(...runs);
-        for (const p of m.layout.prims) if (p.t !== 'text') groups.push({ t: 'group', matrix: [1, 0, 0, 1, x0, y0 + dy], children: [p] });
-      }
+      } else placeRuns(rc, m.layout, x0, y0 + dy, iw);
     } else {
-      // Rotated text runs along the cell's height: the frame is turned a quarter.
-      const len = ih, across = iw;
-      const m = setText(rc.text, rc.style, len, across, rc.valign, env);
-      overflow = m.layout.overflow;
+      // Turned text runs along the cell's height: the frame is turned a quarter.
+      const m = setText(rc.text, rc.style, ih, iw, rc.valign, env);
+      box.overflow = m.layout.overflow;
       const mat: Matrix = rc.rotation === 90 ? [0, -1, 1, 0, x0, y0 + ih] : [0, 1, -1, 0, x0 + iw, y0];
       groups.push({ t: 'group', matrix: mat, children: m.layout.prims });
     }
-    boxes.push({ r, c, rs, cs, x, y, w, h, overflow });
   }
 
-  // Decimal alignment: every decimal cell of a column shares one decimal position.
-  const byCol = new Map<number, typeof decimalCells>();
-  for (const d of decimalCells) { const list = byCol.get(d.rc.a.c) ?? []; list.push(d); byCol.set(d.rc.a.c, list); }
-  for (const list of byCol.values()) {
-    let maxPre = 0, maxPost = 0;
-    for (const d of list) for (const ln of d.lines) { maxPre = Math.max(maxPre, ln.pre - ln.start); maxPost = Math.max(maxPost, ln.post); }
-    for (const d of list) {
-      const target = d.x0 + Math.max(0, (d.inner - (maxPre + maxPost)) / 2) + maxPre;
-      for (const ln of d.lines) {
-        const shift = target - ln.pre;
-        for (const run of d.runs) if (Math.abs(run.y - ln.y) < run.size * 0.5) run.x += shift;
-      }
+  // Decimal alignment: one decimal position per column, the same in every frame.
+  for (const d of decimalCells) {
+    const col = M.decimal.get(d.rc.a.c);
+    let pre = col?.pre ?? 0, post = col?.post ?? 0;
+    for (const ln of d.lines) { pre = Math.max(pre, ln.pre - ln.start); post = Math.max(post, ln.post); }
+    const target = d.x0 + Math.max(0, (d.inner - (pre + post)) / 2) + pre;
+    for (const ln of d.lines) {
+      const shift = target - ln.pre;
+      for (const run of d.runs) if (Math.abs(run.y - ln.y) < run.size * 0.5) run.x += shift;
     }
   }
 
-  /* ---------------------------------------------------------------- prims */
   const prims: Prim[] = [];
   const fills = new Map<string, string[]>();
   for (const b of boxes) {
@@ -559,21 +851,21 @@ function computeLayout(el: TableElement, ctx: TableContext): TableLayout {
   for (const b of boxes) {
     const rc = byKey.get(b.r * C + b.c)!;
     const st = rc.diagonalStroke;
-    if (rc.diagonal === 'none' || !st || st.w <= 0) continue;
+    if (rc.diagonal === 'none' || !st || st.w <= 0 || b.ghost) continue;
     let d = '';
     if (rc.diagonal === 'down' || rc.diagonal === 'cross') d += `M${b.x} ${b.y}L${b.x + b.w} ${b.y + b.h}`;
     if (rc.diagonal === 'up' || rc.diagonal === 'cross') d += `M${b.x} ${b.y + b.h}L${b.x + b.w} ${b.y}`;
-    prims.push({ t: 'path', d, fill: null, stroke: st.color, strokeWidth: st.w, dash: st.dash.length ? st.dash : undefined, cap: dotted(st) ? 'round' : 'butt' });
+    prims.push({ t: 'path', d, fill: null, stroke: st.color, strokeWidth: st.w, dash: strokeDash(st), cap: ruleStyleOf(st) === 'dotted' ? 'round' : 'butt' });
   }
 
-  prims.push(...strokePrims(el, T, map, byKey, colX, rowY, visibleRows));
+  prims.push(...strokePrims(M, rows, rowY));
   if (textRuns.length) prims.push({ t: 'text', runs: textRuns });
   prims.push(...groups);
 
-  const width = colX[C];
   return {
-    colX, rowY: rowY.slice(0, visibleRows + 1), colW, rowH, width, height: rowY[visibleRows], naturalWidth, naturalHeight, contentMin,
-    hasFr: frCols.length > 0, visibleRows, overset: visibleRows < R, cells: boxes, prims,
+    colX, colW: M.colW, rowY, rowMap: rows.map((d) => d.r), rowPiece: rows.map((d) => d.piece), rowH: M.rowH, contentMin: M.contentMin,
+    width: colX[C], height: rowY[N], naturalWidth: M.naturalWidth, naturalHeight: M.naturalHeight, hasFr: M.hasFr,
+    overset: slice.overset, frameIndex, frameCount, cells: boxes, prims,
   };
 }
 
@@ -582,34 +874,77 @@ function shiftPrims(prims: Prim[], dx: number, dy: number): Prim[] {
   return [{ t: 'group', matrix: [1, 0, 0, 1, dx, dy], children: prims } as GroupPrim];
 }
 
-const dotted = (s: TableStroke) => s.dash.length >= 2 && s.dash[0] < 0.1;
-
 /* -------------------------------------------------------------------------- */
 /* Rules                                                                       */
 /* -------------------------------------------------------------------------- */
 
-const heaviest = (...ss: (TableStroke | undefined)[]): TableStroke | undefined => {
+/** The lines a rule is drawn with: offset across the rule from its centre line, and weight. */
+interface SubLine { o: number; w: number }
+
+function subLines(s: TableStroke): SubLine[] {
+  const k = ruleStyleOf(s);
+  if (k === 'double') {
+    const lw = s.w / 2, off = (gapOf(s) + lw) / 2;
+    return [{ o: -off, w: lw }, { o: off, w: lw }];
+  }
+  if (k === 'thick-thin' || k === 'thin-thick') {
+    const thick = (s.w * 2) / 3, thin = s.w / 3, total = s.w + gapOf(s);
+    const a = k === 'thick-thin' ? thick : thin, b = k === 'thick-thin' ? thin : thick;
+    return [{ o: -total / 2 + a / 2, w: a }, { o: total / 2 - b / 2, w: b }];
+  }
+  return [{ o: 0, w: s.w }];
+}
+
+/** Dash pattern for dotted / dashed rules (a plain dash array is kept for older rules). */
+function strokeDash(s: TableStroke): number[] | undefined {
+  if (!s.style && s.dash.length) return s.dash;
+  const k = ruleStyleOf(s);
+  if (k === 'dotted') return [0.01, Math.max(1.2, s.w * 2.2)];
+  if (k === 'dashed') return [Math.max(2, s.w * 3), Math.max(1.5, s.w * 2)];
+  return s.dash.length && k === 'solid' ? s.dash : undefined;
+}
+
+const heaviest = (...ss: (TableStroke | undefined | null)[]): TableStroke | undefined => {
   let best: TableStroke | undefined;
-  for (const s of ss) if (s && (!best || s.w > best.w)) best = s;
+  for (const s of ss) if (s && (!best || ruleExtent(s) > ruleExtent(best))) best = s;
   return best;
 };
 
-const strokeKey = (s: TableStroke) => `${s.w}|${s.color}|${s.dash.join(',')}`;
+const strokeKey = (s: TableStroke) => `${s.w}|${s.color}|${s.dash.join(',')}|${s.style ?? ''}|${s.gap ?? ''}`;
 
-function strokePrims(el: TableElement, T: TableStyleProps, map: Int32Array, byKey: Map<number, ResolvedCell>, colX: number[], rowY: number[], R: number): Prim[] {
-  const C = el.cols.length;
-  const nR = el.rows.length;
-  const owner = (r: number, c: number) => (r >= 0 && r < R && c >= 0 && c < C ? map[r * C + c] : -1);
+/**
+ * Where one line of a rule ends at a junction (offset from the grid line along the rule):
+ * through a single crossing rule; at a corner of two-line rules the inner lines meet the inner
+ * line and the outer lines the outer one, so double borders nest; at a T it stops on the near line.
+ */
+function endAt(sub: SubLine, d: 1 | -1, before: TableStroke | null, after: TableStroke | null): number {
+  const P = heaviest(before, after);
+  if (!P) return 0;
+  const ps = subLines(P);
+  if (ps.length === 1) return (-d * P.w) / 2;
+  const inner = ps.reduce((a, b) => (b.o * d > a.o * d ? b : a));
+  const outer = ps.reduce((a, b) => (b.o * d < a.o * d ? b : a));
+  const sgn = (after ? 1 : 0) - (before ? 1 : 0);
+  const q = sgn === 0 || (sub.o !== 0 && Math.sign(sub.o) === sgn) ? inner : outer;
+  return q.o - (d * q.w) / 2;
+}
+
+function strokePrims(M: Measure, rows: DisplayRow[], rowY: number[]): Prim[] {
+  const { el, T, map, byKey, colX, C } = M;
+  const N = rows.length;
+  if (!N) return [];
+  const owner = (d: number, c: number) => (d >= 0 && d < N && c >= 0 && c < C ? map[rows[d].r * C + c] : -1);
   const cellOf = (k: number) => (k >= 0 ? byKey.get(k) : undefined);
 
   const hRule = (b: number): TableStroke | null => {
     if (b === 0) return T.borderTop;
-    if (b === R) return T.borderBottom;
-    if (el.headerRows > 0 && b === el.headerRows) return T.headerRule;
-    if (el.footerRows > 0 && b === nR - el.footerRows) return T.footerRule;
-    if (b < el.headerRows || b > nR - el.footerRows) return T.rowRule;
+    if (b === N) return T.borderBottom;
+    const a = rows[b - 1], z = rows[b];
+    if (a.kind === 'header' && z.kind !== 'header') return T.headerRule;
+    if (z.kind === 'footer' && a.kind !== 'footer') return T.footerRule;
+    if (a.kind !== 'body' || z.kind !== 'body') return T.rowRule;
     const every = Math.max(1, Math.round(T.rowRuleEvery || 1));
-    return (b - el.headerRows) % every === 0 ? T.rowRule : null;
+    return (z.r - el.headerRows) % every === 0 ? T.rowRule : null;
   };
   const vRule = (b: number): TableStroke | null => {
     if (b === 0) return T.borderLeft;
@@ -620,7 +955,7 @@ function strokePrims(el: TableElement, T: TableStyleProps, map: Int32Array, byKe
 
   // Resolve every grid segment first, so rules can meet cleanly at their ends.
   const H: (TableStroke | null)[][] = [];
-  for (let b = 0; b <= R; b++) {
+  for (let b = 0; b <= N; b++) {
     const row: (TableStroke | null)[] = [];
     for (let c = 0; c < C; c++) {
       const above = owner(b - 1, c), below = owner(b, c);
@@ -634,8 +969,8 @@ function strokePrims(el: TableElement, T: TableStyleProps, map: Int32Array, byKe
   const V: (TableStroke | null)[][] = [];
   for (let b = 0; b <= C; b++) {
     const col: (TableStroke | null)[] = [];
-    for (let r = 0; r < R; r++) {
-      const left = owner(r, b - 1), right = owner(r, b);
+    for (let d = 0; d < N; d++) {
+      const left = owner(d, b - 1), right = owner(d, b);
       if (left !== -1 && left === right) { col.push(null); continue; }
       const ov = heaviest(cellOf(left)?.edges.right, cellOf(right)?.edges.left);
       const s = ov ?? vRule(b);
@@ -643,18 +978,19 @@ function strokePrims(el: TableElement, T: TableStyleProps, map: Int32Array, byKe
     }
     V.push(col);
   }
-  const vAt = (b: number, r: number) => (b >= 0 && b <= C && r >= 0 && r < R ? V[b][r]?.w ?? 0 : 0);
-  const hAt = (b: number, c: number) => (b >= 0 && b <= R && c >= 0 && c < C ? H[b][c]?.w ?? 0 : 0);
+  const vSeg = (b: number, d: number) => (b >= 0 && b <= C && d >= 0 && d < N ? V[b][d] : null);
+  const hSeg = (b: number, c: number) => (b >= 0 && b <= N && c >= 0 && c < C ? H[b][c] : null);
 
-  const paths = new Map<string, { s: TableStroke; d: string[] }>();
-  const add = (s: TableStroke, d: string) => {
-    const k = strokeKey(s);
-    const e = paths.get(k) ?? { s, d: [] };
+  const paths = new Map<string, { color: string; w: number; dash?: number[]; cap: 'butt' | 'round'; d: string[] }>();
+  const add = (s: TableStroke, w: number, d: string) => {
+    const dash = strokeDash(s);
+    const k = `${s.color}|${w}|${dash?.join(',') ?? ''}`;
+    const e = paths.get(k) ?? { color: s.color, w, dash, cap: ruleStyleOf(s) === 'dotted' ? 'round' as const : 'butt' as const, d: [] };
     e.d.push(d);
     paths.set(k, e);
   };
   const f = (v: number) => +v.toFixed(3);
-  for (let b = 0; b <= R; b++) {
+  for (let b = 0; b <= N; b++) {
     let c = 0;
     while (c < C) {
       const s = H[b][c];
@@ -662,26 +998,29 @@ function strokePrims(el: TableElement, T: TableStyleProps, map: Int32Array, byKe
       const k = strokeKey(s);
       let e = c + 1;
       while (e < C && H[b][e] && strokeKey(H[b][e]!) === k) e++;
-      const ext0 = Math.max(vAt(c, b - 1), vAt(c, b)) / 2, ext1 = Math.max(vAt(e, b - 1), vAt(e, b)) / 2;
-      add(s, `M${f(colX[c] - ext0)} ${f(rowY[b])}H${f(colX[e] + ext1)}`);
+      for (const sub of subLines(s)) {
+        const x0 = colX[c] + endAt(sub, 1, vSeg(c, b - 1), vSeg(c, b));
+        const x1 = colX[e] + endAt(sub, -1, vSeg(e, b - 1), vSeg(e, b));
+        add(s, sub.w, `M${f(x0)} ${f(rowY[b] + sub.o)}H${f(x1)}`);
+      }
       c = e;
     }
   }
   for (let b = 0; b <= C; b++) {
-    let r = 0;
-    while (r < R) {
-      const s = V[b][r];
-      if (!s) { r++; continue; }
+    let d = 0;
+    while (d < N) {
+      const s = V[b][d];
+      if (!s) { d++; continue; }
       const k = strokeKey(s);
-      let e = r + 1;
-      while (e < R && V[b][e] && strokeKey(V[b][e]!) === k) e++;
-      const ext0 = Math.max(hAt(r, b - 1), hAt(r, b)) / 2, ext1 = Math.max(hAt(e, b - 1), hAt(e, b)) / 2;
-      add(s, `M${f(colX[b])} ${f(rowY[r] - ext0)}V${f(rowY[e] + ext1)}`);
-      r = e;
+      let e = d + 1;
+      while (e < N && V[b][e] && strokeKey(V[b][e]!) === k) e++;
+      for (const sub of subLines(s)) {
+        const y0 = rowY[d] + endAt(sub, 1, hSeg(d, b - 1), hSeg(d, b));
+        const y1 = rowY[e] + endAt(sub, -1, hSeg(e, b - 1), hSeg(e, b));
+        add(s, sub.w, `M${f(colX[b] + sub.o)} ${f(y0)}V${f(y1)}`);
+      }
+      d = e;
     }
   }
-  return [...paths.values()].map(({ s, d }) => ({
-    t: 'path' as const, d: d.join(''), fill: null, stroke: s.color, strokeWidth: s.w,
-    dash: s.dash.length ? s.dash : undefined, cap: dotted(s) ? 'round' as const : 'butt' as const,
-  }));
+  return [...paths.values()].map((p) => ({ t: 'path' as const, d: p.d.join(''), fill: null, stroke: p.color, strokeWidth: p.w, dash: p.dash, cap: p.cap }));
 }

@@ -19,7 +19,7 @@ import { SurfaceGuides, CanonGuides, CoverGuides, JacketGuides, SpreadGridGuides
 import { Rulers, RULER } from './Rulers';
 import { TextStoryEditor } from './TextStoryEditor';
 import { SpacingOverlay } from './SpacingOverlay';
-import { TableOverlay, makeTableFromDrag, tableDoubleClick } from './TableTools';
+import { TableOverlay, makeTableFromDrag, tableDoubleClick, tableLinkClick } from './TableTools';
 import {
   type SurfaceDesc, type Pt, type PanelLayout, sceneMatrix, toLocal, corners, sceneBounds, hitElement, surfaceAt, snapTargets, snapAxis,
 } from './geometry';
@@ -265,6 +265,8 @@ export function Editor({ mode }: { mode: 'spreads' | 'cover' | 'jacket' }) {
     // Thread linking mode: click a text frame to continue the story there.
     if (linking) {
       const hit = pick(p);
+      const sfL = surfaceAt(surfaces, p, 0);
+      if (tableLinkClick(linking, hit?.el ?? null, sfL ? { key: sfL.key, kind: sfL.kind, side: sfL.side, x: p.x - sfL.x, y: p.y - sfL.y } : null)) { s.setLinking(null); return; }
       if (hit && hit.el.type === 'text' && hit.el.id !== linking) {
         const chain = threadOf(s.project, linking);
         if (chain.includes(hit.el.id)) s.notify('That frame is already in this thread.', 'error');

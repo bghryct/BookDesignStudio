@@ -82,7 +82,11 @@ export class SheetMesh {
   private readonly offSpine: number;
   private readonly offFore: number;
 
-  constructor(s: ArrayLike<number>, z: ArrayLike<number>, thickness: number, uvs: SheetUVs, init: (mid: Float64Array, sheet: SheetMesh) => void) {
+  /**
+   * `topGroup` (optional) picks the material group of the top-surface quad between samples i and
+   * i + 1 (default 0), so a panel of a sheet can carry its own material.
+   */
+  constructor(s: ArrayLike<number>, z: ArrayLike<number>, thickness: number, uvs: SheetUVs, init: (mid: Float64Array, sheet: SheetMesh) => void, private readonly topGroup?: (i: number) => number) {
     this.ns = s.length;
     this.nz = z.length;
     this.s = Float64Array.from(s);
@@ -195,6 +199,7 @@ export class SheetMesh {
     const { ns, nz, pos, nrm } = this;
     const groups: number[][] = [[], [], []];
     const tri = (g: number, a: number, b: number, c: number) => {
+      while (groups.length <= g) groups.push([]);
       const ax = pos[3 * a], ay = pos[3 * a + 1], az = pos[3 * a + 2];
       const ux = pos[3 * b] - ax, uy = pos[3 * b + 1] - ay, uz = pos[3 * b + 2] - az;
       const vx = pos[3 * c] - ax, vy = pos[3 * c + 1] - ay, vz = pos[3 * c + 2] - az;
@@ -208,7 +213,7 @@ export class SheetMesh {
     for (let j = 0; j < nz - 1; j++) {
       for (let i = 0; i < ns - 1; i++) {
         const v = (o: number, ii: number, jj: number) => o + jj * ns + ii;
-        quad(0, v(this.offTop, i, j), v(this.offTop, i + 1, j), v(this.offTop, i + 1, j + 1), v(this.offTop, i, j + 1));
+        quad(this.topGroup ? this.topGroup(i) : 0, v(this.offTop, i, j), v(this.offTop, i + 1, j), v(this.offTop, i + 1, j + 1), v(this.offTop, i, j + 1));
         quad(1, v(this.offBot, i, j), v(this.offBot, i + 1, j), v(this.offBot, i + 1, j + 1), v(this.offBot, i, j + 1));
       }
     }
@@ -225,11 +230,12 @@ export class SheetMesh {
       quad(2, o + 2 * j, o + 2 * j + 1, o + 2 * j + 3, o + 2 * j + 2);
     }
     let start = 0;
-    for (let g = 0; g < 3; g++) {
+    for (let g = 0; g < groups.length; g++) {
+      if (groups[g].length === 0) continue;
       this.geometry.addGroup(start, groups[g].length, g);
       start += groups[g].length;
     }
-    this.geometry.setIndex(groups[0].concat(groups[1], groups[2]));
+    this.geometry.setIndex(groups.flat());
   }
 
   dispose(): void {

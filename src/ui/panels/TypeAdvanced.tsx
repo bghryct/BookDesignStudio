@@ -208,6 +208,7 @@ export function ListSection({ st, set }: P) {
             <NumberField label="Level" value={l.level ?? 0} min={0} max={6} decimals={0} onChange={(v) => upd({ level: Math.round(v) })} />
           </Row>
           <Segmented value={l.align ?? (l.type === 'number' ? 'right' : 'left')} onChange={(v) => upd({ align: v })} options={[{ value: 'left', label: 'Marker flush left' }, { value: 'right', label: 'Aligned on the point' }]} />
+          {l.type === 'number' && <Toggle label="Multi-level numbers (2.1, 2.1.1)" checked={!!l.hierarchical} onChange={(v) => upd({ hierarchical: v })} hint="Nested items carry their parents' numbers" />}
           <ColorField label="Marker colour" value={l.color ?? st.color} onChange={(v) => upd({ color: v ?? undefined })} />
         </>
       )}
@@ -309,7 +310,8 @@ export function FootnoteSection({ st, set }: P) {
         <NumberField label="Size" unit="%" value={st.footnoteScale ?? 80} min={50} max={100} step={1} decimals={0} onChange={(v) => set((d) => { d.footnoteScale = v; })} />
       </Row>
       <Toggle label="Separator rule" checked={st.footnoteRule !== false} onChange={(v) => set((d) => { d.footnoteRule = v; })} />
-      <Hint>Write <code>{'{fn:the note}'}</code> where the reference goes. Notes are set at the foot of the column that holds the reference; a line whose note will not fit moves on with it.</Hint>
+      <TextInput label="Endnotes heading" value={st.endnoteHeading ?? 'Notes'} onChange={(v) => set((d) => { d.endnoteHeading = v; })} />
+      <Hint>Write <code>{'{fn:the note}'}</code> where the reference goes. Notes are set at the foot of the column that holds the reference; a line whose note will not fit moves on with it. <code>{'{en:…}'}</code> makes an endnote, collected at the end of the story.</Hint>
     </Section>
   );
 }

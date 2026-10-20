@@ -7,6 +7,8 @@
  *  • Tab / ⇧Tab walk the cells (Tab in the last cell adds a row), arrows move, ⇧arrows extend,
  *    Delete clears, ⌘C / ⌘X / ⌘V copy, cut and paste tab-separated data (from a spreadsheet).
  *  • The frame follows the table: it grows with the content, and dragging its edge scales the rows.
+ *  • Threads: the out-port at the frame's lower right continues the table in another (empty)
+ *    table frame, or in a new one wherever you click; the rows flow on, the head repeats.
  */
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { create } from 'zustand';
@@ -15,41 +17,67 @@ import { X, Bold, Italic, CaseSensitive, ChevronLeft, ChevronRight } from 'lucid
 import type { Element, Project } from '../../model/types';
 import type { TableElement, CellRange } from '../../model/table';
 import { anchorAt, anchorsOf, coverMap, expandRange, normRange, parseDelimited, rangeToTSV, fillCells, insertRows, rangeLabel, colLetter, tableFromMatrix } from '../../model/table';
-import { layoutTable, type TableLayout } from '../../render/table';
+import { layoutTable, tableHead, tableThreadOf, type TableLayout } from '../../render/table';
 import { contextForElement } from '../../render/compile';
 import { applyMatrix, invert, multiply, scale as scaleM, translate, type Matrix } from '../../render/primitives';
 import { useStore, type Tool } from '../../store/store';
 import { makeTable } from '../../model/factory';
-import { computeGrid } from '../../engine/grid';
+import { computeGrid, textBlock, type PageSide } from '../../engine/grid';
+import { findElement, surfaceElementsDraft, pageSide, spreadIndexOfPage } from '../../model/surfaces';
+import { insertPages } from '../../model/pageOps';
 import { sceneMatrix, type PanelLayout, type Pt, type SurfaceDesc } from './geometry';
+
+/* -------------------------------------------------------------------------- */
+/* Lookups                                                                     */
+/* -------------------------------------------------------------------------- */
+
+export function findTable(id: string): TableElement | null {
+  const el = findElement(useStore.getState().project, id)?.el;
+  return el && el.type === 'table' ? el : null;
+}
+
+/** The table holding the rows for a frame (the head of its thread). */
+export function findHead(id: string): TableElement | null {
+  const t = findTable(id);
+  return t ? tableHead(useStore.getState().project, t) : null;
+}
 
 /* -------------------------------------------------------------------------- */
 /* Cell selection state                                                         */
 /* -------------------------------------------------------------------------- */
 
 interface TableUi {
+  /** The frame being worked in. */
   tableId: string | null;
-  /** Selected slots (expanded to whole merges). */
+  /** The table that holds the rows (the head of the frame's thread). */
+  dataId: string | null;
+  /** Selected cells, in table rows / columns (expanded to whole merges). */
   sel: CellRange | null;
   /** Where shift-click / shift-arrow extends from. */
   anchor: { r: number; c: number } | null;
   /** Cell whose story is open in the cell editor. */
   editing: { r: number; c: number; initial?: string } | null;
-  setSel: (tableId: string, sel: CellRange | null, anchor?: { r: number; c: number } | null) => void;
-  edit: (tableId: string, r: number, c: number, initial?: string) => void;
+  setSel: (frameId: string, sel: CellRange | null, anchor?: { r: number; c: number } | null) => void;
+  edit: (frameId: string, r: number, c: number, initial?: string) => void;
+  /** Carry on in another frame of the same table. */
+  moveTo: (frameId: string) => void;
   stopEditing: () => void;
   clear: () => void;
 }
 
+const dataOf = (frameId: string) => findHead(frameId)?.id ?? frameId;
+
 export const useTableUi = create<TableUi>((set) => ({
   tableId: null,
+  dataId: null,
   sel: null,
   anchor: null,
   editing: null,
-  setSel: (tableId, sel, anchor) => set((s) => ({ tableId, sel, anchor: anchor === undefined ? s.anchor : anchor, editing: null })),
-  edit: (tableId, r, c, initial) => set({ tableId, sel: { r0: r, c0: c, r1: r, c1: c }, anchor: { r, c }, editing: { r, c, initial } }),
+  setSel: (frameId, sel, anchor) => set((s) => ({ tableId: frameId, dataId: dataOf(frameId), sel, anchor: anchor === undefined ? s.anchor : anchor, editing: null })),
+  edit: (frameId, r, c, initial) => set({ tableId: frameId, dataId: dataOf(frameId), sel: { r0: r, c0: c, r1: r, c1: c }, anchor: { r, c }, editing: { r, c, initial } }),
+  moveTo: (frameId) => set({ tableId: frameId }),
   stopEditing: () => set({ editing: null }),
-  clear: () => set({ tableId: null, sel: null, anchor: null, editing: null }),
+  clear: () => set({ tableId: null, dataId: null, sel: null, anchor: null, editing: null }),
 }));
 
 /** Select the cell covering slot (r, c), expanded to its merge. */
@@ -58,9 +86,10 @@ function cellRange(t: TableElement, r: number, c: number): CellRange {
   return a ? { r0: a.r, c0: a.c, r1: a.r + a.rs - 1, c1: a.c + a.cs - 1 } : { r0: r, c0: c, r1: r, c1: c };
 }
 
+/** The selected cells of a table (pass the table that holds the rows). */
 export function selectedTableRange(t: TableElement): CellRange | null {
   const ui = useTableUi.getState();
-  if (ui.tableId !== t.id || !ui.sel) return null;
+  if (ui.dataId !== t.id || !ui.sel || !t.rows.length || !t.cols.length) return null;
   const R = t.rows.length - 1, C = t.cols.length - 1;
   const g = { r0: Math.min(ui.sel.r0, R), c0: Math.min(ui.sel.c0, C), r1: Math.min(ui.sel.r1, R), c1: Math.min(ui.sel.c1, C) };
   return expandRange(t, g);
@@ -75,22 +104,24 @@ function layoutOf(project: Project, el: TableElement): TableLayout {
   return layoutTable(el, { project, pageIndex: ctx?.pageIndex ?? null });
 }
 
-/** The table slot under a table-local point. */
+/** The table cell (row / column) under a frame-local point. */
 function slotAt(L: TableLayout, p: Pt): { r: number; c: number } | null {
-  if (p.x < 0 || p.y < 0 || p.x > L.width || p.y > L.height) return null;
-  let c = 0, r = 0;
+  if (!L.rowMap.length || p.x < 0 || p.y < 0 || p.x > L.width || p.y > L.height) return null;
+  let c = 0, d = 0;
   while (c < L.colX.length - 2 && p.x > L.colX[c + 1]) c++;
-  while (r < L.rowY.length - 2 && p.y > L.rowY[r + 1]) r++;
-  return { r, c };
+  while (d < L.rowY.length - 2 && p.y > L.rowY[d + 1]) d++;
+  return { r: L.rowMap[d], c };
 }
 
-/** A resizable border under the point: interior column borders, and row bottoms (not the table's foot). */
-function borderAt(L: TableLayout, p: Pt, tol: number): { axis: 'col' | 'row'; index: number } | null {
+/** A resizable border under the point: interior column borders, and the foot of a shown row. */
+function borderAt(L: TableLayout, p: Pt, tol: number): { axis: 'col'; index: number } | { axis: 'row'; row: number } | null {
   if (p.y >= -tol && p.y <= L.height + tol) {
     for (let b = 1; b < L.colX.length - 1; b++) if (Math.abs(p.x - L.colX[b]) <= tol) return { axis: 'col', index: b };
   }
   if (p.x >= -tol && p.x <= L.width + tol) {
-    for (let b = 1; b < L.rowY.length - 1; b++) if (Math.abs(p.y - L.rowY[b]) <= tol) return { axis: 'row', index: b };
+    for (let b = 1; b < L.rowY.length - 1; b++) {
+      if (Math.abs(p.y - L.rowY[b]) <= tol && L.rowPiece[b - 1] < 0) return { axis: 'row', row: L.rowMap[b - 1] };
+    }
   }
   return null;
 }
@@ -106,6 +137,8 @@ function setColumnWidths(t: Draft<TableElement>, widths: number[], changed: numb
     else if (changed.includes(c) || (!hasFr && t.fitWidth)) { col.mode = 'fixed'; col.w = w; }
   });
 }
+
+const hasContent = (t: TableElement) => t.rows.length > 0 && t.cells.some((row) => row.some((c) => c.text.trim()));
 
 /* -------------------------------------------------------------------------- */
 /* Creation                                                                    */
@@ -138,17 +171,125 @@ export function tableFromText(text: string, at: { x: number; y: number }, name =
   return makeTable({ ...m, name, x: at.x - w / 2, y: at.y - h / 2, w, h });
 }
 
-/** Double-click on a table: edit the cell under the point (table-local coordinates). */
+/** Double-click on a table: edit the cell under the point (frame-local coordinates). */
 export function tableDoubleClick(el: Element, local: Pt) {
   if (el.type !== 'table') return;
   const project = useStore.getState().project;
   const L = layoutOf(project, el);
   const slot = slotAt(L, local);
   if (!slot) return;
-  const a = anchorAt(el, slot.r, slot.c);
+  const a = anchorAt(tableHead(project, el), slot.r, slot.c);
   if (!a) return;
   useStore.getState().select([el.id]);
   useTableUi.getState().edit(el.id, a.r, a.c);
+}
+
+/* -------------------------------------------------------------------------- */
+/* Threads                                                                     */
+/* -------------------------------------------------------------------------- */
+
+/** An empty table frame that a table runs on into. */
+function makeContinuation(head: TableElement, box: { x: number; y: number; w: number; h: number }): TableElement {
+  return makeTable({
+    name: `${head.name} (continued)`, ...box, rows: [], cols: [], cells: [], headerRows: 0, footerRows: 0,
+    tableStyle: null, autoHeight: false, fitWidth: head.fitWidth,
+  });
+}
+
+type DraftTable = Draft<TableElement>;
+const draftTable = (d: Draft<Project>, id: string): DraftTable | null => {
+  const loc = findElement(d as Project, id);
+  if (!loc || loc.el.type !== 'table') return null;
+  return surfaceElementsDraft(d as Project, loc.key)![loc.index] as DraftTable;
+};
+
+/** Frames of a thread stop at the foot of their page's text block; the head stops following its rows. */
+function settleThread(d: Draft<Project>, ids: string[]) {
+  const p = d as Project;
+  ids.forEach((id, i) => {
+    const t = draftTable(d, id);
+    const loc = findElement(p, id);
+    if (!t || !loc) return;
+    if (i === 0) t.autoHeight = false;
+    if (loc.pageIndex == null) return;
+    const blk = textBlock(p.book, pageSide(p, loc.pageIndex));
+    const foot = blk.y + blk.h;
+    if (t.y + t.h > foot + 0.5 && foot - t.y > 24) t.h = +(foot - t.y).toFixed(2);
+  });
+}
+
+/** Continue `fromId`'s table in the frame `toId` (inserted after it in the thread). */
+function linkFrames(d: Draft<Project>, fromId: string, toId: string) {
+  const from = draftTable(d, fromId), to = draftTable(d, toId);
+  if (!from || !to) return;
+  to.flowNext = from.flowNext ?? null;
+  from.flowNext = toId;
+}
+
+/**
+ * A click while threading a table (Editor linking mode). Returns false when the frame being
+ * threaded is not a table, so text threading handles the click.
+ */
+export function tableLinkClick(linkingId: string, hit: Element | null, at: { key: string; kind: string; side: PageSide; x: number; y: number } | null): boolean {
+  const from = findTable(linkingId);
+  if (!from) return false;
+  const s = useStore.getState();
+  const project = s.project;
+  const th = tableThreadOf(project, from.id);
+  const head = th?.head ?? from;
+  if (hit) {
+    if (hit.type !== 'table') { s.notify('A table continues only in a table frame — click an empty table frame, or an empty spot to make one.', 'error'); return true; }
+    if (th?.frames.some((f) => f.el.id === hit.id) || hit.id === from.id) { s.notify('That frame is already part of this table.', 'error'); return true; }
+    const other = tableThreadOf(project, hit.id);
+    if (hasContent(hit) || (other && other.frames.length > 1)) { s.notify('That table has rows of its own — continue into an empty table frame, or click an empty spot to make one.', 'error'); return true; }
+    s.update((d) => { linkFrames(d, from.id, hit.id); settleThread(d, [...(th?.frames.map((f) => f.el.id) ?? [from.id]), hit.id]); });
+    s.notify('The table continues in that frame: rows flow on and the head repeats.');
+    return true;
+  }
+  if (!at) return true;
+  const L = layoutOf(project, head);
+  let h = 200;
+  if (at.kind === 'page' || at.kind === 'master') {
+    const blk = textBlock(project.book, at.side);
+    h = Math.max(60, blk.y + blk.h - at.y);
+  }
+  const frame = makeContinuation(head, { x: at.x, y: at.y, w: L.width || head.w, h });
+  s.update((d) => {
+    surfaceElementsDraft(d as Project, at.key)?.push(frame as Draft<Element>);
+    linkFrames(d, from.id, frame.id);
+    settleThread(d, [...(th?.frames.map((f) => f.el.id) ?? [from.id]), frame.id]);
+  });
+  s.notify('New frame made — the table continues there.');
+  return true;
+}
+
+/** Panel action: continue the table in a new frame at the head of the text block on the next page. */
+export function continueTableOnNextPage(frameId: string) {
+  const s = useStore.getState();
+  const project = s.project;
+  const t = findTable(frameId);
+  const th = t ? tableThreadOf(project, t.id) : null;
+  if (!t || !th) { s.notify('Place the table on a page first.', 'error'); return; }
+  const last = th.frames[th.frames.length - 1];
+  if (last.pageIndex == null) { s.notify('A table on the cover cannot run on to a page.', 'error'); return; }
+  const next = last.pageIndex + 1;
+  if (next >= project.pages.length) insertPages(project.pages.length - 1, 2, project.pages[last.pageIndex].masterId);
+  const p2 = useStore.getState().project;
+  const blk = textBlock(p2.book, pageSide(p2, next));
+  const L = layoutOf(p2, th.head);
+  const frame = makeContinuation(th.head, { x: blk.x, y: blk.y, w: L.width || th.head.w, h: blk.h });
+  const nextId = p2.pages[next].id;
+  s.update((d) => {
+    d.pages.find((pg) => pg.id === nextId)?.elements.push(frame as Draft<Element>);
+    linkFrames(d, last.el.id, frame.id);
+    settleThread(d, [...th.frames.map((f) => f.el.id), frame.id]);
+  });
+  s.notify(`The table continues on page ${next + 1}.`);
+}
+
+/** Break the thread after this frame (the frames after it keep nothing). */
+export function unthreadTable(frameId: string) {
+  useStore.getState().updateElement(frameId, (d) => { (d as DraftTable).flowNext = null; });
 }
 
 /* -------------------------------------------------------------------------- */
@@ -159,30 +300,35 @@ interface Seen { w: number; h: number; natH: number; natW: number }
 const seen = new Map<string, Seen>();
 
 /** Keep the frame on the table: content changes resize the frame, frame drags scale rows / columns. */
-function autoFit(el: TableElement, L: TableLayout): ((d: Draft<Element>) => void) | null {
+function autoFit(el: TableElement, L: TableLayout, threaded: boolean, head: boolean): ((d: Draft<Element>) => void) | null {
   const prev = seen.get(el.id);
   const hug = !el.fitWidth && !L.hasFr;
   let fn: ((d: Draft<TableElement>) => void) | null = null;
   const chain = (f: (d: Draft<TableElement>) => void) => { const g = fn; fn = (d) => { g?.(d); f(d); }; };
 
-  if (hug && Math.abs(el.w - L.width) > 0.05) {
-    if (prev && Math.abs(prev.w - el.w) > 0.05 && Math.abs(prev.natW - L.width) < 0.05 && L.width > 0) {
-      const k = el.w / L.width;
-      chain((d) => { d.cols.forEach((col, c) => { col.mode = 'fixed'; col.w = +(L.colW[c] * k).toFixed(2); }); });
-    } else chain((d) => { d.w = +L.width.toFixed(3); });
-  }
-  if (el.autoHeight && Math.abs(el.h - L.height) > 0.05) {
-    if (!el.fillHeight && prev && Math.abs(prev.h - el.h) > 0.05 && Math.abs(prev.natH - L.naturalHeight) < 0.05 && L.naturalHeight > 0) {
-      const k = el.h / L.naturalHeight;
-      chain((d) => {
-        d.rows.forEach((row, r) => {
-          const h = +(L.rowH[r] * k).toFixed(2);
-          if (row.mode === 'fixed') row.h = h;
-          else if (h <= L.contentMin[r] + 0.05) { row.mode = 'auto'; row.h = 0; }
-          else { row.mode = 'min'; row.h = h; }
+  if (threaded && !head) {
+    // A continuation frame is as wide as its table; its height is the frame's own.
+    if (L.rowMap.length && Math.abs(el.w - L.width) > 0.05) chain((d) => { d.w = +L.width.toFixed(3); });
+  } else {
+    if (hug && Math.abs(el.w - L.width) > 0.05) {
+      if (prev && Math.abs(prev.w - el.w) > 0.05 && Math.abs(prev.natW - L.width) < 0.05 && L.width > 0) {
+        const k = el.w / L.width;
+        chain((d) => { d.cols.forEach((col, c) => { col.mode = 'fixed'; col.w = +(L.colW[c] * k).toFixed(2); }); });
+      } else chain((d) => { d.w = +L.width.toFixed(3); });
+    }
+    if (!threaded && el.autoHeight && Math.abs(el.h - L.height) > 0.05) {
+      if (!el.fillHeight && prev && Math.abs(prev.h - el.h) > 0.05 && Math.abs(prev.natH - L.naturalHeight) < 0.05 && L.naturalHeight > 0) {
+        const k = el.h / L.naturalHeight;
+        chain((d) => {
+          d.rows.forEach((row, r) => {
+            const h = +(L.rowH[r] * k).toFixed(2);
+            if (row.mode === 'fixed') row.h = h;
+            else if (h <= L.contentMin[r] + 0.05) { row.mode = 'auto'; row.h = 0; }
+            else { row.mode = 'min'; row.h = h; }
+          });
         });
-      });
-    } else chain((d) => { d.h = +L.height.toFixed(3); });
+      } else chain((d) => { d.h = +L.height.toFixed(3); });
+    }
   }
   seen.set(el.id, { w: el.w, h: el.h, natH: L.naturalHeight, natW: L.width });
   const f = fn as ((d: Draft<TableElement>) => void) | null;
@@ -206,7 +352,7 @@ interface OverlayProps {
 
 type Drag =
   | { k: 'col'; index: number; start: Pt; widths: number[] }
-  | { k: 'row'; index: number; start: Pt; h0: number; min: number; fixed: boolean }
+  | { k: 'row'; row: number; start: Pt; h0: number; min: number; fixed: boolean }
   | { k: 'range'; from: { r: number; c: number } };
 
 const HANDLE_POS: [number, number][] = [[0, 0], [0.5, 0], [1, 0], [1, 0.5], [1, 1], [0.5, 1], [0, 1], [0, 0.5]];
@@ -222,6 +368,8 @@ export function TableOverlay({ items, selection, tool, zoom, pan, size, calc, pr
   const tables = useMemo(() => items.filter((x) => x.el.type === 'table' && !x.el.hidden) as { el: TableElement; surface: SurfaceDesc }[], [items]);
   const single = selection.length === 1 ? tables.find((x) => x.el.id === selection[0]) ?? null : null;
   const active = single && tool === 'select' && !single.el.locked ? single : null;
+  const head = active ? tableHead(project, active.el) : null;
+  const thread = active ? tableThreadOf(project, active.el.id) : null;
 
   // Leaving the table (selection change) leaves cell mode.
   useEffect(() => {
@@ -246,10 +394,30 @@ export function TableOverlay({ items, selection, tool, zoom, pan, size, calc, pr
       if (el.locked) continue;
       const L = layouts.get(el.id);
       if (!L) continue;
-      const fn = autoFit(el, L);
+      const th = tableThreadOf(project, el.id);
+      const threaded = !!th && th.frames.length > 1;
+      const fn = autoFit(el, L, threaded, !threaded || th!.index === 0);
       if (fn) useStore.getState().updateElement(el.id, fn, { history: false });
     }
-  }, [tables, layouts, tick]);
+  }, [tables, layouts, tick]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // The cell being edited or picked lives in another frame of the thread: follow it there.
+  useEffect(() => {
+    if (!active || !thread || thread.frames.length < 2 || ui.tableId !== active.el.id) return;
+    const cell = ui.editing ?? ui.anchor;
+    if (!cell) return;
+    const shows = (L: TableLayout) => L.cells.some((b) => !b.ghost && b.r === cell.r && b.c === cell.c);
+    if (shows(layouts.get(active.el.id) ?? layoutOf(project, active.el))) return;
+    const target = thread.frames.find((f) => shows(layoutTable(f.el, { project, pageIndex: f.pageIndex })));
+    if (!target || target.el.id === active.el.id) return;
+    const s = useStore.getState();
+    if (target.pageIndex != null && !s.masterEdit) {
+      const sp = spreadIndexOfPage(project, target.pageIndex);
+      if (sp !== s.spread) s.setSpread(sp);
+    }
+    s.select([target.el.id]);
+    useTableUi.getState().moveTo(target.el.id);
+  }, [ui.editing, ui.anchor, active?.el.id, layouts]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /* ---------------------------------------------------------------- keyboard */
   useEffect(() => {
@@ -259,40 +427,39 @@ export function TableOverlay({ items, selection, tool, zoom, pan, size, calc, pr
     const onKey = (e: KeyboardEvent) => {
       const st = useTableUi.getState();
       if (isField(e.target) || st.editing) return;
+      const t = findHead(el.id) ?? el;
+      if (!t.rows.length) return;
       // Enter on a selected table steps into its first cell.
       if ((st.tableId !== el.id || !st.sel) && e.key === 'Enter' && !e.metaKey && !e.ctrlKey && useStore.getState().selection.join() === el.id) {
         e.preventDefault(); e.stopPropagation();
-        const t0 = findTable(el.id) ?? el;
-        st.setSel(el.id, cellRange(t0, 0, 0), { r: 0, c: 0 });
+        const L = layoutOf(useStore.getState().project, findTable(el.id) ?? el);
+        const r0 = L.rowMap.find((_, d) => L.rowPiece[d] < 0) ?? 0;
+        st.setSel(el.id, cellRange(t, r0, 0), { r: r0, c: 0 });
         return;
       }
       if (st.tableId !== el.id || !st.sel) return;
-      const t = findTable(el.id) ?? el;
       const g = selectedTableRange(t)!;
+      if (!g) return;
       const mod = e.metaKey || e.ctrlKey;
       const s = useStore.getState();
       const stop = () => { e.preventDefault(); e.stopPropagation(); };
       const focus = st.anchor ?? { r: g.r0, c: g.c0 };
+      const clearCells = () => s.updateElement(t.id, (d) => { const tt = d as DraftTable; for (let r = g.r0; r <= g.r1; r++) for (let c = g.c0; c <= g.c1; c++) tt.cells[r][c].text = ''; });
       if (e.key === 'Escape') { stop(); st.clear(); return; }
       if (e.key === 'Enter' || e.key === 'F2') { stop(); st.edit(el.id, g.r0, g.c0); return; }
-      if (e.key === 'Delete' || e.key === 'Backspace') {
-        stop();
-        s.updateElement(el.id, (d) => { const tt = d as Draft<TableElement>; for (let r = g.r0; r <= g.r1; r++) for (let c = g.c0; c <= g.c1; c++) tt.cells[r][c].text = ''; });
-        return;
-      }
+      if (e.key === 'Delete' || e.key === 'Backspace') { stop(); clearCells(); return; }
       if (e.key === 'Tab') {
         stop();
         const order = anchorsOf(t).sort((a, b) => a.r - b.r || a.c - b.c);
         const i = order.findIndex((a) => a.r === g.r0 && a.c === g.c0);
-        let j = i + (e.shiftKey ? -1 : 1);
+        const j = i + (e.shiftKey ? -1 : 1);
         if (j >= order.length) {
           // Tab in the last cell adds a row, like InDesign.
-          s.updateElement(el.id, (d) => insertRows(d as Draft<TableElement> as TableElement, t.rows.length, 1));
-          st.setSel(el.id, cellRange(findTable(el.id) ?? t, t.rows.length, 0), { r: t.rows.length, c: 0 });
+          s.updateElement(t.id, (d) => insertRows(d as unknown as TableElement, t.rows.length, 1));
+          st.setSel(el.id, cellRange(findTable(t.id) ?? t, t.rows.length, 0), { r: t.rows.length, c: 0 });
           return;
         }
-        j = Math.max(0, j);
-        const a = order[j];
+        const a = order[Math.max(0, j)];
         st.setSel(el.id, cellRange(t, a.r, a.c), { r: a.r, c: a.c });
         return;
       }
@@ -321,7 +488,7 @@ export function TableOverlay({ items, selection, tool, zoom, pan, size, calc, pr
       if (mod && (e.key.toLowerCase() === 'c' || e.key.toLowerCase() === 'x')) {
         stop();
         void navigator.clipboard?.writeText(rangeToTSV(t, g)).catch(() => undefined);
-        if (e.key.toLowerCase() === 'x') s.updateElement(el.id, (d) => { const tt = d as Draft<TableElement>; for (let r = g.r0; r <= g.r1; r++) for (let c = g.c0; c <= g.c1; c++) tt.cells[r][c].text = ''; });
+        if (e.key.toLowerCase() === 'x') clearCells();
         else s.notify(`Copied ${rangeLabel(g)} as tab-separated text.`);
         return;
       }
@@ -336,11 +503,12 @@ export function TableOverlay({ items, selection, tool, zoom, pan, size, calc, pr
       const text = e.clipboardData?.getData('text/plain');
       if (!text) return;
       e.preventDefault();
-      const t = findTable(el.id) ?? el;
-      const g = selectedTableRange(t)!;
+      const t = findHead(el.id) ?? el;
+      const g = selectedTableRange(t);
+      if (!g) return;
       const data = parseDelimited(text);
       let filled: CellRange | null = null;
-      useStore.getState().updateElement(el.id, (d) => { filled = fillCells(d as Draft<TableElement> as TableElement, data, { r: g.r0, c: g.c0 }); });
+      useStore.getState().updateElement(t.id, (d) => { filled = fillCells(d as unknown as TableElement, data, { r: g.r0, c: g.c0 }); });
       if (filled) st.setSel(el.id, filled, { r: g.r0, c: g.c0 });
     };
     window.addEventListener('keydown', onKey, true);
@@ -361,7 +529,7 @@ export function TableOverlay({ items, selection, tool, zoom, pan, size, calc, pr
   };
 
   const activeL = active ? layouts.get(active.el.id) ?? null : null;
-  const sel = active && activeL && ui.tableId === active.el.id ? selectedTableRange(active.el) : null;
+  const sel = active && head && activeL && ui.tableId === active.el.id ? selectedTableRange(head) : null;
 
   const nearHandle = (el: TableElement, p: Pt) => {
     const tol = 7 / zoom;
@@ -369,7 +537,7 @@ export function TableOverlay({ items, selection, tool, zoom, pan, size, calc, pr
   };
 
   const onPointerDown = (e: React.PointerEvent) => {
-    if (!active || !activeL || e.button !== 0) return;
+    if (!active || !activeL || !head || e.button !== 0 || !head.rows.length) return;
     const el = active.el;
     const p = localOf(e, el, active.surface);
     if (nearHandle(el, p)) return;
@@ -381,10 +549,7 @@ export function TableOverlay({ items, selection, tool, zoom, pan, size, calc, pr
       s.checkpoint();
       (e.currentTarget as SVGElement).setPointerCapture(e.pointerId);
       if (b.axis === 'col') drag.current = { k: 'col', index: b.index, start: p, widths: [...activeL.colW] };
-      else {
-        const r = b.index - 1;
-        drag.current = { k: 'row', index: r, start: p, h0: activeL.rowH[r], min: activeL.contentMin[r], fixed: el.rows[r].mode === 'fixed' };
-      }
+      else drag.current = { k: 'row', row: b.row, start: p, h0: activeL.rowH[b.row], min: activeL.contentMin[b.row], fixed: head.rows[b.row].mode === 'fixed' };
       return;
     }
     const slot = slotAt(activeL, p);
@@ -395,8 +560,8 @@ export function TableOverlay({ items, selection, tool, zoom, pan, size, calc, pr
     if (st.tableId === el.id && st.sel) {
       e.stopPropagation();
       (e.currentTarget as SVGElement).setPointerCapture(e.pointerId);
-      if (e.shiftKey && st.anchor) st.setSel(el.id, expandRange(el, normRange(st.anchor, slot)));
-      else st.setSel(el.id, cellRange(el, slot.r, slot.c), slot);
+      if (e.shiftKey && st.anchor) st.setSel(el.id, expandRange(head, normRange(st.anchor, slot)));
+      else st.setSel(el.id, cellRange(head, slot.r, slot.c), slot);
       drag.current = { k: 'range', from: e.shiftKey && st.anchor ? st.anchor : slot };
       return;
     }
@@ -404,7 +569,7 @@ export function TableOverlay({ items, selection, tool, zoom, pan, size, calc, pr
     const x0 = e.clientX, y0 = e.clientY;
     const up = (ev: PointerEvent) => {
       if (Math.hypot(ev.clientX - x0, ev.clientY - y0) > 3) return;
-      const cur = findTable(el.id);
+      const cur = findHead(el.id);
       if (!cur || useStore.getState().selection.join() !== el.id) return;
       useTableUi.getState().setSel(el.id, cellRange(cur, slot.r, slot.c), slot);
     };
@@ -412,7 +577,7 @@ export function TableOverlay({ items, selection, tool, zoom, pan, size, calc, pr
   };
 
   const onPointerMove = (e: React.PointerEvent) => {
-    if (!active || !activeL) return;
+    if (!active || !activeL || !head) return;
     const el = active.el;
     const p = localOf(e, el, active.surface);
     const d = drag.current;
@@ -431,18 +596,18 @@ export function TableOverlay({ items, selection, tool, zoom, pan, size, calc, pr
       const wi = Math.max(6, Math.min(total - 6, d.widths[i] + dx));
       const widths = [...d.widths];
       widths[i] = wi; widths[j] = total - wi;
-      s.updateElement(el.id, (dr) => setColumnWidths(dr as Draft<TableElement>, widths, [i, j]), { history: false });
+      s.updateElement(head.id, (dr) => setColumnWidths(dr as DraftTable, widths, [i, j]), { history: false });
     } else if (d.k === 'row') {
       const h = Math.max(d.fixed || e.shiftKey ? 2 : d.min, d.h0 + (p.y - d.start.y));
-      s.updateElement(el.id, (dr) => {
-        const row = (dr as Draft<TableElement>).rows[d.index];
+      s.updateElement(head.id, (dr) => {
+        const row = (dr as DraftTable).rows[d.row];
         if (d.fixed || e.shiftKey) { row.mode = 'fixed'; row.h = +h.toFixed(2); }
         else if (h <= d.min + 0.05) { row.mode = 'auto'; row.h = 0; }
         else { row.mode = 'min'; row.h = +h.toFixed(2); }
       }, { history: false });
     } else if (d.k === 'range') {
-      const slot = slotAt(activeL, { x: Math.max(0, Math.min(activeL.width, p.x)), y: Math.max(0, Math.min(activeL.height, p.y)) });
-      if (slot) useTableUi.getState().setSel(el.id, expandRange(el, normRange(d.from, slot)), d.from);
+      const slot = slotAt(activeL, { x: Math.max(0, Math.min(activeL.width, p.x)), y: Math.max(0, Math.min(activeL.height - 0.01, p.y)) });
+      if (slot) useTableUi.getState().setSel(el.id, expandRange(head, normRange(d.from, slot)), d.from);
     }
   };
 
@@ -459,12 +624,14 @@ export function TableOverlay({ items, selection, tool, zoom, pan, size, calc, pr
     const L = layouts.get(el.id);
     if (!L) continue;
     const m = screenM(el, surface);
+    // An empty table frame (a continuation not threaded to anything) shows on screen only.
+    if (!L.rowMap.length) markers.push(<polygon key={`e${el.id}`} points={poly(m, 0, 0, el.w, el.h)} fill="none" stroke="#9a8f7e" strokeWidth={1} strokeDasharray="5 4" />);
     for (const b of L.cells) {
       if (!b.overflow) continue;
       const q = sp(m, b.x + b.w, b.y + b.h);
       markers.push(<circle key={`o${el.id}${b.r}-${b.c}`} cx={q.x - 5} cy={q.y - 5} r={3} fill="#e5483a" stroke="#fff" strokeWidth={0.8}><title>Overset text in this cell</title></circle>);
     }
-    if (L.overset) {
+    if (L.overset && !(active && active.el.id === el.id)) {
       const q = sp(m, el.w, el.h);
       markers.push(
         <g key={`ov${el.id}`}>
@@ -475,35 +642,55 @@ export function TableOverlay({ items, selection, tool, zoom, pan, size, calc, pr
     }
   }
 
+  // Thread lines between the frames of the selected table that are on screen.
+  const threadLines: React.ReactNode[] = [];
+  if (thread && thread.frames.length > 1) {
+    for (let i = 0; i + 1 < thread.frames.length; i++) {
+      const a = tables.find((x) => x.el.id === thread.frames[i].el.id), b = tables.find((x) => x.el.id === thread.frames[i + 1].el.id);
+      if (!a || !b) continue;
+      const p0 = sp(screenM(a.el, a.surface), a.el.w, a.el.h), p1 = sp(screenM(b.el, b.surface), 0, 0);
+      threadLines.push(<path key={`th${i}`} d={`M${p0.x} ${p0.y} C${p0.x + 50} ${p0.y} ${p1.x - 50} ${p1.y} ${p1.x} ${p1.y}`} fill="none" stroke="#5aa9e6" strokeWidth={1.2} strokeDasharray="4 3" />);
+    }
+  }
+
   let editorNode: React.ReactNode = null;
-  if (active && activeL && ui.editing && ui.tableId === active.el.id) {
-    const box = activeL.cells.find((b) => b.r === ui.editing!.r && b.c === ui.editing!.c);
+  if (active && activeL && head && ui.editing && ui.tableId === active.el.id) {
+    const box = activeL.cells.find((b) => !b.ghost && b.r === ui.editing!.r && b.c === ui.editing!.c);
     if (box) {
       const m = screenM(active.el, active.surface);
       const pts = [sp(m, box.x, box.y), sp(m, box.x + box.w, box.y), sp(m, box.x + box.w, box.y + box.h), sp(m, box.x, box.y + box.h)];
       const xs = pts.map((q) => q.x), ys = pts.map((q) => q.y);
       const rect = { x: Math.min(...xs), y: Math.min(...ys), w: Math.max(...xs) - Math.min(...xs), h: Math.max(...ys) - Math.min(...ys) };
-      editorNode = <CellEditor key={`${active.el.id}:${ui.editing.r}:${ui.editing.c}`} el={active.el} r={ui.editing.r} c={ui.editing.c} initial={ui.editing.initial} rect={rect} viewport={size} />;
+      editorNode = <CellEditor key={`${head.id}:${ui.editing.r}:${ui.editing.c}`} el={head} frameId={active.el.id} r={ui.editing.r} c={ui.editing.c} initial={ui.editing.initial} rect={rect} viewport={size} />;
     }
   }
+
+  const startLinking = (e: React.PointerEvent) => {
+    if (!active) return;
+    e.stopPropagation();
+    e.preventDefault();
+    const s = useStore.getState();
+    s.setLinking(active.el.id);
+    s.notify('Click an empty table frame, or an empty spot on any page, to continue the table there (Esc cancels).');
+  };
 
   return (
     <>
       <svg ref={svgRef} width={size.w} height={size.h} className="absolute inset-0 select-none" style={{ pointerEvents: 'none' }}>
-        {active && activeL && (() => {
+        {threadLines}
+        {active && activeL && head && (() => {
           const el = active.el;
           const m = screenM(el, active.surface);
           const grid: string[] = [];
           for (const b of activeL.cells) grid.push(`M${poly(m, b.x, b.y, b.w, b.h).split(' ').join('L')}Z`);
-          const selBox = sel && (() => {
-            const x0 = activeL.colX[sel.c0], x1 = activeL.colX[Math.min(sel.c1 + 1, activeL.colX.length - 1)];
-            const y0 = activeL.rowY[Math.min(sel.r0, activeL.rowY.length - 1)], y1 = activeL.rowY[Math.min(sel.r1 + 1, activeL.rowY.length - 1)];
-            return poly(m, x0, y0, x1 - x0, y1 - y0);
-          })();
+          const inSel = (b: { r: number; c: number }) => !!sel && b.r >= sel.r0 && b.r <= sel.r1 && b.c >= sel.c0 && b.c <= sel.c1;
+          const br = sp(m, el.w, el.h), tl = sp(m, 0, 0);
+          const out = { x: br.x + 9, y: br.y - 9 }, inp = { x: tl.x - 9, y: tl.y + 9 };
+          const idx = thread?.index ?? 0, n = thread?.frames.length ?? 1;
           return (
             <g>
               <path d={grid.join('')} fill="none" stroke="#4aa3ff" strokeOpacity={0.45} strokeWidth={0.75} strokeDasharray="3 3" />
-              {selBox && <polygon points={selBox} fill="rgba(74,163,255,0.16)" stroke="#4aa3ff" strokeWidth={1.5} />}
+              {activeL.cells.filter(inSel).map((b) => <polygon key={`s${b.r}-${b.c}`} points={poly(m, b.x, b.y, b.w, b.h)} fill="rgba(74,163,255,0.16)" stroke="#4aa3ff" strokeWidth={1.25} />)}
               {sel && el.rotation === 0 && (
                 <g style={{ fontFamily: 'ui-monospace, monospace' }} fontSize={9.5}>
                   {activeL.colW.map((w, c) => {
@@ -511,10 +698,11 @@ export function TableOverlay({ items, selection, tool, zoom, pan, size, calc, pr
                     const on = c >= sel.c0 && c <= sel.c1;
                     return <text key={`cl${c}`} x={q.x} y={q.y - 6} textAnchor="middle" fill={on ? '#4aa3ff' : 'rgba(150,170,200,0.75)'}>{colLetter(c)}</text>;
                   })}
-                  {activeL.rowY.slice(0, -1).map((y, r) => {
-                    const q = sp(m, 0, (y + activeL.rowY[r + 1]) / 2);
+                  {activeL.rowY.slice(0, -1).map((y, d) => {
+                    const q = sp(m, 0, (y + activeL.rowY[d + 1]) / 2);
+                    const r = activeL.rowMap[d];
                     const on = r >= sel.r0 && r <= sel.r1;
-                    return <text key={`rl${r}`} x={q.x - 6} y={q.y + 3.5} textAnchor="end" fill={on ? '#4aa3ff' : 'rgba(150,170,200,0.75)'}>{r + 1}</text>;
+                    return <text key={`rl${d}`} x={q.x - 6} y={q.y + 3.5} textAnchor="end" fill={on ? '#4aa3ff' : 'rgba(150,170,200,0.75)'}>{r + 1}{activeL.rowPiece[d] > 0 ? '…' : ''}</text>;
                   })}
                 </g>
               )}
@@ -527,6 +715,19 @@ export function TableOverlay({ items, selection, tool, zoom, pan, size, calc, pr
                 onPointerUp={onPointerUp}
                 onPointerCancel={onPointerUp}
               />
+              {idx > 0 && (
+                <g>
+                  <title>Continued from frame {idx} of this table</title>
+                  <rect x={inp.x - 5} y={inp.y - 5} width={10} height={10} fill="#5aa9e6" stroke="#fff" />
+                  <path d={`M${inp.x - 2} ${inp.y - 3}L${inp.x + 2.5} ${inp.y}L${inp.x - 2} ${inp.y + 3}`} fill="none" stroke="#fff" strokeWidth={1.4} />
+                </g>
+              )}
+              <g style={{ pointerEvents: 'all', cursor: 'pointer' }} onPointerDown={startLinking}>
+                <title>{activeL.overset ? 'Overset rows — click, then click an empty table frame or a spot on a page to continue the table' : el.flowNext ? `Continues in frame ${idx + 2} of ${n} — click to thread into another frame` : 'Continue the table in another frame'}</title>
+                <rect x={out.x - 6} y={out.y - 6} width={12} height={12} fill={activeL.overset ? '#e5483a' : el.flowNext ? '#5aa9e6' : '#fff'} stroke="#4aa3ff" />
+                {activeL.overset ? <text x={out.x} y={out.y + 3.8} textAnchor="middle" fontSize={11} fill="#fff" style={{ fontFamily: 'ui-sans-serif' }}>+</text>
+                  : el.flowNext ? <path d={`M${out.x - 2} ${out.y - 3}L${out.x + 2.5} ${out.y}L${out.x - 2} ${out.y + 3}`} fill="none" stroke="#fff" strokeWidth={1.4} /> : null}
+              </g>
             </g>
           );
         })()}
@@ -537,20 +738,11 @@ export function TableOverlay({ items, selection, tool, zoom, pan, size, calc, pr
   );
 }
 
-function findTable(id: string): TableElement | null {
-  const p = useStore.getState().project;
-  for (const list of [p.pages.flatMap((x) => x.elements), p.masters.flatMap((m) => [...m.left, ...m.right]), p.cover.elements, p.jacket?.elements ?? []]) {
-    const el = list.find((e) => e.id === id);
-    if (el) return el.type === 'table' ? el : null;
-  }
-  return null;
-}
-
 /* -------------------------------------------------------------------------- */
 /* Cell editor                                                                 */
 /* -------------------------------------------------------------------------- */
 
-function CellEditor({ el, r, c, initial, rect, viewport }: { el: TableElement; r: number; c: number; initial?: string; rect: { x: number; y: number; w: number; h: number }; viewport: { w: number; h: number } }) {
+function CellEditor({ el, frameId, r, c, initial, rect, viewport }: { el: TableElement; frameId: string; r: number; c: number; initial?: string; rect: { x: number; y: number; w: number; h: number }; viewport: { w: number; h: number } }) {
   const project = useStore((s) => s.project);
   const ref = useRef<HTMLTextAreaElement>(null);
   const boxRef = useRef<HTMLDivElement>(null);
@@ -563,7 +755,7 @@ function CellEditor({ el, r, c, initial, rect, viewport }: { el: TableElement; r
   const setText = (v: string) => {
     const s = useStore.getState();
     if (!checkpointed.current) { s.checkpoint(); checkpointed.current = true; }
-    s.updateElement(el.id, (d) => { const cell = (d as Draft<TableElement>).cells[r]?.[c]; if (cell) cell.text = v; }, { history: false });
+    s.updateElement(el.id, (d) => { const cell = (d as DraftTable).cells[r]?.[c]; if (cell) cell.text = v; }, { history: false });
   };
 
   useEffect(() => {
@@ -584,11 +776,11 @@ function CellEditor({ el, r, c, initial, rect, viewport }: { el: TableElement; r
     const j = i + dir;
     if (j < 0) return;
     if (j >= order.length) {
-      useStore.getState().updateElement(el.id, (d) => insertRows(d as Draft<TableElement> as TableElement, t.rows.length, 1));
-      useTableUi.getState().edit(el.id, t.rows.length, 0);
+      useStore.getState().updateElement(el.id, (d) => insertRows(d as unknown as TableElement, t.rows.length, 1));
+      useTableUi.getState().edit(frameId, t.rows.length, 0);
       return;
     }
-    useTableUi.getState().edit(el.id, order[j].r, order[j].c);
+    useTableUi.getState().edit(frameId, order[j].r, order[j].c);
   };
 
   const wrap = (before: string, after = before) => {
