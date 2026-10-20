@@ -5,6 +5,7 @@
  */
 import type { BlendMode } from '../model/types';
 import type { Paint, Prim, TextRun } from './primitives';
+import { runMatrix } from './primitives';
 import { shape, glyphPath, canOutline, glyphKerns } from '../engine/fonts';
 import { getImage, loadImage } from './images';
 
@@ -56,12 +57,10 @@ function drawRun(ctx: CanvasRenderingContext2D, r: TextRun) {
     ctx.rotate((r.rotate * Math.PI) / 180);
     ctx.translate(-r.x, -r.y);
   }
-  if (r.scaleX && r.scaleX !== 1) {
-    ctx.translate(r.x, 0);
-    ctx.scale(r.scaleX, 1);
-    ctx.translate(-r.x, 0);
-  }
+  const m = runMatrix(r);
+  if (m) ctx.transform(m[0], m[1], m[2], m[3], m[4], m[5]);
   ctx.fillStyle = r.color;
+  if (r.stroke) { ctx.strokeStyle = r.stroke.color; ctx.lineJoin = 'round'; }
   const ls = r.letterSpacing ?? 0;
   if (canOutline(r.text, r.font)) {
     const shaped = shape(r.text, r.font)!;
@@ -77,6 +76,7 @@ function drawRun(ctx: CanvasRenderingContext2D, r: TextRun) {
         ctx.scale(k, -k);
         if (r.font.oblique) ctx.transform(1, 0, Math.tan((12 * Math.PI) / 180), 1, 0, 0);
         ctx.fill(path2d(gp.d));
+        if (r.stroke) { ctx.lineWidth = r.stroke.width / k; ctx.stroke(path2d(gp.d)); }
         ctx.restore();
       }
       x += g.xAdvance * r.size + ls + (gk ? gk[gi] : 0);
@@ -86,6 +86,7 @@ function drawRun(ctx: CanvasRenderingContext2D, r: TextRun) {
     ctx.textBaseline = 'alphabetic';
     if ('letterSpacing' in ctx) (ctx as CanvasRenderingContext2D & { letterSpacing: string }).letterSpacing = `${ls}px`;
     ctx.fillText(r.text, r.x, r.y);
+    if (r.stroke) { ctx.lineWidth = r.stroke.width; ctx.strokeText(r.text, r.x, r.y); }
   }
   ctx.restore();
 }

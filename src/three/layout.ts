@@ -11,6 +11,7 @@
 import type { BindingType } from '../model/types';
 import type { BindingCalc, Panel } from '../engine/binding';
 import { mm } from '../model/units';
+import { JACKET_GAP, JACKET_THICKNESS } from './jacket';
 import type { BookSceneInput } from './types';
 
 /** Scene units per PostScript point (1 scene unit = 10 mm). */
@@ -96,15 +97,26 @@ export interface BookLayout {
   coverH: number;
   /** z of the head edge of the covering. */
   zHead: number;
+  /**
+   * Room kept free between each closed cover and the text block for what tucks in there
+   * (pastedown and endpaper hinge on boards, soft-cover French flaps, dust-jacket flaps), pt.
+   */
+  clr: number;
   // Boards (case & coptic)
   bt: number;
   boardW: number;
   boardH: number;
   boardA0: number;
+  /**
+   * Front-board hinge, on the board's mid-plane: the opened board's inner face lies level with
+   * the top of the spine, and its spine edge clears the spine (rounded back, coptic chains).
+   */
   pivotA: number;
   pivotY: number;
   /** Extra rotation past 180° that lets an opened board rest on the ground. */
   tilt: number;
+  /** a where turned leaves start their gutter bend. */
+  creaseA: number;
   // Case spine
   off: number;
   spTh: number;
@@ -112,6 +124,8 @@ export interface BookLayout {
   arcR: number;
   arcAc: number;
   hingeDepth: number;
+  /** The spine lining keeps this far from the top and bottom (clear of the joint cloth), pt. */
+  liningClip: number;
   bandH: number;
   bandW: number;
   // Soft covers
@@ -172,12 +186,104 @@ export function droopAngle(p: DroopProfile, u: number): number {
   return p.beta * s * s;
 }
 
-/** Board rotation beyond 180° at which the board's far outer corner touches the ground. */
-function restTilt(pivotY: number, reach: number, bt: number): number {
-  const len = Math.hypot(reach, bt);
+/**
+ * Board rotation beyond 180° at which the board's far outer corner touches the ground, for a
+ * hinge at height `pivotY`, `reach` from that corner along the board and `h` below its outer face.
+ */
+function restTilt(pivotY: number, reach: number, h: number): number {
+  const len = Math.hypot(reach, h);
   if (len <= 0) return 0;
   const k = clamp(pivotY / len, 0, 1);
-  return Math.max(0, Math.asin(k) - Math.atan2(bt, reach));
+  return Math.max(0, Math.asin(k) - Math.atan2(h, reach));
+}
+
+type P2 = [number, number];
+
+/**
+ * Rest tilt of the opened front board: it settles until its far edge reaches the ground, which
+ * lies `lift` below a-space y = 0 (a jacket or thread under the book). A jacket (`jt` thick
+ * with its gap) adds a half-round of radius bt/2 + jt round the board's fore-edge, which is
+ * what then touches the ground.
+ */
+function openBoardTilt(L: Pick<BookLayout, 'pivotY' | 'pivotA' | 'boardA0' | 'boardW' | 'bt'>, lift: number, jt: number): number {
+  const reach = L.boardA0 + L.boardW - L.pivotA;
+  let t = restTilt(L.pivotY + lift, reach, L.bt / 2);
+  if (jt > 0 && reach > 0) t = Math.min(t, Math.asin(clamp((L.pivotY + lift - L.bt / 2 - jt) / reach, 0, 1)));
+  return Math.max(0, t);
+}
+
+/**
+ * Raised bands fade out toward the joints (f = 0 back joint … 1 front joint across the spine),
+ * so the spine meets the boards flush.
+ */
+export function bandTaper(f: number): number {
+  const e = (x: number) => {
+    const t = clamp(x / 0.14, 0, 1);
+    return t * t * (3 - 2 * t);
+  };
+  return e(f) * e(1 - f);
+}
+
+/** Outer surface of the case spine (raised bands included) at f across the spine, a-space. */
+export function spineOuter(L: Pick<BookLayout, 'rd' | 'arcR' | 'arcAc' | 'thick' | 'bandH'>, f: number, band = 1): { p: P2; n: P2 } {
+  const thick = L.thick;
+  let p: P2, n: P2;
+  if (L.rd > 1e-3) {
+    const R = L.arcR, ac = L.arcAc;
+    const psi0 = Math.asin(Math.min(1, thick / 2 / R));
+    const psi = -psi0 + 2 * psi0 * f;
+    p = [ac - R * Math.cos(psi), thick / 2 + R * Math.sin(psi)];
+    n = [-Math.cos(psi), Math.sin(psi)];
+  } else {
+    p = [0, thick * f];
+    n = [-1, 0];
+  }
+  const h = L.bandH * bandTaper(f) * band;
+  return { p: [p[0] + n[0] * h, p[1] + n[1] * h], n };
+}
+
+function insidePoly(poly: P2[], x: number, y: number): boolean {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const a = poly[i], b = poly[j];
+    if ((a[1] > y) !== (b[1] > y) && x < ((b[0] - a[0]) * (y - a[1])) / (b[1] - a[1]) + a[0]) inside = !inside;
+  }
+  return inside;
+}
+
+/**
+ * Largest hinge position a (on the board's mid-plane) at which the front board, swinging from
+ * closed to resting open, never comes within `margin` of the `obstacles` (a-space polygons on
+ * the spine side).
+ */
+function clearPivotA(start: number, py: number, A0: number, A1: number, bt: number, thick: number, obstacles: P2[][], margin: number): number {
+  const step = mm(0.1);
+  for (let pa = start; pa > start - thick - mm(20); pa -= step) {
+    const tilt = restTilt(py, A1 - pa, bt / 2);
+    let hit = false;
+    for (let i = 0; i <= 64 && !hit; i++) {
+      const th = ((Math.PI + tilt) * i) / 64;
+      const c = Math.cos(th), s = Math.sin(th);
+      // Obstacle points in the board frame (u along the board, v across, 0 on the mid-plane).
+      for (const [a, y] of obstacles.flat()) {
+        const da = a - pa, dy = y - py;
+        const u = c * da + s * dy, v = -s * da + c * dy;
+        if (u > A0 - pa - margin && u < A1 - pa + margin && Math.abs(v) < bt / 2 + margin) { hit = true; break; }
+      }
+      if (hit) break;
+      // Board corners (and edge midpoints) inside the obstacle.
+      for (const [u, v] of [[A0 - pa, -bt / 2], [A0 - pa, bt / 2], [A0 - pa, 0], [(A0 + A1) / 2 - pa, bt / 2], [(A0 + A1) / 2 - pa, -bt / 2]] as P2[]) {
+        for (const [du, dv] of [[-margin, -margin], [-margin, margin], [margin, -margin], [margin, margin], [0, 0]] as P2[]) {
+          const uu = u + du, vv = v + dv;
+          const qa = pa + c * uu - s * vv, qy = py + s * uu + c * vv;
+          if (obstacles.some((o) => insidePoly(o, qa, qy))) { hit = true; break; }
+        }
+        if (hit) break;
+      }
+    }
+    if (!hit) return pa;
+  }
+  return start - thick - mm(20);
 }
 
 export function computeLayout(input: BookSceneInput): BookLayout {
@@ -188,14 +294,23 @@ export function computeLayout(input: BookSceneInput): BookLayout {
   const rtl = spec.direction === 'rtl';
   const W = Math.max(spec.trimW, mm(20));
   const H = Math.max(spec.trimH, mm(20));
-  const T = Math.max(calc.textBlock, mm(0.2));
+  const T0 = Math.max(calc.textBlock, mm(0.2));
   const leaves = Math.max(1, Math.round(calc.leaves));
   const fukuro = type === 'stab' && b.fukuroToji;
-  const c = clamp(calc.caliper * (fukuro ? 2 : 1), 0.02, T / leaves);
   const nTurn = Math.max(0, Math.min(MAX_TURN_LEAVES, leaves - 1));
   const cover = new CoverMapper(calc, rtl);
   // Stab bindings are sewn with a heavy silk cord, coptic with linen thread.
   const threadR = Math.max(b.threadDiameter, type === 'stab' ? mm(0.8) : mm(0.4)) / 2;
+  // What tucks in under each closed cover: dust-jacket flaps (and French flaps, below). The
+  // text block yields that room (it is compressible); a block too thin to give it up grows.
+  const softFlap = family === 'soft' && type !== 'stab' && cover.has('front-flap') ? clamp(spec.cover.flapWidth, 0, W - mm(5)) : 0;
+  const cc0 = Math.max(b.coverCaliper, 0.15);
+  // Boards always keep a hair for the pastedown and endpaper hinge.
+  const clr = (input.jacket ? JACKET_GAP + JACKET_THICKNESS + mm(0.05) : 0) + (softFlap > 0 ? cc0 + mm(0.03) : 0) + (family === 'soft' ? 0 : mm(0.15));
+  const T = Math.max(T0 - 2 * clr, Math.min(T0, T0 * 0.6));
+  /** Closed book thickness for a given cover / board thickness. */
+  const closed = (shell: number) => Math.max(T0, T + 2 * clr) + 2 * shell;
+  const c = clamp(calc.caliper * (fukuro ? 2 : 1), 0.02, T / leaves);
 
   const L: BookLayout = {
     family, type, rtl, W, H, T, c, leaves, nTurn,
@@ -203,15 +318,16 @@ export function computeLayout(input: BookSceneInput): BookLayout {
     thick: T, tbY0: 0, tbY1: T,
     spineA: () => 0, foreA: () => W,
     coverH: calc.coverH, zHead: -calc.coverH / 2,
-    bt: 0, boardW: W, boardH: H, boardA0: 0, pivotA: 0, pivotY: T, tilt: 0,
-    off: 0, spTh: 0, rd: 0, arcR: 0, arcAc: 0, hingeDepth: 0, bandH: 0, bandW: mm(4.5),
+    clr,
+    bt: 0, boardW: W, boardH: H, boardA0: 0, pivotA: 0, pivotY: T, tilt: 0, creaseA: 0,
+    off: 0, spTh: 0, rd: 0, arcR: 0, arcAc: 0, hingeDepth: 0, liningClip: 0, bandH: 0, bandW: mm(4.5),
     cc: 0, flap: 0, creaseM: 0, creaseR: 0, centerY: 0, droop: { D: 1, beta: 0 },
     threadR, cover, a0: 0, a1: W,
   };
 
   if (family === 'case') {
     const bt = Math.max(b.boardThickness, mm(0.8));
-    const thick = T + 2 * bt;
+    const thick = closed(bt);
     const spTh = clamp(bt * 0.4, mm(0.5), mm(1.2));
     const off = spTh + mm(0.3);
     const rd = Math.min(Math.max(0, calc.roundDepth), thick / 2);
@@ -230,8 +346,8 @@ export function computeLayout(input: BookSceneInput): BookLayout {
     L.foreA = (y) => off - Math.max(0, dcov(y) - d0) + W;
     L.bt = bt;
     L.thick = thick;
-    L.tbY0 = bt;
-    L.tbY1 = bt + T;
+    L.tbY0 = thick / 2 - T / 2;
+    L.tbY1 = thick / 2 + T / 2;
     L.boardW = calc.boardW;
     L.boardH = calc.boardH;
     L.boardA0 = Math.max(off, off + W + b.squares - calc.boardW);
@@ -240,10 +356,29 @@ export function computeLayout(input: BookSceneInput): BookLayout {
     L.rd = rd;
     L.arcR = R;
     L.arcAc = ac;
-    L.pivotA = off;
-    L.pivotY = bt + T;
-    L.tilt = restTilt(L.pivotY, L.boardA0 + L.boardW - L.pivotA, bt);
+    L.creaseA = off;
+    // The spine covering (raised bands included), which the opening board must clear, and the
+    // wedge under the tangent at its top: with the board's spine edge beyond that tangent, the
+    // joint cloth and the jacket can run straight from the spine to the opened board.
     L.bandH = b.raisedBands > 0 ? Math.min(mm(1.8), bt * 0.85) : 0;
+    const outer: P2[] = [];
+    const lining: P2[] = [];
+    for (let i = 0; i <= 32; i++) {
+      const { p, n } = spineOuter(L, i / 32);
+      outer.push(p);
+      const q = spineOuter(L, i / 32, 0).p;
+      lining.push([q[0] - n[0] * spTh, q[1] - n[1] * spTh]);
+    }
+    // Steepest line from the top edge that still touches the outline (bands ramp up near it).
+    const D = Math.min(thick / 2, 4 * bt + mm(5));
+    let tan = 0;
+    for (const q of outer) if (q[1] < thick - 1e-6 && q[1] >= thick - D) tan = Math.max(tan, -q[0] / (thick - q[1]));
+    tan *= 1.05;
+    const wedge: P2[] = [[0, thick], [-D * tan, thick - D], [0, thick - D]];
+    L.pivotY = thick - bt / 2;
+    L.pivotA = clearPivotA(off, L.pivotY, L.boardA0, L.boardA0 + L.boardW, bt, thick, [[...outer, ...lining.reverse()], wedge], mm(0.35));
+    const jt = input.jacket ? JACKET_GAP + JACKET_THICKNESS : 0;
+    L.tilt = openBoardTilt(L, jt, jt);
     // French groove: depth chosen so the joint cloth is as long as the hinge panel.
     const A0 = L.boardA0;
     const target = Math.max(b.hingeGap, A0);
@@ -254,23 +389,26 @@ export function computeLayout(input: BookSceneInput): BookLayout {
       const mid = (lo + hi) / 2;
       if (len(mid) < target) lo = mid; else hi = mid;
     }
-    L.hingeDepth = Math.max(bt * 0.3, lo);
+    // …but never so deep that the cloth (0.35 mm) dips below the board into the text block.
+    L.hingeDepth = Math.min(Math.max(bt * 0.3, lo), Math.max(bt * 0.1, (bt - mm(0.45)) / 0.75));
+    L.liningClip = Math.min(bt, 0.75 * L.hingeDepth + mm(0.45));
     L.a0 = -(rd + L.bandH + spTh * 0.2);
     L.a1 = L.boardA0 + L.boardW;
   } else if (family === 'coptic') {
     const bt = Math.max(b.boardThickness, mm(0.8));
-    const thick = T + 2 * bt;
+    const thick = closed(bt);
     const S = L.sections;
     const ts = T / S;
     const r = Math.min(ts * 0.42, mm(2.5));
     L.bt = bt;
     L.thick = thick;
-    L.tbY0 = bt;
-    L.tbY1 = bt + T;
+    L.tbY0 = thick / 2 - T / 2;
+    L.tbY1 = thick / 2 + T / 2;
+    const y0 = L.tbY0;
     // Each sewn section shows its rounded fold on the exposed spine.
     L.spineA = (y) => {
-      const k = clamp(Math.floor((y - bt) / ts), 0, S - 1);
-      const yc = bt + (k + 0.5) * ts;
+      const k = clamp(Math.floor((y - y0) / ts), 0, S - 1);
+      const yc = y0 + (k + 0.5) * ts;
       const q = (y - yc) / (ts / 2);
       return -r * Math.sqrt(Math.max(0, 1 - q * q * q * q));
     };
@@ -278,24 +416,27 @@ export function computeLayout(input: BookSceneInput): BookLayout {
     L.boardW = calc.boardW;
     L.boardH = calc.boardH;
     L.boardA0 = 0;
-    L.pivotA = 0;
-    L.pivotY = bt + T;
-    L.tilt = restTilt(L.pivotY, L.boardW, bt);
+    // The boards hinge on the link stitches at their spine edge: the opened board's edge
+    // lands just outside the section folds and chains.
+    L.pivotY = thick - bt / 2;
+    L.pivotA = -(r + 2 * threadR + mm(0.3)) / 2;
+    const jt = input.jacket ? JACKET_GAP + JACKET_THICKNESS : 0;
+    L.tilt = openBoardTilt(L, Math.max(jt, 2 * threadR), jt);
     L.a0 = -(r + threadR * 2.5);
     L.a1 = L.boardW;
   } else {
-    const cc = Math.max(b.coverCaliper, 0.15);
-    const thick = T + 2 * cc;
+    const cc = cc0;
+    const thick = closed(cc);
     L.cc = cc;
     L.thick = thick;
-    L.tbY0 = cc;
-    L.tbY1 = cc + T;
-    L.flap = type === 'stab' ? 0 : clamp(spec.cover.flapWidth, 0, W - mm(5));
-    if (!cover.has('front-flap')) L.flap = 0;
+    L.tbY0 = thick / 2 - T / 2;
+    L.tbY1 = thick / 2 + T / 2;
+    L.flap = softFlap;
     if (type === 'stab') {
       L.creaseM = clamp(b.stabMargin, mm(3), W / 3);
       L.creaseR = mm(3);
       L.centerY = thick - cc / 2 + L.creaseR;
+      L.creaseA = L.creaseM;
       const h = L.centerY + L.creaseR - cc / 2;
       L.droop = solveDroop(h, 0.6 * Math.max(mm(10), W - 2 * L.creaseM - Math.PI * L.creaseR - cc));
     } else {

@@ -18,12 +18,41 @@ export interface JacketBase {
   wrapT: number;
   /** Write the current (a, y) of every base sample into out[2i], out[2i+1]. */
   fill(out: Float64Array): void;
+  /**
+   * Optional: nudge the posed mid-surface (a, y pairs, `count` samples) clear of the book where
+   * a joint pinches it (the opening board's spine edge, the joint cloth, the spine's top edge).
+   */
+  constrain?(mid: Float64Array, count: number, half: number): void;
 }
 
 /** Jacket panel position on a left-bound jacket (pt). */
 export function jacketPanel(jc: JacketCalc, rtl: boolean, id: JacketPanel['id']): { x: number; w: number } {
   const p = jc.panels.find((q) => q.id === id) ?? { x: 0, w: 0 };
   return { x: rtl ? jc.width - p.x - p.w : p.x, w: p.w };
+}
+
+/**
+ * Remove small self-intersection loops from a polyline (a, y pairs) in place: when segment i
+ * crosses a segment up to a few samples later, the samples in between collapse onto the crossing.
+ */
+export function untangle(p: Float64Array, n: number, reach = 14): void {
+  for (let i = 0; i < n - 3; i++) {
+    const ax = p[2 * i], ay = p[2 * i + 1], bx = p[2 * i + 2], by = p[2 * i + 3];
+    for (let j = Math.min(n - 2, i + reach); j >= i + 2; j--) {
+      const cx = p[2 * j], cy = p[2 * j + 1], dx = p[2 * j + 2], dy = p[2 * j + 3];
+      const rx = bx - ax, ry = by - ay, sx = dx - cx, sy = dy - cy;
+      const den = rx * sy - ry * sx;
+      if (Math.abs(den) < 1e-12) continue;
+      const t = ((cx - ax) * sy - (cy - ay) * sx) / den;
+      const u = ((cx - ax) * ry - (cy - ay) * rx) / den;
+      if (t > 0 && t < 1 && u > 0 && u < 1) {
+        const qx = ax + rx * t, qy = ay + ry * t;
+        for (let k = i + 1; k <= j; k++) { p[2 * k] = qx; p[2 * k + 1] = qy; }
+        i = j - 1;
+        break;
+      }
+    }
+  }
 }
 
 const FOLD_N = 12;
@@ -108,6 +137,26 @@ export class JacketRig {
       return { ea: B[2 * i], ey: B[2 * i + 1], ta, ty, na: -ty, ny: ta };
     };
     const r = b.wrapT / 2 + off;
+    // A flap lies against the inside of the cover it wraps: the base walked back from its end,
+    // offset inward through the cover (straight on a board, curling with a soft cover).
+    const inside = (first: boolean, d: number): [number, number] => {
+      let acc = 0;
+      for (let k = 0; k < n - 1; k++) {
+        const i0 = first ? k : n - 1 - k, i1 = first ? k + 1 : n - 2 - k;
+        const da = B[2 * i1] - B[2 * i0], dy = B[2 * i1 + 1] - B[2 * i0 + 1];
+        const l = Math.hypot(da, dy);
+        if (acc + l >= d || k === n - 2) {
+          const t = l > 0 ? Math.min(1, (d - acc) / l) : 0;
+          // Left normal of the base's own direction (back → front), pointing outward.
+          const sgn = first ? 1 : -1;
+          const tx = (sgn * da) / (l || 1), tyy = (sgn * dy) / (l || 1);
+          const h = b.wrapT + off;
+          return [B[2 * i0] + da * t + tyy * h, B[2 * i0 + 1] + dy * t - tx * h];
+        }
+        acc += l;
+      }
+      return [B[0], B[1]];
+    };
     // Back fore-edge: flap (deep end first) → fold from the inside round to the outside.
     {
       const { ea, ey, ta, ty, na, ny } = end(true);
@@ -116,10 +165,9 @@ export class JacketRig {
         const th = Math.PI * (1 - k / FOLD_N);
         put(FLAP_N + k, ca + r * (na * Math.cos(th) - ta * Math.sin(th)), cy + r * (ny * Math.cos(th) - ty * Math.sin(th)));
       }
-      const sa = ca - r * na, sy = cy - r * ny;
       for (let k = 0; k < FLAP_N; k++) {
-        const d = this.flapW * (1 - k / FLAP_N);
-        put(k, sa + ta * d, sy + ty * d);
+        const p = inside(true, this.flapW * (1 - k / FLAP_N));
+        put(k, p[0], p[1]);
       }
     }
     // Front fore-edge: fold from the outside round to the inside, then the flap.
@@ -131,11 +179,17 @@ export class JacketRig {
         const th = (Math.PI * k) / FOLD_N;
         put(o + k - 1, ca + r * (na * Math.cos(th) + ta * Math.sin(th)), cy + r * (ny * Math.cos(th) + ty * Math.sin(th)));
       }
-      const sa = ca - r * na, sy = cy - r * ny;
       for (let k = 1; k <= FLAP_N; k++) {
-        const d = (this.flapW * k) / FLAP_N;
-        put(o + FOLD_N + k - 1, sa - ta * d, sy - ty * d);
+        const p = inside(false, (this.flapW * k) / FLAP_N);
+        put(o + FOLD_N + k - 1, p[0], p[1]);
       }
+    }
+    // Offsetting into a concave crease (an opened soft cover's spine edge, the joint of an opened
+    // case) leaves a little swallowtail loop: cut it at its crossing.
+    untangle(pts, ns);
+    if (b.constrain) {
+      b.constrain(pts, ns, JACKET_THICKNESS / 2);
+      untangle(pts, ns);
     }
     for (let j = 0; j < 2; j++) mid.set(pts, j * ns * 2);
   }

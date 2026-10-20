@@ -13,7 +13,7 @@ export type Tool =
   | 'text' | 'rect' | 'ellipse' | 'polygon' | 'line' | 'pen' | 'image'
   | 'brush' | 'eraser'
   | 'pattern' | 'ornament' | 'initial' | 'overprint' | 'gradient' | 'cutout' | 'gridtype'
-  | 'grid-diagram' | 'dimension' | 'specimen';
+  | 'grid-diagram' | 'dimension' | 'specimen' | 'table';
 
 export interface BrushSettings {
   type: BrushType;

@@ -35,7 +35,7 @@ function ElementView({ el, ctx, rasterScale, offsetX }: { el: Element; ctx: Comp
   );
 }
 
-const MemoElement = React.memo(ElementView, (a, b) => a.el === b.el && a.rasterScale === b.rasterScale && a.offsetX === b.offsetX && (a.el.type !== 'text' || a.ctx.project === b.ctx.project) && a.ctx.pageIndex === b.ctx.pageIndex && a.ctx.side === b.ctx.side);
+const MemoElement = React.memo(ElementView, (a, b) => a.el === b.el && a.rasterScale === b.rasterScale && a.offsetX === b.offsetX && ((a.el.type !== 'text' && a.el.type !== 'table') || a.ctx.project === b.ctx.project) && a.ctx.pageIndex === b.ctx.pageIndex && a.ctx.side === b.ctx.side);
 
 /** Die-cut windows of a leaf as seen from this page (own cutouts + the other side, mirrored). */
 function leafHoles(project: Project, pageIndex: number): string {

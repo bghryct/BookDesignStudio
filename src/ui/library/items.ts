@@ -14,6 +14,8 @@ import type { Rect } from '../../engine/grid';
 import { mm } from '../../model/units';
 import { SAMPLE_JAPANESE } from '../../model/defaults';
 import type { PatternKind, OverprintKind, OrnamentKind } from '../../model/types';
+import { TABLE_ITEMS } from './tableItems';
+import { TYPE_ITEMS } from './typeItems';
 
 export interface LibraryContext {
   spec: BookSpec;
@@ -189,5 +191,5 @@ const MOTIF_ITEMS: LibraryItem[] = MOTIF_LIST.map((m) => ({
 }));
 
 export function libraryItems(): LibraryItem[] {
-  return [...HANDMADE, ...MOTIF_ITEMS];
+  return [...HANDMADE, ...TYPE_ITEMS, ...TABLE_ITEMS, ...MOTIF_ITEMS];
 }

@@ -63,7 +63,9 @@ export function overriddenKeys(style: TextStyle, p: ParagraphStyleProps): (keyof
       continue;
     }
     const have = valueOf(style, k);
-    if (typeof want === 'number' ? Math.abs((have as number ?? 0) - want) > 1e-3 : have !== want) out.push(k);
+    const differs = typeof want === 'number' ? Math.abs(((have as number) ?? 0) - want) > 1e-3
+      : typeof want === 'object' && want !== null ? JSON.stringify(have ?? null) !== JSON.stringify(want) : have !== want;
+    if (differs) out.push(k);
   }
   return out;
 }
@@ -192,8 +194,8 @@ export function FrameStyleSection({ el }: { el: TextElement }) {
 /* Styles manager                                                               */
 /* -------------------------------------------------------------------------- */
 
-type Kind = 'family' | 'number' | 'length' | 'bool' | 'color' | 'align' | 'case' | 'kerning' | 'position' | 'figures';
-interface PropDef { key: string; label: string; kind: Kind; unit?: string; min?: number; max?: number; step?: number; def: unknown; hint?: string }
+type Kind = 'family' | 'number' | 'length' | 'bool' | 'color' | 'align' | 'case' | 'kerning' | 'position' | 'figures' | 'enum' | 'list';
+interface PropDef { key: string; label: string; kind: Kind; unit?: string; min?: number; max?: number; step?: number; def: unknown; hint?: string; opts?: [string, string][] }
 
 const PARA_PROPS: PropDef[] = [
   { key: 'fontFamily', label: 'Typeface', kind: 'family', def: 'eb-garamond' },
@@ -213,6 +215,25 @@ const PARA_PROPS: PropDef[] = [
   { key: 'features', label: 'Figures', kind: 'figures', def: { onum: true, lnum: false } },
   { key: 'hyphenate', label: 'Hyphenate', kind: 'bool', def: false },
   { key: 'kerning', label: 'Kerning', kind: 'kerning', def: 'optical' },
+  { key: 'opticalTracking', label: 'Optical tracking by size', kind: 'bool', def: true },
+  { key: 'rag', label: 'Rag', kind: 'enum', def: 'swiss', opts: [['natural', 'Natural'], ['swiss', 'Swiss (short / long)'], ['balanced', 'Balanced'], ['wedge', 'Wedge'], ['pattern', 'Pattern']] },
+  { key: 'ragAmount', label: 'Rag amount', kind: 'number', unit: '%', min: 2, max: 60, step: 1, def: 12 },
+  { key: 'avoidShortLineEnds', label: 'No short words at line ends', kind: 'bool', def: true },
+  { key: 'lastLineAlign', label: 'Last line', kind: 'enum', def: 'left', opts: [['left', 'Flush left'], ['center', 'Centred'], ['right', 'Flush right'], ['justify', 'Justified']] },
+  { key: 'wordSpaceMin', label: 'Word space min', kind: 'number', unit: '%', min: 30, max: 100, step: 1, def: 80 },
+  { key: 'wordSpaceMax', label: 'Word space max', kind: 'number', unit: '%', min: 100, max: 400, step: 1, def: 133 },
+  { key: 'letterSpaceMin', label: 'Letter space min', kind: 'number', unit: '‰', min: -50, max: 0, step: 1, def: -3 },
+  { key: 'letterSpaceMax', label: 'Letter space max', kind: 'number', unit: '‰', min: 0, max: 100, step: 1, def: 6 },
+  { key: 'glyphScaleMin', label: 'Glyph scale min', kind: 'number', unit: '%', min: 90, max: 100, step: 0.5, def: 98 },
+  { key: 'glyphScaleMax', label: 'Glyph scale max', kind: 'number', unit: '%', min: 100, max: 110, step: 0.5, def: 102 },
+  { key: 'hyphenBias', label: 'Fewer hyphens', kind: 'number', min: 0, max: 100, step: 1, def: 70 },
+  { key: 'keepWithNext', label: 'Keep with next', kind: 'number', unit: 'lines', min: 0, max: 5, step: 1, def: 2 },
+  { key: 'keepTogether', label: 'Keep lines together', kind: 'bool', def: true },
+  { key: 'spanColumns', label: 'Span all columns', kind: 'bool', def: true },
+  { key: 'widows', label: 'Widows', kind: 'number', unit: 'lines', min: 1, max: 5, step: 1, def: 2 },
+  { key: 'orphans', label: 'Orphans', kind: 'number', unit: 'lines', min: 1, max: 5, step: 1, def: 2 },
+  { key: 'startOn', label: 'Start', kind: 'enum', def: 'column', opts: [['anywhere', 'Anywhere'], ['column', 'Next column'], ['frame', 'Next frame']] },
+  { key: 'list', label: 'List', kind: 'list', def: { type: 'bullet', bullet: '•' } },
 ];
 
 const CHAR_PROPS: PropDef[] = [
@@ -226,6 +247,16 @@ const CHAR_PROPS: PropDef[] = [
   { key: 'position', label: 'Position', kind: 'position', def: 'superscript' },
   { key: 'baselineShift', label: 'Baseline shift', kind: 'length', step: 0.25, def: 2, hint: 'Positive raises the run' },
   { key: 'features', label: 'Figures', kind: 'figures', def: { onum: true, lnum: false } },
+  { key: 'size', label: 'Size (absolute)', kind: 'number', unit: 'pt', min: 2, max: 720, step: 0.5, def: 9 },
+  { key: 'underline', label: 'Underline', kind: 'bool', def: true },
+  { key: 'strike', label: 'Strikethrough', kind: 'bool', def: true },
+  { key: 'highlight', label: 'Highlight', kind: 'color', def: '#ffe680' },
+  { key: 'hScale', label: 'Horizontal scale', kind: 'number', unit: '%', min: 25, max: 400, step: 1, def: 90 },
+  { key: 'vScale', label: 'Vertical scale', kind: 'number', unit: '%', min: 25, max: 400, step: 1, def: 110 },
+  { key: 'skew', label: 'Skew', kind: 'number', unit: '°', min: -45, max: 45, step: 1, def: 10 },
+  { key: 'stroke', label: 'Outline colour', kind: 'color', def: '#2a2118' },
+  { key: 'strokeWidth', label: 'Outline weight', kind: 'number', unit: 'pt', min: 0.05, max: 8, step: 0.05, def: 0.4 },
+  { key: 'noBreak', label: 'No break', kind: 'bool', def: true },
 ];
 
 const FIGURES: { value: string; label: string; f: Record<string, boolean> }[] = [
@@ -274,6 +305,13 @@ function PropControl({ pd, value, onChange }: { pd: PropDef; value: unknown; onC
       return <Select label={pd.label} value={value as string} onChange={onChange} options={[{ value: 'metrics', label: 'Metrics (the font’s pairs)' }, { value: 'optical', label: 'Optical (from outlines)' }, { value: 'none', label: 'None' }]} />;
     case 'position':
       return <Select label={pd.label} value={value as string} onChange={onChange} options={[{ value: 'normal', label: 'Normal' }, { value: 'superscript', label: 'Superscript' }, { value: 'subscript', label: 'Subscript' }]} />;
+    case 'enum':
+      return <Select label={pd.label} value={value as string} onChange={onChange} options={(pd.opts ?? []).map(([v, l]) => ({ value: v, label: l }))} />;
+    case 'list': {
+      const l = (value ?? {}) as { type?: string; bullet?: string; format?: string };
+      return <Select label={pd.label} value={l.type === 'number' ? `n:${l.format ?? 'decimal'}` : `b:${l.bullet ?? '•'}`} onChange={(v) => onChange(v.startsWith('n:') ? { type: 'number', format: v.slice(2) } : { type: 'bullet', bullet: v.slice(2) })}
+        options={[['b:•', 'Bullets •'], ['b:–', 'Dashes –'], ['b:❧', 'Hedera ❧'], ['n:decimal', 'Numbers 1.'], ['n:lower-alpha', 'Letters a.'], ['n:lower-roman', 'Roman i.'], ['n:upper-roman', 'Roman I.']].map(([v, lb]) => ({ value: v, label: lb }))} />;
+    }
     case 'figures':
       return <Select label={pd.label} value={figuresValue(value as Record<string, boolean>)} onChange={(v) => onChange({ ...FIGURES.find((x) => x.value === v)!.f })} options={FIGURES.map(({ value: v, label }) => ({ value: v, label }))} />;
     default:

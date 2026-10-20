@@ -1,7 +1,7 @@
 import type {
   Element, ElementType, TextStyle, TextElement, ImageElement, ShapeElement, RuleElement, PathElement, SvgElement,
   PatternElement, OrnamentElement, InitialElement, OverprintElement, GradientElement, CutoutElement, DrawingElement,
-  GridTypeElement, ElementBase, OrnamentPalette, Page, Master, MotifElement,
+  GridTypeElement, ElementBase, OrnamentPalette, Page, Master, MotifElement, TableElement,
 } from './types';
 import { uid } from '../lib/random';
 import { getMotif } from '../engine/motifs';
@@ -56,7 +56,7 @@ export function textStyle(over: Partial<TextStyle> = {}): TextStyle {
 const NAMES: Record<ElementType, string> = {
   text: 'Text', image: 'Image', shape: 'Shape', rule: 'Rule', path: 'Path', svg: 'SVG',
   pattern: 'Kinetic pattern', ornament: 'Marginalia', initial: 'Initial', overprint: 'Overprint',
-  gradient: 'Tonal gradient', cutout: 'Die-cut', drawing: 'Drawing', gridtype: 'Grid type', motif: 'Motif',
+  gradient: 'Tonal gradient', cutout: 'Die-cut', drawing: 'Drawing', gridtype: 'Grid type', motif: 'Motif', table: 'Table',
 };
 
 function base(type: ElementType, over: Partial<ElementBase>): ElementBase {
@@ -170,6 +170,19 @@ export function makeMotif(kind: string, over: Over<MotifElement> = {}): MotifEle
   } as MotifElement;
 }
 
+/** A table (src/model/table.ts): 5 rows × 4 columns with a head row, set in the book-rules style. */
+export function makeTable(over: Over<TableElement> = {}): TableElement {
+  const rows = over.rows ?? Array.from({ length: 5 }, () => ({ mode: 'auto' as const, h: 0 }));
+  const cols = over.cols ?? Array.from({ length: 4 }, () => ({ mode: 'fr' as const, w: 1 }));
+  return {
+    ...base('table', { w: 300, h: 90, ...over }), type: 'table',
+    rows, cols, cells: over.cells ?? rows.map(() => cols.map(() => ({ text: '' }))),
+    headerRows: 1, footerRows: 0, tableStyle: 'tbs-book', local: {}, paraStyle: null, fitWidth: true, autoHeight: true, fillHeight: false,
+    ...over,
+    style: textStyle({ fontSize: 9, leading: 12, align: 'left', hyphenate: false, firstLineIndent: 0, baselineGrid: false, opticalMargin: false, avoidRunts: false, ...over.style }),
+  } as TableElement;
+}
+
 export function makeElement(type: ElementType, over: Partial<Element> = {}): Element {
   switch (type) {
     case 'text': return makeText(over as Over<TextElement>);
@@ -187,6 +200,7 @@ export function makeElement(type: ElementType, over: Partial<Element> = {}): Ele
     case 'drawing': return makeDrawing(over as Over<DrawingElement>);
     case 'gridtype': return makeGridType(over as Over<GridTypeElement>);
     case 'motif': return makeMotif((over as Partial<MotifElement>).kind ?? 'grid-diagram', over as Over<MotifElement>);
+    case 'table': return makeTable(over as Over<TableElement>);
   }
 }
 

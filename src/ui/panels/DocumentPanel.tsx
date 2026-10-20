@@ -8,6 +8,7 @@ import { Section, Row, NumberField, Select, Toggle, TextInput, Segmented, Button
 import { CANONS, canonMargins, lockGridToBaseline, type CanonKind } from '../../engine/grid';
 import { cmykToHex, rgbToCmyk } from '../../lib/color';
 import { PanelGridEditor, JacketSettings, GuidesSection } from './SurfaceSettings';
+import { generateContents } from '../contents';
 import { uid } from '../../lib/random';
 
 export const TRIM_PRESETS: { id: string; label: string; w: number; h: number; group: string }[] = [
@@ -74,7 +75,11 @@ export function DocumentPanel() {
           <TextInput label="Author" value={book.author} onChange={(v) => live((d) => { d.author = v; })} />
           <TextInput label="Publisher" value={book.publisher} onChange={(v) => live((d) => { d.publisher = v; })} />
         </Row>
-        <Hint>Use {'{title}'} {'{author}'} {'{page}'} {'{page:roman}'} in any text frame — running heads and folios update everywhere.</Hint>
+        <Hint>Use {'{title}'} {'{author}'} {'{chapter}'} {'{page}'} {'{page:roman}'} in any text frame — running heads and folios update everywhere.</Hint>
+        <Button className="w-full" onClick={() => {
+          const r = generateContents();
+          s().notify(r.entries ? `${r.updated ? 'Updated' : 'Created'} the contents: ${r.entries} entries with their page numbers.` : 'No chapter titles or # headings found yet.');
+        }}>Generate contents page</Button>
       </Section>
 
       <Section title="Format" id="doc-format">

@@ -1,25 +1,32 @@
 /**
- * The text engine.
+ * The text engine: frames, columns and threads.
  *
- *  • Knuth–Plass total-fit line breaking (justified and ragged), with Liang hyphenation,
- *    flagged-penalty demerits for consecutive hyphens and fitness-class demerits, so
- *    spacing stays even down the page (Bringhurst §2.1, Hochuli's "even colour").
- *  • Optical margin alignment / hanging punctuation applied per line.
- *  • Baseline-grid locking (Müller-Brockmann / Bosshard).
- *  • Drop caps sized so the initial's cap height spans exactly N lines, with optional
- *    Cleves illumination frames.
- *  • True small caps from the font, or synthesised when the font lacks `smcp`.
- *  • Threads (overflow into linked frames), multi-column frames, RTL lines and
- *    Japanese vertical setting (tategaki) with kinsoku and tate-chū-yoko.
+ *  • Story markup → paragraphs (`text/story.ts`), measured items and line breaking (`text/compose.ts`):
+ *    Knuth–Plass with hyphenation controls, justification by word space, letter spacing and glyph
+ *    scaling, shaped rags (Swiss, balanced, wedge, pattern), tabs with leaders, lists, footnotes,
+ *    paragraph and character styles, local formatting, nested and GREP styles.
+ *  • Frames: columns with text wrap around other items (both sides, largest side, jump), first-
+ *    baseline options, baseline-grid locking (all lines or first lines), keeps (with next,
+ *    together, widows, orphans, start in next column / frame), footnotes at the foot of the
+ *    column, balanced columns, vertical justification, column rules, paragraph rules and shading,
+ *    underline / strike / highlight, drop caps with Cleves illumination, optical margins.
+ *  • Threads (overflow into linked frames), RTL lines and Japanese vertical setting (tategaki).
  *
  * Output is display-list primitives positioned in frame-local pt.
  */
-import type { TextStyle, TextElement, ParagraphStyleDef, CharacterStyleDef, ParagraphStyleProps, CharacterStyleProps } from '../model/types';
-import type { FontRef, Prim, TextRun } from '../render/primitives';
-import { resolveFont, measure, fontMetrics, faceSupports, useFontStore, opticalKerning } from './fonts';
-import { hyphenPoints } from './hyphenate';
+import type { TextStyle, TextElement } from '../model/types';
+import type { Prim, TextRun, GroupPrim, PathPrim, FontRef } from '../render/primitives';
+import { resolveFont, measure, fontMetrics, useFontStore } from './fonts';
 import { illuminatedFrame } from './generators/cleves';
 import { toRoman } from '../model/units';
+import { parseStory, PLAIN, type Footnote, type Paragraph, type Piece, type StoryStyles } from './text/story';
+import {
+  ItemBuilder, buildItems, paraStyle, breakParagraph, tabCompose, linesFromBreaks, placeLine, hyphenDictionary,
+  type Item, type Line, type ParaStyle, type TabResolution,
+} from './text/compose';
+
+export { applyParagraphStyle } from './text/props';
+export type { StoryStyles } from './text/story';
 
 /* -------------------------------------------------------------------------- */
 /* Public types                                                                */
@@ -32,10 +39,17 @@ export interface TokenContext {
   subtitle: string;
   author: string;
   publisher: string;
+  /** The current chapter (running heads on masters). */
+  chapter?: string;
 }
 
-/** The project's named styles, used by `[Name]` paragraph tags and `<Name>…</Name>` runs. */
-export interface StoryStyles { para: ParagraphStyleDef[]; char: CharacterStyleDef[] }
+/** An item the text wraps around, in frame-local pt (already grown by its wrap offset). */
+export interface WrapShape {
+  x: number; y: number; w: number; h: number;
+  shape: 'rect' | 'ellipse';
+  side: 'both' | 'largest' | 'left' | 'right';
+  jump?: boolean;
+}
 
 export interface FrameSpec {
   w: number;
@@ -43,9 +57,15 @@ export interface FrameSpec {
   columns: number;
   columnGap: number;
   inset: number;
-  verticalAlign: 'top' | 'middle' | 'bottom';
+  insets?: { top: number; right: number; bottom: number; left: number } | null;
+  verticalAlign: 'top' | 'middle' | 'bottom' | 'justify';
   /** Frame-local y of any baseline-grid line, and the grid increment. */
   grid?: { origin: number; increment: number } | null;
+  firstBaseline?: TextElement['firstBaseline'];
+  firstBaselineMin?: number;
+  balance?: boolean;
+  columnRule?: TextElement['columnRule'];
+  wraps?: WrapShape[];
 }
 
 /** Per-line facts for the editor's micro-typography checks. */
@@ -71,14 +91,18 @@ export interface FrameLayout {
   baselines: number[];
   /** Line boxes (frame-local) — used by manuscript ruling and the editor. */
   lines: LineInfo[];
+  /** Depth the text actually uses (for frames that fit their height to the text). */
+  usedHeight?: number;
+  /** Headings (# / ##) whose first line is set in this frame, for generated contents. */
+  heads?: { level: 1 | 2; text: string }[];
 }
 
 /* -------------------------------------------------------------------------- */
-/* Tokens & inline markup                                                      */
+/* Tokens                                                                      */
 /* -------------------------------------------------------------------------- */
 
 export function expandTokens(text: string, t: TokenContext): string {
-  return text.replace(/\{(page|pages|title|subtitle|author|publisher|year)(?::(roman|ROMAN))?\}/g, (_, k: string, fmt?: string) => {
+  return text.replace(/\{(page|pages|title|subtitle|author|publisher|year|chapter)(?::(roman|ROMAN))?\}/g, (_, k: string, fmt?: string) => {
     switch (k) {
       case 'page': return fmt === 'roman' ? toRoman(t.page) : fmt === 'ROMAN' ? toRoman(t.page, true) : String(t.page);
       case 'pages': return String(t.pages);
@@ -87,578 +111,10 @@ export function expandTokens(text: string, t: TokenContext): string {
       case 'author': return t.author;
       case 'publisher': return t.publisher;
       case 'year': return String(new Date().getFullYear());
+      case 'chapter': return t.chapter ?? '';
       default: return '';
     }
   });
-}
-
-interface SpanStyle { italic: boolean; bold: boolean; sc: boolean; cs: CharacterStyleProps | null }
-/** `kern[i]`: manual kerning after UTF-16 unit `i`, thousandths of an em. */
-interface Piece { text: string; st: SpanStyle; kern?: number[] }
-interface Word { pieces: Piece[]; text: string }
-type ParaKind = 'body' | 'h1' | 'h2' | 'break';
-interface Paragraph { kind: ParaKind; words: Word[]; first: boolean; style: TextStyle; pstyle: ParagraphStyleProps | null }
-
-const PLAIN: SpanStyle = { italic: false, bold: false, sc: false, cs: null };
-
-/** The frame style with a paragraph style laid over it (unset properties inherit). */
-export function applyParagraphStyle(s: TextStyle, p: ParagraphStyleProps | null | undefined): TextStyle {
-  if (!p) return s;
-  const out: TextStyle = { ...s };
-  const keys = ['fontFamily', 'fontSize', 'leading', 'weight', 'italic', 'tracking', 'color', 'align', 'firstLineIndent', 'leftIndent', 'rightIndent', 'textTransform', 'hyphenate', 'kerning'] as const;
-  for (const k of keys) if (p[k] != null) (out as unknown as Record<string, unknown>)[k] = p[k];
-  // A new size without a new leading keeps the frame's proportion of leading to size.
-  if (p.fontSize != null && p.leading == null) out.leading = +((s.leading * p.fontSize) / s.fontSize).toFixed(2);
-  if (p.fontFamily != null && p.fontFamily !== s.fontFamily) out.axes = {};
-  if (p.features) out.features = { ...s.features, ...p.features };
-  return out;
-}
-
-const mergeCs = (stack: CharacterStyleProps[]): CharacterStyleProps | null =>
-  stack.length ? stack.reduce<CharacterStyleProps>((a, b) => ({ ...a, ...b, features: { ...(a.features ?? {}), ...(b.features ?? {}) } }), {}) : null;
-
-const nameKey = (n: string) => n.trim().toLowerCase();
-
-/**
- * `*italic*`, `**bold**`, `^small caps^`; `\*` escapes. Lines: `# `, `## `, `---`.
- * `[Style] ` at the start of a line applies a paragraph style, `<Style>…</Style>` (or `</>`) a
- * character style, `{k:-20}` kerns the following pair by thousandths of an em.
- */
-function parseStory(text: string, style: TextStyle, styles: StoryStyles | null): Paragraph[] {
-  const pmap = new Map((styles?.para ?? []).map((d) => [nameKey(d.name), d.props]));
-  const cmap = new Map((styles?.char ?? []).map((d) => [nameKey(d.name), d.props]));
-  const paras: Paragraph[] = [];
-  let afterBreak = true;
-  for (const rawLine of text.replace(/\r\n?/g, '\n').split('\n')) {
-    let line = rawLine.replace(/\s+$/, '');
-    if (!line.trim()) { continue; }
-    let pstyle: ParagraphStyleProps | null = null;
-    const tag = /^\[([^\]]{1,60})\]\s*/.exec(line);
-    if (tag && pmap.has(nameKey(tag[1]))) {
-      pstyle = pmap.get(nameKey(tag[1]))!;
-      line = line.slice(tag[0].length);
-      if (!line.trim()) continue;
-    }
-    let kind: ParaKind = 'body';
-    let body = line;
-    if (/^#\s/.test(line)) { kind = 'h1'; body = line.slice(2); }
-    else if (/^##\s/.test(line)) { kind = 'h2'; body = line.slice(3); }
-    else if (/^(-{3,}|\*\s\*\s\*|⁂)$/.test(line.trim())) { kind = 'break'; body = '⁂'; }
-    const eff = applyParagraphStyle(style, pstyle);
-    const words = parseInline(body, eff, cmap);
-    paras.push({ kind, words, first: afterBreak, style: eff, pstyle });
-    afterBreak = kind !== 'body';
-  }
-  return paras;
-}
-
-function parseInline(s: string, style: TextStyle, cmap: Map<string, CharacterStyleProps>): Word[] {
-  const st: SpanStyle = { ...PLAIN };
-  const csStack: CharacterStyleProps[] = [];
-  const words: Word[] = [];
-  let cur: Piece[] = [];
-  let buf = '';
-  let kbuf: number[] = [];
-  const flush = () => {
-    if (buf) cur.push({ text: buf, st: { ...st }, kern: kbuf.some((v) => v) ? Array.from({ length: buf.length }, (_, i) => kbuf[i] ?? 0) : undefined });
-    buf = '';
-    kbuf = [];
-  };
-  const endWord = () => {
-    flush();
-    if (cur.length) words.push({ pieces: cur, text: cur.map((p) => p.text).join('') });
-    cur = [];
-  };
-  // Kerning after the last character set so far (a kern at a word start widens the space).
-  const addKern = (n: number) => {
-    if (buf) { kbuf[buf.length - 1] = (kbuf[buf.length - 1] ?? 0) + n; return; }
-    const piece = cur.length ? cur[cur.length - 1] : words.length ? words[words.length - 1].pieces.at(-1) : undefined;
-    if (!piece) return;
-    piece.kern ??= new Array<number>(piece.text.length).fill(0);
-    piece.kern[piece.text.length - 1] += n;
-  };
-  for (let i = 0; i < s.length; i++) {
-    const ch = s[i];
-    if (ch === '\\' && i + 1 < s.length) { buf += s[++i]; continue; }
-    if (ch === '{') {
-      const m = /^\{k:([+-]?\d+(?:\.\d+)?)\}/.exec(s.slice(i, i + 16));
-      if (m) { addKern(parseFloat(m[1])); i += m[0].length - 1; continue; }
-    }
-    if (ch === '<' && cmap.size) {
-      const m = /^<(\/?)([^<>/]{0,40})>/.exec(s.slice(i, i + 46));
-      if (m) {
-        const name = nameKey(m[2]);
-        if (m[1] && csStack.length && (!name || cmap.has(name))) { flush(); csStack.pop(); st.cs = mergeCs(csStack); i += m[0].length - 1; continue; }
-        if (!m[1] && cmap.has(name)) { flush(); csStack.push(cmap.get(name)!); st.cs = mergeCs(csStack); i += m[0].length - 1; continue; }
-      }
-    }
-    if (ch === '*' && s[i + 1] === '*') { flush(); st.bold = !st.bold; i++; continue; }
-    if (ch === '*') { flush(); st.italic = !st.italic; continue; }
-    if (ch === '^') { flush(); st.sc = !st.sc; continue; }
-    if (ch === ' ' || ch === '\t') { endWord(); continue; }
-    buf += ch;
-  }
-  endWord();
-  for (const w of words) {
-    let changed = false;
-    for (const p of w.pieces) {
-      const tt = p.st.cs?.textTransform && p.st.cs.textTransform !== 'none' ? p.st.cs.textTransform : style.textTransform;
-      if (tt !== 'uppercase' && tt !== 'lowercase') continue;
-      const next = tt === 'uppercase' ? p.text.toUpperCase() : p.text.toLowerCase();
-      if (next.length !== p.text.length) p.kern = undefined;
-      p.text = next;
-      changed = true;
-    }
-    if (changed) w.text = w.pieces.map((p) => p.text).join('');
-  }
-  return words;
-}
-
-/* -------------------------------------------------------------------------- */
-/* Measured items                                                              */
-/* -------------------------------------------------------------------------- */
-
-/** `kern`: extra advance after each UTF-16 unit, pt; `dy`: baseline shift, pt (up). */
-interface Seg { text: string; font: FontRef; size: number; ls: number; width: number; color: string; kern?: number[]; dy?: number }
-
-interface Box { t: 'box'; w: number; segs: Seg[]; word: number }
-interface Glue { t: 'glue'; w: number; st: number; sh: number }
-interface Pen { t: 'pen'; w: number; p: number; f: boolean; hyphen?: Seg | null }
-type Item = Box | Glue | Pen;
-
-const INF = 10000;
-
-interface ParaStyle {
-  size: number;
-  leading: number;
-  align: TextStyle['align'];
-  indent: number;
-  spaceBefore: number;
-  spaceAfter: number;
-  weight: number;
-  tracking: number;
-  forceSc: boolean;
-  left: number;
-  right: number;
-}
-
-function paraStyle(p: Paragraph, s: TextStyle): ParaStyle {
-  const base: ParaStyle = {
-    size: s.fontSize, leading: s.leading, align: s.align,
-    // A negative first-line indent hangs, on every paragraph (lists, bibliographies).
-    indent: s.firstLineIndent < 0 ? s.firstLineIndent : p.first && !s.indentFirstParagraph ? 0 : s.firstLineIndent,
-    spaceBefore: p.first ? 0 : p.pstyle?.spaceBefore ?? s.paragraphSpacing, spaceAfter: p.pstyle?.spaceAfter ?? 0,
-    weight: s.weight, tracking: s.tracking, forceSc: s.textTransform === 'small-caps', left: s.leftIndent ?? 0, right: s.rightIndent ?? 0,
-  };
-  const centred = s.align === 'justify' || s.align === 'center' || s.align === 'justify-all';
-  switch (p.kind) {
-    case 'h1':
-      return { ...base, size: s.fontSize * 1.75, leading: s.leading * 2, align: centred ? 'center' : s.align, indent: 0, spaceBefore: s.leading * 2, spaceAfter: s.leading, tracking: s.tracking + 10 };
-    case 'h2':
-      return { ...base, size: s.fontSize, leading: s.leading, align: centred ? 'center' : s.align, indent: 0, spaceBefore: s.leading, spaceAfter: s.leading * 0.5, tracking: s.tracking + 80, forceSc: true };
-    case 'break':
-      return { ...base, align: 'center', indent: 0, spaceBefore: s.leading * 0.5, spaceAfter: s.leading * 0.5 };
-    default:
-      return base;
-  }
-}
-
-const isLower = (ch: string) => ch !== ch.toUpperCase() && ch === ch.toLowerCase();
-
-class ItemBuilder {
-  private rtl: boolean;
-  constructor(private style: TextStyle, private ps: ParaStyle) { this.rtl = style.direction === 'rtl'; }
-
-  font(st: SpanStyle, extraFeatures?: Record<string, boolean>): FontRef {
-    const s = this.style;
-    const cs = st.cs;
-    // Italic inside italic text returns to roman — the typographic convention for emphasis.
-    const italic = (cs?.italic ?? s.italic) !== st.italic;
-    const w0 = cs?.weight ?? this.ps.weight;
-    const weight = st.bold ? Math.min(900, Math.max(w0 + 250, 650)) : w0;
-    const features = { ...s.features, ...(cs?.features ?? {}), ...(extraFeatures ?? {}) };
-    if (s.textTransform === 'uppercase' || cs?.textTransform === 'uppercase') features.case = true;
-    // Optical kerning replaces the font's pairs; "none" sets the type unkerned.
-    if ((s.kerning ?? 'metrics') !== 'metrics') features.kern = false;
-    const family = cs?.fontFamily ?? s.fontFamily;
-    return resolveFont({ family, weight, italic, axes: family === s.fontFamily ? s.axes : {}, features, size: this.ps.size });
-  }
-
-  /** One measured segment; manual (‰ em) and optical kerning become extra advance per character. */
-  private seg(text: string, font: FontRef, size: number, ls: number, color: string, dy: number, manual?: number[]): Seg {
-    let kern: number[] | undefined;
-    if (!this.rtl) {
-      const man = manual && manual.length === text.length && manual.some((v) => v) ? manual : null;
-      const opt = this.style.kerning === 'optical' ? opticalKerning(text, font) : null;
-      if (man || opt) kern = Array.from({ length: text.length }, (_, i) => ((man?.[i] ?? 0) / 1000) * size + (opt ? opt[i] * size : 0));
-    }
-    const kw = kern ? kern.reduce((a, b) => a + b, 0) : 0;
-    return { text, font, size, ls, width: measure(text, font, size) + ls * [...text].length + kw, color, kern, dy: dy || undefined };
-  }
-
-  /** Measure a piece of text in a span style, synthesising small caps when needed. */
-  segs(text: string, st: SpanStyle, sc: boolean, manual?: number[]): Seg[] {
-    const ps = this.ps;
-    const cs = st.cs;
-    let size = ps.size * ((cs?.sizeScale ?? 100) / 100);
-    let dy = cs?.baselineShift ?? 0;
-    let extra: Record<string, boolean> | undefined;
-    if (cs?.position === 'superscript' || cs?.position === 'subscript') {
-      // True superior / inferior figures when the font has them, else scaled and shifted.
-      const tag = cs.position === 'superscript' ? 'sups' : 'subs';
-      if (faceSupports(this.font(st, { [tag]: true }), tag)) extra = { [tag]: true };
-      else { dy += cs.position === 'superscript' ? size * 0.33 : -size * 0.14; size *= 0.62; }
-    }
-    const color = cs?.color ?? this.style.color;
-    const ls = ((ps.tracking + (cs?.tracking ?? 0)) / 1000) * size;
-    sc = sc || cs?.textTransform === 'small-caps';
-    if (!sc) return [this.seg(text, this.font(st, extra), size, ls, color, dy, manual)];
-    const trial = this.font(st, { ...extra, smcp: true });
-    if (faceSupports(trial, 'smcp')) {
-      // Small caps want a touch of letter-spacing (Bringhurst §3.2.2).
-      return [this.seg(text, trial, size, ls + 0.05 * size, color, dy, manual)];
-    }
-    // Synthetic small caps: lowercase → capitals at 72% with added tracking.
-    const out: Seg[] = [];
-    const font = this.font(st, extra);
-    let buf = '';
-    let start = 0, u = 0;
-    let lower: boolean | null = null;
-    const push = () => {
-      if (!buf) return;
-      const sz = lower ? size * 0.72 : size;
-      const t = lower ? buf.toUpperCase() : buf;
-      out.push(this.seg(t, font, sz, ls + 0.05 * sz, color, dy, t.length === buf.length ? manual?.slice(start, start + buf.length) : undefined));
-      buf = '';
-      start = u;
-    };
-    for (const ch of text) {
-      const lc = isLower(ch);
-      if (lower !== null && lc !== lower) push();
-      lower = lc;
-      buf += ch;
-      u += ch.length;
-    }
-    push();
-    return out;
-  }
-
-  wordSegs(word: Word, from: number, to: number, sc: boolean): Seg[] {
-    const out: Seg[] = [];
-    let off = 0;
-    for (const p of word.pieces) {
-      const a = Math.max(from, off), b = Math.min(to, off + p.text.length);
-      if (b > a) out.push(...this.segs(p.text.slice(a - off, b - off), p.st, sc || p.st.sc || this.ps.forceSc, p.kern?.slice(a - off, b - off)));
-      off += p.text.length;
-    }
-    return out;
-  }
-
-  space(): number {
-    const font = this.font(PLAIN);
-    const sp = measure(' ', font, this.ps.size);
-    return sp * (1 + this.style.wordSpacing / 100) + (this.ps.tracking / 1000) * this.ps.size;
-  }
-
-  hyphen(word: Word, at: number): Seg {
-    let off = 0;
-    let st: SpanStyle = PLAIN;
-    for (const p of word.pieces) {
-      if (at <= off + p.text.length) { st = p.st; break; }
-      off += p.text.length;
-    }
-    return this.segs('-', st, false)[0];
-  }
-}
-
-const sumW = (segs: Seg[]) => segs.reduce((s, g) => s + g.width, 0);
-
-function buildItems(p: Paragraph, style: TextStyle, ps: ParaStyle, scWords: number, ragged: boolean): Item[] {
-  const b = new ItemBuilder(style, ps);
-  const items: Item[] = [];
-  const sp = b.space();
-  const justify = !ragged;
-  // Justification range for word spaces, % of the desired space (Bringhurst: keep it narrow).
-  const stretch = Math.max(0.05, (style.wordSpaceMax ?? 150) / 100 - 1);
-  const shrink = Math.max(0, Math.min(0.9, 1 - (style.wordSpaceMin ?? 67) / 100));
-  if (ps.indent > 0) items.push({ t: 'box', w: ps.indent, segs: [], word: -1 });
-  p.words.forEach((word, wi) => {
-    if (wi > 0) {
-      if (style.avoidRunts && wi === p.words.length - 1 && p.words.length > 3) items.push({ t: 'pen', w: 0, p: INF, f: false });
-      if (justify) items.push({ t: 'glue', w: sp, st: sp * stretch, sh: sp * shrink });
-      else {
-        items.push({ t: 'glue', w: 0, st: sp * 3, sh: 0 });
-        items.push({ t: 'pen', w: 0, p: 0, f: false });
-        items.push({ t: 'glue', w: sp, st: -sp * 3, sh: 0 });
-      }
-    }
-    const sc = wi < scWords;
-    const text = word.text;
-    // Break opportunities: hyphenation points + after explicit hyphens/dashes.
-    const breaks: { at: number; hyph: boolean }[] = [];
-    for (let i = 1; i < text.length - 1; i++) if (/[-–—/]/.test(text[i - 1]) && /\p{L}/u.test(text[i])) breaks.push({ at: i, hyph: false });
-    if (style.hyphenate && p.kind === 'body') {
-      // Hyphenate only the alphabetic core of the word.
-      const m = text.match(/^([^\p{L}]*)(\p{L}[\p{L}'’]*\p{L})([^\p{L}]*)$/u);
-      if (m && m[2].length >= (style.hyphenMinWord ?? 5) && !/[A-Z]{2}/.test(m[2]) && (style.hyphenateCaps !== false || !/^\p{Lu}/u.test(m[2]))) {
-        for (const at of hyphenPoints(m[2].toLowerCase(), style.language, style.hyphenBefore ?? 2, style.hyphenAfter ?? 3)) breaks.push({ at: m[1].length + at, hyph: true });
-      }
-    }
-    breaks.sort((x, y) => x.at - y.at);
-    let prev = 0;
-    for (const br of breaks) {
-      const segs = b.wordSegs(word, prev, br.at, sc);
-      items.push({ t: 'box', w: sumW(segs), segs, word: wi });
-      if (br.hyph) {
-        const h = b.hyphen(word, br.at);
-        items.push({ t: 'pen', w: h.width, p: ragged ? 200 : 50, f: true, hyphen: h });
-      } else items.push({ t: 'pen', w: 0, p: 50, f: true, hyphen: null });
-      prev = br.at;
-    }
-    const segs = b.wordSegs(word, prev, text.length, sc);
-    items.push({ t: 'box', w: sumW(segs), segs, word: wi });
-  });
-  items.push({ t: 'glue', w: 0, st: INF, sh: 0 });
-  items.push({ t: 'pen', w: 0, p: -INF, f: true });
-  return items;
-}
-
-/* -------------------------------------------------------------------------- */
-/* Knuth–Plass                                                                 */
-/* -------------------------------------------------------------------------- */
-
-/** `hc`: consecutive lines ending in a hyphen up to this break. */
-interface KPNode { pos: number; line: number; fit: number; w: number; st: number; sh: number; dem: number; hc: number; prev: KPNode | null }
-
-const LINE_PENALTY = 10;
-const FLAGGED_DEMERITS = 3000;
-const FITNESS_DEMERITS = 3000;
-
-function knuthPlass(items: Item[], widthAt: (line: number) => number, tolerance: number, hyphenLimit = 0): number[] | null {
-  let active: KPNode[] = [{ pos: -1, line: 0, fit: 1, w: 0, st: 0, sh: 0, dem: 0, hc: 0, prev: null }];
-  let W = 0, ST = 0, SH = 0;
-  const n = items.length;
-
-  const afterBreakTotals = (i: number) => {
-    let w = W, st = ST, sh = SH;
-    for (let j = i; j < n; j++) {
-      const it = items[j];
-      if (it.t === 'glue') { w += it.w; st += it.st; sh += it.sh; }
-      else if (it.t === 'box' || (it.t === 'pen' && it.p === -INF && j > i)) break;
-    }
-    return { w, st, sh };
-  };
-
-  for (let i = 0; i < n; i++) {
-    const it = items[i];
-    if (it.t === 'box') { W += it.w; continue; }
-    const legal = it.t === 'glue' ? i > 0 && items[i - 1].t === 'box' : it.p < INF;
-    if (legal) {
-      const best = new Map<string, { dem: number; node: KPNode; fit: number; hc: number }>();
-      const flagged = it.t === 'pen' && it.f && it.p > -INF;
-      const next: KPNode[] = [];
-      for (const a of active) {
-        const lineW = widthAt(a.line);
-        let w = W - a.w;
-        if (it.t === 'pen') w += it.w;
-        let r: number;
-        if (w < lineW) { const st = ST - a.st; r = st > 0 ? (lineW - w) / st : INF; }
-        else if (w > lineW) { const sh = SH - a.sh; r = sh > 0 ? (lineW - w) / sh : -INF; }
-        else r = 0;
-        const forced = it.t === 'pen' && it.p === -INF;
-        const hc = flagged ? a.hc + 1 : 0;
-        if (r >= -1 && r <= tolerance && !(hyphenLimit > 0 && hc > hyphenLimit)) {
-          const bad = 100 * Math.abs(r) ** 3;
-          const p = it.t === 'pen' ? it.p : 0;
-          let dem = p >= 0 ? (LINE_PENALTY + bad) ** 2 + p * p : p > -INF ? (LINE_PENALTY + bad) ** 2 - p * p : (LINE_PENALTY + bad) ** 2;
-          const prevItem = a.pos >= 0 ? items[a.pos] : null;
-          if (it.t === 'pen' && it.f && prevItem && prevItem.t === 'pen' && prevItem.f) dem += FLAGGED_DEMERITS;
-          const fit = r < -0.5 ? 0 : r <= 0.5 ? 1 : r <= 1 ? 2 : 3;
-          if (Math.abs(fit - a.fit) > 1) dem += FITNESS_DEMERITS;
-          dem += a.dem;
-          const key = `${a.line + 1}:${fit}:${hc}`;
-          const cur = best.get(key);
-          if (!cur || dem < cur.dem) best.set(key, { dem, node: a, fit, hc });
-        }
-        // Keep the node active unless the line is now overfull or a forced break passed it.
-        if (!(r < -1 || forced)) next.push(a);
-      }
-      if (best.size) {
-        const totals = afterBreakTotals(i);
-        for (const [key, b] of best) {
-          const line = +key.split(':')[0];
-          next.push({ pos: i, line, fit: b.fit, ...totals, dem: b.dem, hc: b.hc, prev: b.node });
-        }
-      }
-      active = next;
-      if (!active.length) return null;
-    }
-    if (it.t === 'glue') { W += it.w; ST += it.st; SH += it.sh; }
-  }
-  const finals = active.filter((a) => a.pos === n - 1);
-  if (!finals.length) return null;
-  let bestNode = finals[0];
-  for (const a of finals) if (a.dem < bestNode.dem) bestNode = a;
-  const out: number[] = [];
-  for (let node: KPNode | null = bestNode; node && node.pos >= 0; node = node.prev) out.unshift(node.pos);
-  return out;
-}
-
-/** First-fit fallback when no feasible total-fit solution exists (very narrow columns). */
-function greedy(items: Item[], widthAt: (line: number) => number): number[] {
-  const out: number[] = [];
-  let w = 0, line = 0, lastBreak = -1;
-  for (let i = 0; i < items.length; i++) {
-    const it = items[i];
-    if (it.t === 'box') {
-      if (w + it.w > widthAt(line) && lastBreak >= 0 && out[out.length - 1] !== lastBreak) {
-        out.push(lastBreak);
-        line++;
-        w = 0;
-        // Re-accumulate from the break.
-        for (let j = lastBreak + 1; j <= i; j++) { const x = items[j]; if (x.t === 'box') w += x.w; else if (x.t === 'glue' && w > 0) w += x.w; }
-        continue;
-      }
-      w += it.w;
-    } else if (it.t === 'glue') {
-      if (i > 0 && items[i - 1].t === 'box') lastBreak = i;
-      if (w > 0) w += it.w;
-    } else if (it.p < INF) {
-      if (it.p === -INF) { out.push(i); break; }
-      lastBreak = i;
-    }
-  }
-  if (out[out.length - 1] !== items.length - 1) out.push(items.length - 1);
-  return out;
-}
-
-function breakLines(items: Item[], widthAt: (line: number) => number, hyphenLimit = 0): number[] {
-  return knuthPlass(items, widthAt, 2, hyphenLimit) ?? knuthPlass(items, widthAt, 8, hyphenLimit) ?? knuthPlass(items, widthAt, 8) ?? greedy(items, widthAt);
-}
-
-/* -------------------------------------------------------------------------- */
-/* Line assembly                                                               */
-/* -------------------------------------------------------------------------- */
-
-interface Line {
-  start: number;      // first item index (inclusive)
-  end: number;        // break item index (exclusive content)
-  hyphen: Seg | null;
-  last: boolean;
-}
-
-function linesFromBreaks(items: Item[], breaks: number[], from: number): Line[] {
-  const lines: Line[] = [];
-  let start = from;
-  for (const br of breaks) {
-    while (start < br && items[start].t !== 'box') start++;
-    const it = items[br];
-    lines.push({ start, end: br, hyphen: it.t === 'pen' && it.hyphen ? it.hyphen : null, last: it.t === 'pen' && it.p === -INF });
-    start = br + 1;
-  }
-  return lines;
-}
-
-const L_PROTRUDE: Record<string, number> = { '“': 1, '‘': 1, '"': 1, "'": 1, '«': 0.7, '‹': 0.7, '(': 0.3, '[': 0.3, '¿': 0.5, '¡': 0.5, A: 0.05, T: 0.05, V: 0.05, W: 0.05, Y: 0.05, J: 0.05, v: 0.05, w: 0.05, y: 0.05 };
-const R_PROTRUDE: Record<string, number> = { '.': 0.7, ',': 0.7, '-': 0.7, '‐': 0.7, '–': 0.3, '—': 0.2, '’': 1, '”': 1, '"': 1, "'": 1, ':': 0.5, ';': 0.5, '!': 0.2, '?': 0.2, ')': 0.3, ']': 0.3, '»': 0.7, '›': 0.7, '…': 0.3, A: 0.05, T: 0.05, V: 0.05, W: 0.05, Y: 0.05, k: 0.04, r: 0.04, v: 0.05, w: 0.05, y: 0.05 };
-
-function protrusion(seg: Seg | undefined, side: 'l' | 'r'): number {
-  if (!seg || !seg.text) return 0;
-  const chars = [...seg.text];
-  const ch = side === 'l' ? chars[0] : chars[chars.length - 1];
-  const f = (side === 'l' ? L_PROTRUDE : R_PROTRUDE)[ch];
-  if (!f) return 0;
-  return f * measure(ch, seg.font, seg.size);
-}
-
-interface Placed { runs: TextRun[]; width: number; ratio: number; chars: number; justified: boolean }
-
-function sameFont(a: FontRef, b: FontRef): boolean {
-  return a === b || (a.face === b.face && a.css === b.css && a.weight === b.weight && a.italic === b.italic &&
-    JSON.stringify(a.axes) === JSON.stringify(b.axes) && JSON.stringify(a.features) === JSON.stringify(b.features));
-}
-
-function placeLine(items: Item[], line: Line, lineW: number, alignIn: TextStyle['align'], optical: boolean, rtl: boolean, baseline: number, xOffset: number, mergeSpaces: boolean): Placed {
-  // Right-to-left lines are composed left-to-right with mirrored alignment, then mirrored.
-  const align = rtl ? (alignIn === 'left' ? 'right' : alignIn === 'right' ? 'left' : alignIn) : alignIn;
-  let natural = 0, st = 0, sh = 0;
-  for (let i = line.start; i < line.end; i++) {
-    const it = items[i];
-    if (it.t === 'box') natural += it.w;
-    else if (it.t === 'glue') { natural += it.w; st += it.st; sh += it.sh; }
-  }
-  if (line.hyphen) natural += line.hyphen.width;
-
-  // Optical margin alignment: let punctuation and some round/diagonal letters hang.
-  let firstSeg: Seg | undefined, lastSeg: Seg | undefined;
-  for (let i = line.start; i < line.end && !firstSeg; i++) { const it = items[i]; if (it.t === 'box' && it.segs.length) firstSeg = it.segs[0]; }
-  if (line.hyphen) lastSeg = line.hyphen;
-  for (let i = line.end - 1; i >= line.start && !lastSeg; i--) { const it = items[i]; if (it.t === 'box' && it.segs.length) lastSeg = it.segs[it.segs.length - 1]; }
-  const lp = optical && !rtl ? protrusion(firstSeg, 'l') : 0;
-  const rp = optical && !rtl ? protrusion(lastSeg, 'r') : 0;
-
-  const justify = align === 'justify-all' || (align === 'justify' && !line.last);
-  const target = lineW + lp + rp;
-  let r = 0;
-  if (justify) {
-    if (natural < target && st > 0 && st < INF / 2) r = (target - natural) / st;
-    else if (natural > target && sh > 0) r = Math.max(-1, (target - natural) / sh);
-  } else if (natural > target && sh > 0) {
-    r = Math.max(-1, (target - natural) / sh);
-  }
-
-  let x = 0;
-  const runs: TextRun[] = [];
-  for (let i = line.start; i < line.end; i++) {
-    const it = items[i];
-    if (it.t === 'box') {
-      for (const s of it.segs) {
-        runs.push({ x, y: baseline - (s.dy ?? 0), text: s.text, font: s.font, size: s.size, color: s.color, letterSpacing: s.ls, width: s.width, kern: s.kern });
-        x += s.width;
-      }
-      if (it.segs.length === 0) x += it.w;
-    } else if (it.t === 'glue') {
-      x += it.w + (r > 0 ? r * it.st : r * it.sh);
-    }
-  }
-  if (line.hyphen) {
-    const h = line.hyphen;
-    runs.push({ x, y: baseline - (h.dy ?? 0), text: h.text, font: h.font, size: h.size, color: h.color, letterSpacing: h.ls, width: h.width });
-    x += h.width;
-  }
-  const width = x;
-  let x0: number;
-  if (justify) x0 = -lp;
-  else if (align === 'right') x0 = lineW - width + rp;
-  else if (align === 'center') x0 = (lineW - width) / 2 + (rp - lp) / 2;
-  else x0 = -lp;
-  for (const run of runs) {
-    run.x = rtl ? xOffset + lineW - (run.x + x0 + run.width) : xOffset + run.x + x0;
-    if (rtl) run.dir = 'rtl';
-  }
-  const chars = runs.reduce((n, rr) => n + [...rr.text].length, 0) + Math.max(0, runs.length - 1);
-  if (rtl || justify) return { runs, width, ratio: justify ? r : 0, chars, justified: justify };
-  // Ragged lines: merge words into one run per font so the SVG stays light. The glue equals
-  // the font's own space advance, which is exactly what the browser will set.
-  const merged: TextRun[] = [];
-  for (const run of runs) {
-    const prev = merged[merged.length - 1];
-    if (prev && sameFont(prev.font, run.font) && prev.size === run.size && prev.color === run.color && prev.letterSpacing === run.letterSpacing && prev.y === run.y) {
-      const gap = run.x - (prev.x + prev.width);
-      // Joined runs keep their kerning, with a zero entry for the joining space.
-      const joinKern = (sep: string) => {
-        if (!prev.kern && !run.kern) return;
-        prev.kern = [...(prev.kern ?? new Array<number>(prev.text.length).fill(0)), ...new Array<number>(sep.length).fill(0), ...(run.kern ?? new Array<number>(run.text.length).fill(0))];
-      };
-      if (Math.abs(gap) < 0.01) { joinKern(''); prev.text += run.text; prev.width += run.width; continue; }
-      if (mergeSpaces) {
-        const sp = measure(' ', prev.font, prev.size) + (prev.letterSpacing ?? 0);
-        if (Math.abs(gap - sp) < 0.02) { joinKern(' '); prev.text += ' ' + run.text; prev.width += gap + run.width; continue; }
-      }
-    }
-    merged.push({ ...run, kern: run.kern ? [...run.kern] : undefined });
-  }
-  return { runs: merged, width, ratio: r, chars, justified: false };
 }
 
 /* -------------------------------------------------------------------------- */
@@ -667,11 +123,11 @@ function placeLine(items: Item[], line: Line, lineW: number, alignIn: TextStyle[
 
 interface PreparedPara { para: Paragraph; ps: ParaStyle; items: Item[]; ragged: boolean }
 
-interface Prepared { key: string; paras: PreparedPara[]; dropCap: DropCapInfo | null }
+interface Prepared { key: string; paras: PreparedPara[]; dropCap: DropCapInfo | null; styles: StoryStyles | null }
 
 interface DropCapInfo {
   text: string;
-  font: FontRef;
+  font: ReturnType<typeof resolveFont>;
   size: number;
   width: number;
   capBody: number;
@@ -682,22 +138,20 @@ interface DropCapInfo {
 
 const storyCache = new Map<string, Prepared>();
 
-function styleKey(s: TextStyle) {
-  return JSON.stringify(s);
-}
-
 function prepare(text: string, style: TextStyle, firstWidth: number, styles: StoryStyles | null): Prepared {
-  const key = `${useFontStore.getState().version}|${styleKey(style)}|${Math.round(firstWidth)}|${styles ? JSON.stringify(styles) : ''}|${text}`;
+  const key = `${useFontStore.getState().version}|${JSON.stringify(style)}|${Math.round(firstWidth)}|${styles ? JSON.stringify(styles) : ''}|${text}`;
   const hit = storyCache.get(key);
   if (hit) return hit;
   const paras = parseStory(text, style, styles);
+  const dict = hyphenDictionary(styles?.hyphenation);
 
-  // Drop cap: take the first letter (plus an opening quote) of the first body paragraph.
+  // Drop cap: take the first letters (plus an opening quote) of the first body paragraph.
   let dropCap: DropCapInfo | null = null;
   const dc = style.dropCap;
   if (dc.enabled && paras.length && paras[0].kind === 'body' && paras[0].words.length) {
     const w0 = paras[0].words[0];
-    const m = w0.text.match(/^([“‘"'«]?)(\p{L}|\p{N})/u);
+    const n = Math.max(1, Math.min(6, Math.round(dc.chars ?? 1)));
+    const m = w0.text.match(new RegExp(`^([“‘"'«]?)((?:\\p{L}|\\p{N}){1,${n}})`, 'u'));
     if (m) {
       const letter = m[0];
       const restText = w0.text.slice(letter.length);
@@ -706,10 +160,11 @@ function prepare(text: string, style: TextStyle, firstWidth: number, styles: Sto
       const pieces: Piece[] = [];
       for (const p of w0.pieces) {
         if (toRemove >= p.text.length) { toRemove -= p.text.length; continue; }
-        pieces.push({ text: p.text.slice(toRemove), st: p.st });
+        pieces.push({ text: p.text.slice(toRemove), st: p.st, kern: p.kern?.slice(toRemove) });
         toRemove = 0;
       }
-      paras[0] = { ...paras[0], words: restText ? [{ pieces, text: restText }, ...paras[0].words.slice(1)] : paras[0].words.slice(1) };
+      const shy = w0.shy?.map((v) => v - letter.length).filter((v) => v > 0);
+      paras[0] = { ...paras[0], words: restText ? [{ ...w0, pieces, text: restText, shy: shy?.length ? shy : undefined }, ...paras[0].words.slice(1)] : paras[0].words.slice(1) };
       const bodyFont = resolveFont({ family: style.fontFamily, weight: style.weight, italic: style.italic, axes: style.axes, features: style.features, size: style.fontSize });
       const capBody = fontMetrics(bodyFont).capHeight * style.fontSize;
       const dcFont0 = resolveFont({ family: dc.fontFamily ?? style.fontFamily, weight: dc.weight, italic: false, axes: {}, features: { lnum: true }, size: 72 });
@@ -728,29 +183,29 @@ function prepare(text: string, style: TextStyle, firstWidth: number, styles: Sto
     const ps = paraStyle(para, pst);
     if (dropCap && i === 0) ps.indent = 0;
     const ragged = ps.align === 'left' || ps.align === 'right' || ps.align === 'center';
-    let items = buildItems(para, pst, ps, 0, ragged);
+    let items = buildItems(para, pst, ps, 0, ragged, dict);
     if (i === 0 && style.firstLineSmallCaps && para.kind === 'body') {
       // Iterate: set the words of line one in small caps until the line is stable.
       let scCount = 0;
       const fw = firstWidth - ps.left - ps.right;
       for (let pass = 0; pass < 3; pass++) {
         const widthAt = (ln: number) => (ln < (dropCap?.lines ?? 0) ? fw - (dropCap!.boxW + style.dropCap.gap) : fw);
-        const breaks = breakLines(items, widthAt, pst.hyphenLimit ?? 0);
+        const breaks = breakParagraph(items, widthAt, pst, ragged);
         const first = linesFromBreaks(items, breaks, 0)[0];
         let count = 0;
         for (let k = first.start; k < first.end; k++) { const it = items[k]; if (it.t === 'box' && it.word >= 0) count = it.word + 1; }
         if (first.hyphen) count = Math.max(0, count - 1);
         if (count === scCount) break;
         scCount = count;
-        items = buildItems(para, pst, ps, scCount, ragged);
+        items = buildItems(para, pst, ps, scCount, ragged, dict);
       }
     }
     return { para, ps, items, ragged };
   });
 
-  const result: Prepared = { key, paras: prepared, dropCap };
+  const result: Prepared = { key, paras: prepared, dropCap, styles };
   storyCache.set(key, result);
-  if (storyCache.size > 120) storyCache.delete(storyCache.keys().next().value!);
+  if (storyCache.size > 160) storyCache.delete(storyCache.keys().next().value!);
   return result;
 }
 
@@ -760,6 +215,21 @@ function prepare(text: string, style: TextStyle, firstWidth: number, styles: Sto
 
 interface Cursor { para: number; item: number }
 
+/** One line position: an x-interval of a column at a baseline (`col` −1 = beyond the frame). */
+interface Slot { x: number; w: number; baseline: number; col: number }
+
+interface Flow {
+  col: number;
+  /** Baseline of the previous line in this column (null at a column top). */
+  y: number | null;
+  /** Depth reserved for footnotes at the foot of each column. */
+  reserve: number[];
+  notes: Footnote[][];
+  used: boolean[];
+}
+
+const cloneFlow = (f: Flow): Flow => ({ col: f.col, y: f.y, reserve: [...f.reserve], notes: f.notes.map((n) => [...n]), used: [...f.used] });
+
 const snapUp = (y: number, g: { origin: number; increment: number } | null | undefined) =>
   g ? g.origin + Math.ceil((y - g.origin) / g.increment - 1e-6) * g.increment : y;
 const gridRound = (v: number, g: { origin: number; increment: number } | null | undefined) =>
@@ -767,130 +237,514 @@ const gridRound = (v: number, g: { origin: number; increment: number } | null | 
 const gridLeading = (lead: number, g: { origin: number; increment: number } | null | undefined) =>
   g ? Math.max(g.increment, gridRound(lead, g)) : lead;
 
-function layoutFrame(prep: Prepared, style: TextStyle, frame: FrameSpec, cursor: Cursor, isFirstFrame: boolean): { layout: FrameLayout; cursor: Cursor | null } {
-  const prims: Prim[] = [];
-  const runs: TextRun[] = [];
-  const baselines: number[] = [];
-  const lineBoxes: FrameLayout['lines'] = [];
+/** The parts of a column band [y0, y1] left free by wrap items, at least `minW` wide. */
+function bandIntervals(x0: number, w: number, y0: number, y1: number, wraps: WrapShape[], minW: number): { a: number; b: number }[] {
+  const whole = [{ a: x0, b: x0 + w }];
+  let segs = whole;
+  for (const wr of wraps) {
+    if (wr.y > y1 || wr.y + wr.h < y0) continue;
+    let ex0: number, ex1: number;
+    if (wr.shape === 'ellipse') {
+      const rx = wr.w / 2, ry = wr.h / 2, cx = wr.x + rx, cy = wr.y + ry;
+      const dy = y0 <= cy && cy <= y1 ? 0 : Math.min(Math.abs(y0 - cy), Math.abs(y1 - cy));
+      if (dy >= ry) continue;
+      const half = rx * Math.sqrt(1 - (dy / ry) ** 2);
+      ex0 = cx - half; ex1 = cx + half;
+    } else { ex0 = wr.x; ex1 = wr.x + wr.w; }
+    if (ex1 <= x0 || ex0 >= x0 + w) continue;
+    if (wr.jump) return [];
+    const next: { a: number; b: number }[] = [];
+    for (const s of segs) {
+      if (ex1 <= s.a || ex0 >= s.b) { next.push(s); continue; }
+      const left = { a: s.a, b: Math.max(s.a, ex0) }, right = { a: Math.min(s.b, ex1), b: s.b };
+      const lw = left.b - left.a, rw = right.b - right.a;
+      if (wr.side === 'left') next.push(left);
+      else if (wr.side === 'right') next.push(right);
+      else if (wr.side === 'largest') next.push(lw >= rw ? left : right);
+      else { next.push(left); next.push(right); }
+    }
+    segs = next;
+  }
+  // Only slivers cut by a wrap are dropped; an untouched column is used however narrow it is.
+  return segs === whole ? whole : segs.filter((s) => s.b - s.a >= minW);
+}
+
+const fnTokens: TokenContext = { page: 0, pages: 0, title: '', subtitle: '', author: '', publisher: '' };
+
+function layoutFrame(prep: Prepared, style: TextStyle, frame: FrameSpec, cursor: Cursor, isFirstFrame: boolean, bottomOverride?: number): { layout: FrameLayout; cursor: Cursor | null } {
+  const ins = frame.insets ?? { top: frame.inset, right: frame.inset, bottom: frame.inset, left: frame.inset };
   const cols = Math.max(1, Math.round(frame.columns));
-  const colW = Math.max(1, (frame.w - frame.inset * 2 - frame.columnGap * (cols - 1)) / cols);
-  const top = frame.inset;
-  const bottom = frame.h - frame.inset;
+  const colW = Math.max(1, (frame.w - ins.left - ins.right - frame.columnGap * (cols - 1)) / cols);
+  const top = ins.top;
+  // Spanning heads at the top of a multi-column frame push the columns' tops down.
+  let colTop = top;
+  let spanPhase = cols > 1;
+  let spanning = false;
+  const fullW = frame.w - ins.left - ins.right;
+  const frameBottom = frame.h - ins.bottom;
+  const bottom = bottomOverride ?? frameBottom;
   const grid = style.baselineGrid ? frame.grid : null;
+  const gridFirst = !!grid && style.gridAlign === 'first';
   const rtl = style.direction === 'rtl';
   const mergeSpaces = style.wordSpacing === 0;
   const body = fontMetrics(resolveFont({ family: style.fontFamily, weight: style.weight, italic: style.italic, size: style.fontSize }));
+  const wraps = frame.wraps ?? [];
 
-  const colXAt = (c: number) => frame.inset + (rtl ? cols - 1 - c : c) * (colW + frame.columnGap);
-  // First baseline: cap height below the frame top ("Cap Height" offset), snapped to the grid.
-  const firstBaseline = (ps: ParaStyle) => snapUp(top + body.capHeight * ps.size, grid);
-
-  let col = 0;
-  let colX = colXAt(0);
-  let y: number | null = null; // baseline of the previous line in this column
-  let lineCount = 0;
-  let cur: Cursor | null = { ...cursor };
-  const columns: { firstRun: number; lastBaseline: number }[] = [];
-  let colFirstRun = 0;
-  let hasDropCap = false;
-
-  const nextColumn = () => {
-    columns.push({ firstRun: colFirstRun, lastBaseline: y ?? top });
-    col++;
-    colFirstRun = runs.length;
-    if (col >= cols) return false;
-    colX = colXAt(col);
-    y = null;
-    return true;
+  const colXAt = (c: number) => ins.left + (rtl ? cols - 1 - c : c) * (colW + frame.columnGap);
+  // First baseline below the frame top, snapped to the grid.
+  const firstBaseline = (ps: ParaStyle) => {
+    let off: number;
+    switch (frame.firstBaseline ?? 'cap') {
+      case 'ascent': off = body.ascender * ps.size; break;
+      case 'x-height': off = body.xHeight * ps.size; break;
+      case 'leading': off = ps.leading; break;
+      case 'fixed': off = frame.firstBaselineMin ?? ps.leading; break;
+      default: off = body.capHeight * ps.size;
+    }
+    return snapUp(colTop + Math.max(off, frame.firstBaselineMin ?? 0), grid);
   };
 
-  outer: while (cur && cur.para < prep.paras.length) {
-    const pp: PreparedPara = prep.paras[cur.para];
-    const ps = pp.ps;
-    const lead = gridLeading(ps.leading, grid);
-    const startsPara = cur.item === 0;
-    const dc = isFirstFrame && cur.para === 0 && startsPara ? prep.dropCap : null;
-    const indentLines = dc ? dc.lines : 0;
-    const indentW = dc ? dc.boxW + style.dropCap.gap : 0;
-
-    let items = pp.items;
-    if (!startsPara) {
-      // Continuation from a previous frame: drop leading discardables (and the indent).
-      let k = cur.item;
-      while (k < pp.items.length && pp.items[k].t !== 'box') k++;
-      items = pp.items.slice(k);
+  // Footnotes: set at the foot of the column that holds the reference, smaller, after a short rule.
+  const fnScale = (style.footnoteScale ?? 80) / 100;
+  const fnStyle: TextStyle = {
+    ...style, fontSize: style.fontSize * fnScale, leading: style.leading * fnScale, firstLineIndent: 0, indentFirstParagraph: false,
+    paragraphSpacing: style.leading * fnScale * 0.25, dropCap: { ...style.dropCap, enabled: false }, firstLineSmallCaps: false, baselineGrid: false,
+    align: style.align === 'justify' || style.align === 'justify-all' ? 'justify' : style.align === 'right' ? 'right' : 'left',
+    list: null, ruleAbove: null, ruleBelow: null, shading: null, keepWithNext: 0, keepTogether: false, rag: 'natural', tabStops: [],
+  };
+  const fnGap = style.leading * 0.6;
+  const fnCache = new Map<number, FrameLayout>();
+  const fnLayout = (fn: Footnote) => {
+    let l = fnCache.get(fn.n);
+    if (!l) {
+      l = layoutStory(`${fn.label}{en}${fn.text}`, fnStyle, [{ w: colW, h: 100000, columns: 1, columnGap: 0, inset: 0, verticalAlign: 'top' }], fnTokens, prep.styles)[0];
+      fnCache.set(fn.n, l);
     }
-    const offsetBase = pp.items.length - items.length;
-    // Left / right indents, and a hanging (negative) first-line indent on the paragraph's first line.
-    const hang = startsPara ? Math.min(0, ps.indent) : 0;
-    const widthAt = (ln: number) => (ln < indentLines ? colW - indentW : colW) - ps.left - ps.right - (ln === 0 ? hang : 0);
-    const lines = linesFromBreaks(items, breakLines(items, widthAt, pp.para.style.hyphenLimit ?? 0), 0);
+    return l;
+  };
+  const fnHeight = (fn: Footnote) => {
+    const l = fnLayout(fn);
+    return l.baselines.length ? l.baselines[l.baselines.length - 1] + fnStyle.leading * 0.25 + fnStyle.leading * 0.3 : 0;
+  };
 
-    if (y != null && startsPara) y += gridRound(ps.spaceBefore, grid);
+  const runs: TextRun[] = [];
+  const baselines: number[] = [];
+  const lineBoxes: FrameLayout['lines'] = [];
+  const under: { g: GroupPrim; col: number; para: number }[] = [];
+  const over: { g: GroupPrim; col: number; para: number }[] = [];
+  const dcPrims: { g: GroupPrim; col: number; para: number }[] = [];
+  const lineRecs: { col: number; para: number; from: number; to: number; base: number; bottom: number; top: number }[] = [];
+  const heads: { level: 1 | 2; text: string }[] = [];
+  let lineCount = 0;
+  let hasDropCap = false;
 
-    for (let li = 0; li < lines.length; li++) {
-      const line = lines[li];
-      let baseline: number = y == null ? firstBaseline(ps) : y + lead;
-      const descent = ps.size * 0.22;
-      if (y != null && baseline + descent > bottom + 0.5) {
-        if (!nextColumn()) {
-          cur = { para: cur.para, item: offsetBase + line.start };
-          break outer;
+  const flow: Flow = { col: 0, y: null, reserve: new Array(cols).fill(0), notes: Array.from({ length: cols }, () => []), used: new Array(cols).fill(false) };
+
+  /** Slots for a paragraph from a flow position, generated on demand. */
+  const slotGen = (start: Flow, ps: ParaStyle, startsPara: boolean, maxFirst: number | null) => {
+    const lead = gridLeading(ps.leading, gridFirst ? null : grid);
+    const descent = ps.size * 0.22, ascent = body.ascender * ps.size;
+    const slots: Slot[] = [];
+    const extra: Slot[] = [];
+    let col = start.col, y = start.y, inFirst = 0;
+    const bottomOf = (c: number) => bottom - (start.reserve[c] ?? 0);
+    const gen = () => {
+      if (extra.length) { slots.push(extra.shift()!); return; }
+      for (let guard = 0; guard < 4000; guard++) {
+        if (col >= cols || (spanning && col > start.col)) break;
+        let baseline = y == null ? firstBaseline(ps) : y + lead;
+        if (gridFirst && slots.length === 0 && startsPara && y != null) baseline = snapUp(baseline, grid);
+        const forced = maxFirst != null && col === start.col && inFirst >= maxFirst;
+        if (forced || (y != null && baseline + descent > bottomOf(col) + 0.5) || (y == null && baseline > bottomOf(col) + 0.5)) {
+          col++;
+          y = null;
+          continue;
         }
-        baseline = firstBaseline(ps);
-      } else if (y == null && baseline > bottom + 0.5 && runs.length === 0 && cols === 1) {
-        // Frame too short for even one line: hand everything to the next frame.
-        cur = { para: cur.para, item: offsetBase + line.start };
-        break outer;
+        y = baseline;
+        const ints = spanning ? bandIntervals(ins.left, fullW, baseline - ascent, baseline + descent, wraps, ps.size * 2.5) : bandIntervals(colXAt(col), colW, baseline - ascent, baseline + descent, wraps, ps.size * 2.5);
+        if (!ints.length) continue;
+        if (col === start.col) inFirst++;
+        const [first, ...rest] = ints.map((iv) => ({ x: iv.a, w: iv.b - iv.a, baseline, col }));
+        slots.push(first);
+        extra.push(...rest);
+        return;
       }
-      const indent = li < indentLines ? indentW : 0;
-      const h0 = li === 0 ? hang : 0;
-      const placed = placeLine(items, line, colW - indent - ps.left - ps.right - h0, ps.align, style.opticalMargin, rtl, baseline, colX + (rtl ? ps.right : indent + ps.left + h0), mergeSpaces);
-      runs.push(...placed.runs);
-      baselines.push(baseline);
-      lineBoxes.push({ x: colX, y: baseline, w: colW, ratio: placed.ratio, chars: placed.chars, last: line.last, justified: placed.justified, hyphenated: !!line.hyphen });
-      lineCount++;
-      y = baseline;
+      slots.push({ x: colXAt(0), w: colW, baseline: Infinity, col: -1 });
+    };
+    return (i: number) => { while (slots.length <= i) gen(); return slots[i]; };
+  };
 
-      if (dc && li === 0) {
-        // The initial's cap height spans from the cap line of line 1 to the baseline of line N.
+  /** Natural width before `{here}` (indent to here), if the paragraph has one. */
+  const hereOffset = (items: Item[]) => {
+    let w = 0;
+    for (const it of items) {
+      if (it.t === 'here') return w;
+      if (it.t === 'box' || it.t === 'glue') w += it.w;
+      if (it.t === 'pen' && it.p === -10000) return null;
+    }
+    return null;
+  };
+
+  const plan = (pp: PreparedPara, itemStart: number, fl: Flow, maxFirst: number | null) => {
+    const startsPara = itemStart === 0;
+    let items = pp.items;
+    let offsetBase = 0;
+    if (!startsPara) {
+      // Continuation from a previous column / frame: drop leading discardables (and the indent).
+      let k = itemStart;
+      while (k < pp.items.length && pp.items[k].t !== 'box' && pp.items[k].t !== 'tab') k++;
+      items = pp.items.slice(k);
+      offsetBase = k;
+    }
+    const ps = pp.ps;
+    const dc = isFirstFrame && pp === prep.paras[0] && startsPara ? prep.dropCap : null;
+    const slot = slotGen(fl, ps, startsPara, maxFirst);
+    const hang = startsPara ? Math.min(0, ps.indent) : 0;
+    const hereW = startsPara ? hereOffset(items) : null;
+    const indentOf = (ln: number) => {
+      let left = ps.left + (ln === 0 ? hang : 0);
+      if (dc && ln < dc.lines) left += dc.boxW + style.dropCap.gap;
+      if (hereW != null && ln > 0) left = Math.max(left, ps.left + hereW);
+      return left;
+    };
+    const widthAt = (ln: number) => Math.max(1, slot(ln).w - indentOf(ln) - ps.right);
+    const colOf = (ln: number) => { const s = slot(ln); return s.col >= 0 ? s.col : 0; };
+    const lineLeft = (ln: number) => slot(ln).x - colXAt(colOf(ln)) + indentOf(ln);
+    let breaks: number[];
+    let tabs: Map<number, TabResolution> | undefined;
+    if (pp.para.hasTabs) { const r = tabCompose(items, widthAt, lineLeft, pp.para.style); breaks = r.breaks; tabs = r.tabs; }
+    else breaks = breakParagraph(items, widthAt, pp.para.style, pp.ragged);
+    const lines = linesFromBreaks(items, breaks, 0);
+    return { items, offsetBase, lines, slot, indentOf, widthAt, tabs, dc, startsPara };
+  };
+  type Plan = ReturnType<typeof plan>;
+
+  const notesIn = (pp: PreparedPara, items: Item[], line: Line): Footnote[] => {
+    if (!pp.para.footnotes.length) return [];
+    const out: Footnote[] = [];
+    for (let i = line.start; i < line.end; i++) {
+      const it = items[i];
+      if (it.t !== 'box') continue;
+      for (const g of it.segs) if (g.fn) { const fn = pp.para.footnotes.find((f) => f.label === g.text); if (fn) out.push(fn); }
+    }
+    return out;
+  };
+
+  /** Walk the planned lines against the flow: footnote space, overflow. Nothing is committed. */
+  const simulate = (pp: PreparedPara, pl: Plan, fl: Flow) => {
+    const f = cloneFlow(fl);
+    const placed: { li: number; slot: Slot }[] = [];
+    const descent = pp.ps.size * 0.22;
+    for (let li = 0; li < pl.lines.length; li++) {
+      const s = pl.slot(li);
+      if (s.col < 0) return { placed, flow: f, stop: li as number | null, reason: 'overflow' as const };
+      if (s.col !== f.col) { f.col = s.col; f.y = null; }
+      const refs = notesIn(pp, pl.items, pl.lines[li]);
+      const need = refs.reduce((a, fn) => a + fnHeight(fn), 0) + (refs.length && !f.notes[s.col].length ? fnGap : 0);
+      const occupied = f.used[s.col] || placed.some((p) => p.slot.col === s.col);
+      if (occupied && s.baseline + descent > bottom - f.reserve[s.col] - need + 0.5) return { placed, flow: f, stop: li, reason: 'notes' as const };
+      f.reserve[s.col] += need;
+      f.notes[s.col].push(...refs);
+      f.y = s.baseline;
+      f.used[s.col] = true;
+      placed.push({ li, slot: s });
+    }
+    return { placed, flow: f, stop: null as number | null, reason: null };
+  };
+
+  const ruleGroup = (rule: NonNullable<TextStyle['ruleAbove']>, x0: number, x1: number, y: number): GroupPrim => {
+    const w = Math.max(0.1, rule.weight);
+    const dash = rule.style === 'dashed' ? [w * 4, w * 3] : rule.style === 'dotted' ? [0.01, w * 2] : undefined;
+    const line = (yy: number, ww: number): PathPrim => ({ t: 'path', d: `M${x0} ${yy}H${x1}`, stroke: rule.color, strokeWidth: ww, dash, cap: rule.style === 'dotted' ? 'round' : 'butt' });
+    const children: Prim[] = rule.style === 'double' ? [line(y - w, w * 0.6), line(y + w, w * 0.6)] : [line(y, w)];
+    return { t: 'group', matrix: [1, 0, 0, 1, 0, 0], children };
+  };
+
+  /** Commit the placed lines of a paragraph (or the part of it that fits). */
+  const commit = (pp: PreparedPara, pl: Plan, placed: { li: number; slot: Slot }[], paraNo: number) => {
+    const pst = pp.para.style, ps = pp.ps;
+    const builder = new ItemBuilder(pst, ps);
+    const parts = new Map<number, { first: number; last: number; slot: Slot; runsFrom: number; runsTo: number; minX: number; maxX: number }>();
+    for (const { li, slot } of placed) {
+      const line = pl.lines[li];
+      const lineW = pl.widthAt(li);
+      const indent = pl.indentOf(li);
+      const xOff = slot.x + (rtl ? ps.right : indent);
+      const from = runs.length;
+      const pl0 = placeLine(pl.items, line, lineW, {
+        align: ps.align, optical: style.opticalMargin, opticalAmount: (pst.opticalMarginAmount ?? 100) / 100, rtl,
+        baseline: slot.baseline, xOffset: xOff, mergeSpaces, lastLineAlign: pst.lastLineAlign, singleWord: pst.singleWordJustify,
+        tabs: pl.tabs, leaderOrigin: xOff - colXAt(slot.col), leader: (t) => builder.leader(t),
+      });
+      runs.push(...pl0.runs);
+      if (pl.startsPara && li === 0 && (pp.para.kind === 'h1' || pp.para.kind === 'h2')) {
+        heads.push({ level: pp.para.kind === 'h1' ? 1 : 2, text: pp.para.words.map((w) => w.text).join(' ') });
+      }
+      // List marker hanging in front of the paragraph's first line.
+      if (pl.startsPara && li === 0 && ps.marker) {
+        const st = pp.para.list?.color ? { ...PLAIN, cs: { color: pp.para.list.color } } : PLAIN;
+        const segs = builder.segs(ps.marker.text, st, false);
+        const mw = segs.reduce((a, g) => a + g.width, 0);
+        const gap = 0.45 * ps.size;
+        let mx = ps.marker.align === 'right' ? ps.marker.x + ps.marker.w - gap - mw : ps.marker.x;
+        if (rtl) mx = slot.w - mx - mw;
+        let x = slot.x + mx;
+        for (const g of segs) { if (g.text) runs.push({ x, y: slot.baseline - (g.dy ?? 0), text: g.text, font: g.font, size: g.size, color: g.color, letterSpacing: g.ls, width: g.width }); x += g.width; }
+      }
+      const to = runs.length;
+      baselines.push(slot.baseline);
+      lineBoxes.push({ x: slot.x, y: slot.baseline, w: slot.w, ratio: pl0.ratio, chars: pl0.chars, last: line.last, justified: pl0.justified, hyphenated: !!line.hyphen });
+      lineRecs.push({ col: slot.col, para: paraNo, from, to, base: slot.baseline, top: slot.baseline - body.capHeight * ps.size, bottom: slot.baseline + ps.size * 0.22 });
+      lineCount++;
+
+      // Underline, strike and highlight become rules around the runs.
+      const lineRuns = runs.slice(from, to);
+      const decoRuns = lineRuns.filter((r) => r.deco);
+      if (decoRuns.length) {
+        const u: Prim[] = [], o: Prim[] = [];
+        let k = 0;
+        while (k < decoRuns.length) {
+          const r0 = decoRuns[k];
+          let x1 = r0.x + r0.width;
+          let j = k + 1;
+          while (j < decoRuns.length && JSON.stringify(decoRuns[j].deco) === JSON.stringify(r0.deco) && decoRuns[j].y === r0.y && decoRuns[j].x - x1 < r0.size * 0.6) { x1 = decoRuns[j].x + decoRuns[j].width; j++; }
+          const d = r0.deco!;
+          const m = fontMetrics(r0.font);
+          if (d.hl) u.push({ t: 'path', d: `M${r0.x - r0.size * 0.05} ${r0.y - m.ascender * r0.size}H${x1 + r0.size * 0.05}V${r0.y - m.descender * r0.size * 0.9}H${r0.x - r0.size * 0.05}Z`, fill: d.hl });
+          if (d.u) u.push({ t: 'path', d: `M${r0.x} ${r0.y + d.u.o - d.u.w / 2}H${x1}V${r0.y + d.u.o + d.u.w / 2}H${r0.x}Z`, fill: d.u.c });
+          if (d.s) { const sy = r0.y - (m.xHeight || 0.45) * r0.size * 0.55; o.push({ t: 'path', d: `M${r0.x} ${sy - d.s.w / 2}H${x1}V${sy + d.s.w / 2}H${r0.x}Z`, fill: d.s.c }); }
+          k = j;
+        }
+        if (u.length) under.push({ g: { t: 'group', matrix: [1, 0, 0, 1, 0, 0], children: u }, col: slot.col, para: paraNo });
+        if (o.length) over.push({ g: { t: 'group', matrix: [1, 0, 0, 1, 0, 0], children: o }, col: slot.col, para: paraNo });
+      }
+
+      // Drop cap: its cap height spans from the cap line of line 1 to the baseline of line N.
+      if (pl.dc && li === 0) {
         hasDropCap = true;
-        const dcBaseline = baseline + (dc.lines - 1) * lead;
-        const boxTop = baseline - dc.capBody - dc.pad;
+        const dc = pl.dc;
+        const lead = gridLeading(ps.leading, grid);
+        const dcBaseline = slot.baseline + (dc.lines - 1) * lead;
+        const boxTop = slot.baseline - dc.capBody - dc.pad;
         const boxH = (dc.lines - 1) * lead + dc.capBody + dc.pad * 2;
-        const bx = rtl ? colX + colW - dc.boxW : colX;
+        const bx = rtl ? slot.x + slot.w - dc.boxW : slot.x + ps.left;
+        const children: Prim[] = [];
         if (style.dropCap.frame !== 'none') {
-          prims.push(...illuminatedFrame(style.dropCap.frame, { x: bx, y: boxTop, w: dc.boxW, h: boxH },
+          children.push(...illuminatedFrame(style.dropCap.frame, { x: bx, y: boxTop, w: dc.boxW, h: boxH },
             { frame: style.dropCap.frameColor, ground: style.dropCap.frameColor, gold: '#c9a227' }, dc.text.charCodeAt(0)));
         }
-        runs.push({ x: bx + dc.pad, y: dcBaseline, text: dc.text, font: dc.font, size: dc.size, color: style.dropCap.color, width: dc.width });
+        children.push({ t: 'text', runs: [{ x: bx + dc.pad, y: dcBaseline, text: dc.text, font: dc.font, size: dc.size, color: style.dropCap.color, width: dc.width }] });
+        dcPrims.push({ g: { t: 'group', matrix: [1, 0, 0, 1, 0, 0], children }, col: slot.col, para: paraNo });
+      }
+
+      const part = parts.get(slot.col);
+      const ext = lineRuns.reduce((a, r) => ({ min: Math.min(a.min, r.x), max: Math.max(a.max, r.x + r.width) }), { min: Infinity, max: -Infinity });
+      if (!part) parts.set(slot.col, { first: li, last: li, slot, runsFrom: from, runsTo: to, minX: ext.min, maxX: ext.max });
+      else { part.last = li; part.runsTo = to; part.minX = Math.min(part.minX, ext.min); part.maxX = Math.max(part.maxX, ext.max); }
+    }
+
+    // Paragraph rules and shading, per column the paragraph occupies.
+    const lastLine = pl.lines.length - 1;
+    for (const [col, part] of parts) {
+      const s0 = pl.slot(part.first), s1 = pl.slot(part.last);
+      const x0 = part.slot.x + ps.left, x1 = part.slot.x + part.slot.w - ps.right;
+      const yTop = s0.baseline - body.capHeight * ps.size, yBot = s1.baseline + ps.size * 0.22;
+      if (pst.shading && pst.shading.color) {
+        const pad = pst.shading.padding ?? 3;
+        const r = pst.shading.radius ?? 0;
+        const X0 = x0 - pad, X1 = x1 + pad, Y0 = yTop - pad, Y1 = yBot + pad;
+        const d = r > 0
+          ? `M${X0 + r} ${Y0}H${X1 - r}Q${X1} ${Y0} ${X1} ${Y0 + r}V${Y1 - r}Q${X1} ${Y1} ${X1 - r} ${Y1}H${X0 + r}Q${X0} ${Y1} ${X0} ${Y1 - r}V${Y0 + r}Q${X0} ${Y0} ${X0 + r} ${Y0}Z`
+          : `M${X0} ${Y0}H${X1}V${Y1}H${X0}Z`;
+        under.unshift({ g: { t: 'group', matrix: [1, 0, 0, 1, 0, 0], children: [{ t: 'path', d, fill: pst.shading.color, stroke: pst.shading.stroke ?? undefined, strokeWidth: pst.shading.strokeWidth }] }, col, para: paraNo });
+      }
+      const tx = (rule: NonNullable<TextStyle['ruleAbove']>) => rule.width === 'text' && Number.isFinite(part.minX) ? [part.minX, part.maxX] : [x0, x1];
+      if (pst.ruleAbove && pst.ruleAbove.weight > 0 && pl.startsPara && part.first === 0) {
+        const [a, b] = tx(pst.ruleAbove);
+        under.push({ g: ruleGroup(pst.ruleAbove, a + (pst.ruleAbove.indentLeft ?? 0), b - (pst.ruleAbove.indentRight ?? 0), yTop - pst.ruleAbove.offset - pst.ruleAbove.weight / 2), col, para: paraNo });
+      }
+      if (pst.ruleBelow && pst.ruleBelow.weight > 0 && part.last === lastLine) {
+        const [a, b] = tx(pst.ruleBelow);
+        under.push({ g: ruleGroup(pst.ruleBelow, a + (pst.ruleBelow.indentLeft ?? 0), b - (pst.ruleBelow.indentRight ?? 0), s1.baseline + pst.ruleBelow.offset + pst.ruleBelow.weight / 2), col, para: paraNo });
       }
     }
-    if (y != null) y += gridRound(ps.spaceAfter, grid);
+  };
+
+  const advance = (f: Flow) => { f.col++; f.y = null; return f.col < cols; };
+
+  let cur: Cursor | null = { ...cursor };
+  let paraNo = 0;
+  outer: while (cur && cur.para < prep.paras.length) {
+    const pp: PreparedPara = prep.paras[cur.para];
+    const pst = pp.para.style, ps = pp.ps;
+    const startsPara = cur.item === 0;
+    if (startsPara) {
+      const startOn = pp.para.breakBefore ?? (pst.startOn && pst.startOn !== 'anywhere' ? pst.startOn : null);
+      const frameEmpty = runs.length === 0 && flow.col === 0 && flow.y === null;
+      if (startOn === 'frame' && !frameEmpty) break outer;
+      if (startOn === 'column' && flow.y !== null && !advance(flow)) break outer;
+    }
+    // Spanning heads: only while nothing but spanning paragraphs has been set in this frame.
+    spanning = spanPhase && startsPara && !!pst.spanColumns && flow.col === 0;
+    if (spanPhase && !spanning && (startsPara || flow.y !== null)) {
+      spanPhase = false;
+      if (flow.y != null && flow.col === 0) { colTop = flow.y + style.leading * 0.3; flow.y = null; }
+    }
+    const base = cloneFlow(flow);
+    let fl = cloneFlow(flow);
+    if (fl.y != null && startsPara) fl.y += gridRound(ps.spaceBefore, grid);
+    let maxFirst: number | null = null;
+    let pl = plan(pp, cur.item, fl, maxFirst);
+    let sim = simulate(pp, pl, fl);
+    for (let attempt = 0; startsPara && attempt < 6; attempt++) {
+      const atTop = fl.y === null;
+      const counts: number[] = [];
+      let lastCol = -2;
+      for (const p of sim.placed) { if (p.slot.col !== lastCol) { counts.push(0); lastCol = p.slot.col; } counts[counts.length - 1]++; }
+      const total = pl.lines.length;
+      const spans = counts.length > 1 || (sim.stop != null && sim.placed.length > 0);
+      const orphans = Math.max(1, pst.orphans ?? 1), widows = Math.max(1, pst.widows ?? 1);
+      let moveOn = false;
+      if (!atTop && spans && (pst.keepTogether || (counts[0] ?? 0) < Math.min(orphans, total))) moveOn = true;
+      if (!moveOn && !atTop && (pst.keepWithNext ?? 0) > 0 && sim.stop == null && cur.para + 1 < prep.paras.length) {
+        // Keep with next: the next paragraph's first lines must follow in the same column.
+        const next = prep.paras[cur.para + 1];
+        const endY = sim.flow.y ?? top;
+        const need = gridRound(ps.spaceAfter + next.ps.spaceBefore, grid) + gridLeading(next.ps.leading, grid) * Math.max(1, pst.keepWithNext ?? 1) + next.ps.size * 0.22;
+        if (endY + need > bottom - sim.flow.reserve[sim.flow.col] + 0.5) moveOn = true;
+      }
+      if (moveOn) {
+        fl = cloneFlow(base);
+        if (!advance(fl)) break outer;
+        maxFirst = null;
+        pl = plan(pp, cur.item, fl, null);
+        sim = simulate(pp, pl, fl);
+        continue;
+      }
+      // Widows: pull lines from the previous column so the last part keeps enough.
+      if (counts.length === 2 && maxFirst == null && sim.stop == null) {
+        const last = counts[1];
+        if (last < Math.min(widows, total)) {
+          const cut = counts[0] - (widows - last);
+          if (cut >= Math.min(orphans, counts[0]) && cut > 0) {
+            maxFirst = cut;
+            pl = plan(pp, cur.item, fl, maxFirst);
+            sim = simulate(pp, pl, fl);
+            continue;
+          }
+        }
+      }
+      break;
+    }
+    commit(pp, pl, sim.placed, paraNo);
+    flow.col = sim.flow.col; flow.y = sim.flow.y; flow.reserve = sim.flow.reserve; flow.notes = sim.flow.notes; flow.used = sim.flow.used;
+    if (sim.stop != null) {
+      const item = pl.offsetBase + pl.lines[sim.stop].start;
+      if (sim.reason === 'notes') {
+        // Footnotes filled the column: carry on with the rest of the paragraph in the next one.
+        flow.col = Math.max(flow.col, pl.slot(sim.stop).col) + 1;
+        flow.y = null;
+        cur = { para: cur.para, item };
+        paraNo++;
+        if (flow.col >= cols) break outer;
+        continue;
+      }
+      cur = { para: cur.para, item };
+      break outer;
+    }
+    if (flow.y != null) flow.y += gridRound(ps.spaceAfter, grid);
     cur = { para: cur.para + 1, item: 0 };
+    paraNo++;
   }
-
   if (cur && cur.para >= prep.paras.length) cur = null;
-  columns.push({ firstRun: colFirstRun, lastBaseline: y ?? top });
 
-  // Vertical alignment — only when everything fits and no initial is anchored to the top.
-  if (!cur && frame.verticalAlign !== 'top' && runs.length && !hasDropCap) {
-    for (let i = 0; i < columns.length; i++) {
-      const c = columns[i];
-      const end = i + 1 < columns.length ? columns[i + 1].firstRun : runs.length;
-      const firstY = runs[c.firstRun]?.y;
-      if (firstY == null) continue;
-      const usedTop = firstY - body.capHeight * style.fontSize;
-      const usedBottom = c.lastBaseline + style.fontSize * 0.22;
-      const slack = bottom - usedBottom - (usedTop - top);
-      if (slack <= 0) continue;
-      const shift = frame.verticalAlign === 'middle' ? slack / 2 : slack;
-      for (let r = c.firstRun; r < end; r++) runs[r].y += shift;
+  const shiftLine = (rec: (typeof lineRecs)[number], dy: number) => {
+    for (let r = rec.from; r < rec.to; r++) runs[r].y += dy;
+    const bi = baselines.indexOf(rec.base);
+    if (bi >= 0) { baselines[bi] += dy; lineBoxes[bi].y += dy; }
+    rec.base += dy; rec.top += dy; rec.bottom += dy;
+  };
+  const shiftGroups = (col: number, para: number, dy: number) => {
+    for (const list of [under, over, dcPrims]) for (const x of list) if (x.col === col && x.para === para) x.g.matrix![5] += dy;
+  };
+
+  // Vertical alignment / justification — only when everything fits and no initial is anchored to the top.
+  if (!cur && frame.verticalAlign !== 'top' && lineRecs.length && !hasDropCap) {
+    for (let c = 0; c < cols; c++) {
+      const recs = lineRecs.filter((r) => r.col === c);
+      if (!recs.length) continue;
+      const colBottom = bottom - flow.reserve[c];
+      const usedTop = recs[0].top, usedBottom = recs[recs.length - 1].bottom;
+      const slack = colBottom - usedBottom - (usedTop - top);
+      if (slack <= 0.5) continue;
+      if (frame.verticalAlign === 'justify') {
+        const paras = [...new Set(recs.map((r) => r.para))];
+        const slackJ = colBottom - usedBottom;
+        if (paras.length > 1) {
+          const add = slackJ / (paras.length - 1);
+          paras.forEach((p, k) => { for (const r of recs) if (r.para === p) shiftLine(r, k * add); shiftGroups(c, p, k * add); });
+        } else if (recs.length > 1) {
+          const add = slackJ / (recs.length - 1);
+          recs.forEach((r, k) => shiftLine(r, k * add));
+        }
+      } else {
+        const shift = frame.verticalAlign === 'middle' ? slack / 2 : slack;
+        const paras = new Set(recs.map((r) => r.para));
+        for (const r of recs) shiftLine(r, shift);
+        for (const p of paras) shiftGroups(c, p, shift);
+      }
     }
   }
 
+  const prims: Prim[] = [];
+  for (const x of under) prims.push(x.g);
+  for (const x of dcPrims) prims.push(x.g);
   if (runs.length) prims.push({ t: 'text', runs });
-  return { layout: { prims, lineCount, overflow: !!cur, baselines, lines: lineBoxes }, cursor: cur };
+  for (const x of over) prims.push(x.g);
+
+  // Footnotes at the foot of each column, under a short rule.
+  for (let c = 0; c < cols; c++) {
+    const notes = flow.notes[c];
+    if (!notes.length) continue;
+    const cx = colXAt(c);
+    let y = bottom - flow.reserve[c] + fnGap;
+    if (style.footnoteRule !== false) {
+      const ry = y - fnGap * 0.55;
+      prims.push({ t: 'path', d: rtl ? `M${cx + colW * 0.75} ${ry}H${cx + colW}` : `M${cx} ${ry}H${cx + colW * 0.25}`, stroke: style.color, strokeWidth: 0.5 });
+    }
+    for (const fn of notes) {
+      const l = fnLayout(fn);
+      prims.push({ t: 'group', matrix: [1, 0, 0, 1, cx, y], children: l.prims });
+      y += fnHeight(fn);
+    }
+  }
+
+  // Column rules, centred in the gutters.
+  if (frame.columnRule && frame.columnRule.weight > 0 && cols > 1) {
+    const r = frame.columnRule;
+    const w = r.weight;
+    const yb = frame.balance ? Math.max(top, ...lineRecs.map((l) => l.bottom)) : frameBottom;
+    for (let c = 0; c < cols - 1; c++) {
+      const x = ins.left + (c + 1) * colW + c * frame.columnGap + frame.columnGap / 2;
+      prims.push({ t: 'path', d: `M${x} ${top}V${yb}`, stroke: r.color, strokeWidth: w, dash: r.style === 'dashed' ? [w * 4, w * 3] : r.style === 'dotted' ? [0.01, w * 2.5] : undefined, cap: r.style === 'dotted' ? 'round' : 'butt' });
+    }
+  }
+
+  const usedBottom = flow.notes.some((n) => n.length) ? frameBottom : lineRecs.reduce((m, r) => Math.max(m, r.bottom), top);
+  return { layout: { prims, lineCount, overflow: !!cur, baselines, lines: lineBoxes, usedHeight: usedBottom + ins.bottom, heads }, cursor: cur };
+}
+
+/** Balanced columns: the shortest column depth at which everything still fits. */
+function layoutFrameBalanced(prep: Prepared, style: TextStyle, frame: FrameSpec, cursor: Cursor, isFirstFrame: boolean) {
+  const full = layoutFrame(prep, style, frame, cursor, isFirstFrame);
+  if (!frame.balance || frame.columns < 2 || full.layout.overflow || !full.layout.lineCount) return full;
+  const top = frame.insets?.top ?? frame.inset;
+  let lo = top + style.leading, hi = frame.h - (frame.insets?.bottom ?? frame.inset);
+  for (let k = 0; k < 14 && hi - lo > 0.5; k++) {
+    const mid = (lo + hi) / 2;
+    if (layoutFrame(prep, style, frame, cursor, isFirstFrame, mid).layout.overflow) lo = mid; else hi = mid;
+  }
+  return layoutFrame(prep, style, frame, cursor, isFirstFrame, hi);
 }
 
 /* -------------------------------------------------------------------------- */
@@ -989,12 +843,17 @@ function layoutVertical(text: string, style: TextStyle, frame: FrameSpec): Frame
   return { prims: runs.length ? [{ t: 'text', runs }] : [], lineCount: count, overflow, baselines: [], lines };
 }
 
+
 /* -------------------------------------------------------------------------- */
 /* Entry points                                                                */
 /* -------------------------------------------------------------------------- */
 
-export function frameSpecOf(el: TextElement, grid?: FrameSpec['grid']): FrameSpec {
-  return { w: el.w, h: el.h, columns: el.columns, columnGap: el.columnGap, inset: el.inset, verticalAlign: el.verticalAlign, grid };
+export function frameSpecOf(el: TextElement, grid?: FrameSpec['grid'], wraps?: WrapShape[]): FrameSpec {
+  return {
+    w: el.w, h: el.h, columns: el.columns, columnGap: el.columnGap, inset: el.inset, insets: el.insetSides ?? null,
+    verticalAlign: el.verticalAlign, grid, firstBaseline: el.firstBaseline, firstBaselineMin: el.firstBaselineMin,
+    balance: el.balanceColumns, columnRule: el.columnRule ?? null, wraps: el.wrapIgnore ? undefined : wraps,
+  };
 }
 
 /** Lay out a story through one or more threaded frames. */
@@ -1005,8 +864,10 @@ export function layoutStory(text: string, style: TextStyle, frames: FrameSpec[],
     return frames.map((f, i) => (i === 0 ? layoutVertical(expanded, style, f) : { prims: [], lineCount: 0, overflow: false, baselines: [], lines: [] }));
   }
   const f0 = frames[0];
-  const firstColW = f0 ? (f0.w - f0.inset * 2 - f0.columnGap * (Math.max(1, f0.columns) - 1)) / Math.max(1, f0.columns) : 100;
-  const prep = prepare(expanded, style, firstColW, styles && (styles.para.length || styles.char.length) ? styles : null);
+  const in0 = f0?.insets ? f0.insets.left + f0.insets.right : (f0?.inset ?? 0) * 2;
+  const firstColW = f0 ? (f0.w - in0 - f0.columnGap * (Math.max(1, f0.columns) - 1)) / Math.max(1, f0.columns) : 100;
+  const useStyles = styles && (styles.para.length || styles.char.length || styles.hyphenation?.length) ? styles : null;
+  const prep = prepare(expanded, style, firstColW, useStyles);
   const out: FrameLayout[] = [];
   let cursor: Cursor | null = { para: 0, item: 0 };
   frames.forEach((frame, i) => {
@@ -1014,7 +875,7 @@ export function layoutStory(text: string, style: TextStyle, frames: FrameSpec[],
       out.push({ prims: [], lineCount: 0, overflow: false, baselines: [], lines: [] });
       return;
     }
-    const { layout, cursor: next } = layoutFrame(prep, style, frame, cursor, i === 0);
+    const { layout, cursor: next } = layoutFrameBalanced(prep, style, frame, cursor, i === 0);
     out.push(layout);
     cursor = next;
   });

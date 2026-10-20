@@ -11,6 +11,9 @@
  * values past the trim reach into the bleed.
  */
 
+import type { TableElement, TableStyleDef, CellStyleDef } from './table';
+export type { TableElement } from './table';
+
 export type ID = string;
 export type Unit = 'mm' | 'cm' | 'in' | 'pt' | 'pc' | 'px';
 
@@ -49,6 +52,8 @@ export interface DropCapStyle {
   frameColor: string;
   /** Gap between initial and text, pt. */
   gap: number;
+  /** Characters set as the initial (1 = one letter; an opening quote always comes along). */
+  chars?: number;
 }
 
 export interface TextStyle {
@@ -86,6 +91,8 @@ export interface TextStyle {
   avoidRunts: boolean;
   /** Pair kerning: the font's own kern table, outline-based optical kerning, or none. */
   kerning?: KerningMode;
+  /** Optical tracking by size: small text opens up, display sizes close up (added to tracking). */
+  opticalTracking?: boolean;
   /** Paragraph indents from the column edges, pt (a negative first-line indent hangs). */
   leftIndent?: number;
   rightIndent?: number;
@@ -98,30 +105,119 @@ export interface TextStyle {
   hyphenAfter?: number;
   hyphenLimit?: number;
   hyphenateCaps?: boolean;
+  /** Hyphenation bias, 0 (better spacing, more hyphens) … 100 (fewer hyphens, looser spacing). */
+  hyphenBias?: number;
+  /** Ragged text: break a word only when the line would otherwise end this far short of the measure, pt. */
+  hyphenZone?: number;
+  /** Allow the last word of a paragraph to be hyphenated. */
+  hyphenateLastWord?: boolean;
+  /** Paragraph composer (Knuth–Plass, the whole paragraph at once) or single-line (first fit). */
+  composer?: 'paragraph' | 'single';
+
+  /** Shape of a ragged edge: natural, Swiss (short / long / short / long), balanced, wedge, or a repeating pattern. */
+  rag?: RagMode;
+  /** How far the short lines of a Swiss rag or wedge come in, % of the measure. */
+  ragAmount?: number;
+  /** Repeating line lengths for the pattern rag, % of the measure, e.g. "100 84 94". */
+  ragPattern?: string;
+  /** Swiss Swiss rag starts with the long line (true) or the short one. */
+  ragStartLong?: boolean;
+  /** Don't end a line on a one- or two-letter word (a, I, of, to). */
+  avoidShortLineEnds?: boolean;
+
+  /** Letter spacing the justifier may use, thousandths of an em (e.g. −10 … +20). */
+  letterSpaceMin?: number;
+  letterSpaceMax?: number;
+  /** Glyph scaling the justifier may use, % (hz-programme font expansion, e.g. 98 … 102). */
+  glyphScaleMin?: number;
+  glyphScaleMax?: number;
+  /** Alignment of a justified line that holds a single word. */
+  singleWordJustify?: 'left' | 'center' | 'right' | 'full';
+  /** Alignment of the last line of a justified paragraph. */
+  lastLineAlign?: 'left' | 'center' | 'right' | 'justify';
+  /** Strength of optical margin alignment, % (100 = the classical amounts). */
+  opticalMarginAmount?: number;
+
+  /** Keep options: lines kept with the next paragraph, whole paragraph together, widows and orphans. */
+  keepWithNext?: number;
+  keepTogether?: boolean;
+  widows?: number;
+  orphans?: number;
+  /** Start the paragraph anywhere, in the next column or in the next frame. */
+  startOn?: 'anywhere' | 'column' | 'frame';
+  /** Baseline grid: every line, or only the first line of each paragraph. */
+  gridAlign?: 'all' | 'first';
+  /** Span all columns of a multi-column frame (heads at the top of the frame). */
+  spanColumns?: boolean;
+
+  ruleAbove?: ParagraphRule | null;
+  ruleBelow?: ParagraphRule | null;
+  shading?: ParagraphShading | null;
+  list?: ListSpec | null;
+  /** Tab stops measured from the column's left edge; `defaultTab` repeats after the last one. */
+  tabStops?: TabStop[];
+  defaultTab?: number;
+  /** Leader for the right-indent tab ({rtab}), e.g. "." for a table of contents. */
+  rightTabLeader?: string;
+  /** GREP styles: a character style applied to every match of a pattern in the paragraph. */
+  grepStyles?: GrepStyle[];
+  /** Nested styles: character styles applied to the start of the paragraph (run-in heads). */
+  nestedStyles?: NestedStyle[];
+
+  /** Footnotes set at the foot of the column: numbering, size (% of the text) and separator rule. */
+  footnoteNumbering?: 'decimal' | 'roman' | 'alpha' | 'symbols';
+  footnoteScale?: number;
+  footnoteRule?: boolean;
 }
+
+export type RagMode = 'natural' | 'swiss' | 'balanced' | 'wedge' | 'pattern';
+
+export interface ParagraphRule {
+  weight: number;
+  color: string;
+  /** Distance from the line (above the first line's cap height, below the last baseline), pt. */
+  offset: number;
+  width: 'column' | 'text';
+  indentLeft?: number;
+  indentRight?: number;
+  style?: 'solid' | 'dashed' | 'dotted' | 'double';
+}
+
+export interface ParagraphShading {
+  color: string;
+  /** Padding around the paragraph, pt. */
+  padding: number;
+  stroke?: string | null;
+  strokeWidth?: number;
+  radius?: number;
+}
+
+export interface ListSpec {
+  type: 'bullet' | 'number';
+  bullet?: string;
+  format?: 'decimal' | 'lower-alpha' | 'upper-alpha' | 'lower-roman' | 'upper-roman';
+  suffix?: string;
+  /** Restart numbering at this value (null = continue). */
+  start?: number | null;
+  /** Hanging width of the marker, pt. */
+  indent?: number;
+  color?: string;
+  /** Numbers aligned right (on the full stop) or left. */
+  align?: 'left' | 'right';
+  level?: number;
+}
+
+export interface TabStop { pos: number; align: 'left' | 'center' | 'right' | 'decimal'; leader?: string; char?: string }
+export interface GrepStyle { pattern: string; style: string; flags?: string }
+export interface NestedStyle { style: string; count: number; unit: 'words' | 'characters' | 'sentences' | 'char'; char?: string }
 
 export type KerningMode = 'metrics' | 'optical' | 'none';
 
-/** A named paragraph style. Unset properties inherit from the frame. */
-export interface ParagraphStyleProps {
-  fontFamily?: string;
-  fontSize?: number;
-  leading?: number;
-  weight?: number;
-  italic?: boolean;
-  tracking?: number;
-  color?: string;
-  align?: TextAlign;
-  firstLineIndent?: number;
-  leftIndent?: number;
-  rightIndent?: number;
+/** A named paragraph style: any paragraph property. Unset properties inherit from the frame. */
+export type ParagraphStyleProps = Partial<Omit<TextStyle, 'dropCap' | 'axes' | 'writingMode' | 'tateChuYoko'>> & {
   spaceBefore?: number;
   spaceAfter?: number;
-  textTransform?: TextStyle['textTransform'];
-  features?: Record<string, boolean>;
-  hyphenate?: boolean;
-  kerning?: KerningMode;
-}
+};
 
 /** A named character style, applied to a run inside a paragraph. */
 export interface CharacterStyleProps {
@@ -138,6 +234,28 @@ export interface CharacterStyleProps {
   /** Raise (+) or lower (−) the run, pt. */
   baselineShift?: number;
   features?: Record<string, boolean>;
+  /** Absolute size, pt (overrides sizeScale). */
+  size?: number;
+  underline?: boolean;
+  underlineWeight?: number;
+  underlineOffset?: number;
+  underlineColor?: string;
+  strike?: boolean;
+  strikeWeight?: number;
+  strikeColor?: string;
+  /** Marker colour behind the run. */
+  highlight?: string;
+  /** Horizontal and vertical scale, %; skew (false italic), degrees. */
+  hScale?: number;
+  vScale?: number;
+  skew?: number;
+  /** Outline the glyphs. */
+  stroke?: string;
+  strokeWidth?: number;
+  /** Keep the run on one line (no breaks, no hyphenation). */
+  noBreak?: boolean;
+  /** Hyphenation language for the run. */
+  language?: string;
 }
 
 export interface ParagraphStyleDef { id: ID; name: string; props: ParagraphStyleProps }
@@ -150,7 +268,7 @@ export interface CharacterStyleDef { id: ID; name: string; props: CharacterStyle
 export type ElementType =
   | 'text' | 'image' | 'shape' | 'rule' | 'path' | 'svg'
   | 'pattern' | 'ornament' | 'initial' | 'overprint' | 'gradient'
-  | 'cutout' | 'drawing' | 'gridtype' | 'motif';
+  | 'cutout' | 'drawing' | 'gridtype' | 'motif' | 'table';
 
 /** Cover finishing applied in the 3D preview and flagged in the PDF. */
 export type Finish = 'none' | 'gold-foil' | 'silver-foil' | 'copper-foil' | 'holo-foil' | 'blind-deboss' | 'spot-gloss';
@@ -172,6 +290,17 @@ export interface ElementBase {
   anchor?: 'front-flap' | 'front' | 'spine' | 'back' | 'back-flap' | null;
   /** Facing pages: an item crossing the gutter is drawn on the facing page beneath its items, or above them. */
   spreadAbove?: boolean;
+  /** Text wrap: text frames on the same page flow around this item. */
+  wrap?: TextWrap | null;
+}
+
+export interface TextWrap {
+  /** Around the bounding box, around the shape (ellipses, circles), or jump over it. */
+  mode: 'box' | 'shape' | 'jump';
+  /** Distance kept between the item and the text, pt. */
+  offset: number;
+  /** Text on both sides, on the side with more room, or only left / right. */
+  side: 'both' | 'largest' | 'left' | 'right';
 }
 
 export interface TextElement extends ElementBase {
@@ -181,7 +310,20 @@ export interface TextElement extends ElementBase {
   columns: number;
   columnGap: number;   // pt
   inset: number;       // pt, inner padding
-  verticalAlign: 'top' | 'middle' | 'bottom';
+  verticalAlign: 'top' | 'middle' | 'bottom' | 'justify';
+  /** Make every column end at the same depth. */
+  balanceColumns?: boolean;
+  /** Rule centred in each column gutter. */
+  columnRule?: { weight: number; color: string; style?: 'solid' | 'dashed' | 'dotted' } | null;
+  /** Where the first baseline sits below the frame top. */
+  firstBaseline?: 'cap' | 'ascent' | 'x-height' | 'leading' | 'fixed';
+  firstBaselineMin?: number;
+  /** Separate insets per side (overrides `inset`). */
+  insetSides?: { top: number; right: number; bottom: number; left: number } | null;
+  /** Ignore text wrap from other items. */
+  wrapIgnore?: boolean;
+  /** Grow or shrink the frame's height to fit its text. */
+  autoHeight?: boolean;
   /** Thread: overflow continues in this text element (any page). */
   flowNext: ID | null;
   fill: string | null;
@@ -240,6 +382,26 @@ export interface PathElement extends ElementBase, StrokeStyle {
   vw: number;
   vh: number;
   fillRule: 'nonzero' | 'evenodd';
+  /** Type on the path. */
+  pathText?: PathText | null;
+}
+
+export interface PathText {
+  text: string;
+  fontFamily: string;
+  size: number;
+  weight: number;
+  italic: boolean;
+  color: string;
+  tracking: number;
+  /** Where the text starts / centres / ends along the path, % of its length. */
+  offset: number;
+  align: 'start' | 'center' | 'end';
+  /** On the path, or hanging below it. */
+  side: 'over' | 'under';
+  baselineShift: number;
+  reverse?: boolean;
+  features?: Record<string, boolean>;
 }
 
 export interface SvgElement extends ElementBase {
@@ -405,7 +567,7 @@ export interface MotifElement extends ElementBase {
 export type Element =
   | TextElement | ImageElement | ShapeElement | RuleElement | PathElement | SvgElement
   | PatternElement | OrnamentElement | InitialElement | OverprintElement | GradientElement
-  | CutoutElement | DrawingElement | GridTypeElement | MotifElement;
+  | CutoutElement | DrawingElement | GridTypeElement | MotifElement | TableElement;
 
 /* ------------------------------------------------------------------------- */
 /* Book structure                                                             */
@@ -619,9 +781,14 @@ export interface Project {
   swatches: Swatch[];
   assets: Record<ID, Asset>;
   fonts: UploadedFontMeta[];
+  /** Hyphenation exceptions: "ty-pog-ra-phy" sets the breaks, a word without hyphens never breaks. */
+  hyphenDictionary?: string[];
   /** Named paragraph and character styles (`[Name]` / `<Name>…</Name>` in stories). */
   paragraphStyles?: ParagraphStyleDef[];
   characterStyles?: CharacterStyleDef[];
+  /** Named table and cell styles (src/model/table.ts). */
+  tableStyles?: TableStyleDef[];
+  cellStyles?: CellStyleDef[];
 }
 
 /* ------------------------------------------------------------------------- */

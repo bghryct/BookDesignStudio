@@ -19,6 +19,7 @@ import { SurfaceGuides, CanonGuides, CoverGuides, JacketGuides, SpreadGridGuides
 import { Rulers, RULER } from './Rulers';
 import { TextStoryEditor } from './TextStoryEditor';
 import { SpacingOverlay } from './SpacingOverlay';
+import { TableOverlay, makeTableFromDrag, tableDoubleClick } from './TableTools';
 import {
   type SurfaceDesc, type Pt, type PanelLayout, sceneMatrix, toLocal, corners, sceneBounds, hitElement, surfaceAt, snapTargets, snapAxis,
 } from './geometry';
@@ -47,7 +48,7 @@ type Interaction =
 
 interface PenPoint { x: number; y: number; hx: number; hy: number } // anchor + outgoing handle offset (scene)
 
-const CREATE_TOOLS: Tool[] = ['text', 'rect', 'ellipse', 'polygon', 'line', 'image', 'pattern', 'ornament', 'initial', 'overprint', 'gradient', 'cutout', 'gridtype', 'grid-diagram', 'dimension', 'specimen'];
+const CREATE_TOOLS: Tool[] = ['text', 'rect', 'ellipse', 'polygon', 'line', 'image', 'pattern', 'ornament', 'initial', 'overprint', 'gradient', 'cutout', 'gridtype', 'grid-diagram', 'dimension', 'specimen', 'table'];
 const MOTIF_TOOLS: Partial<Record<Tool, string>> = { 'grid-diagram': 'grid-diagram', dimension: 'dimension', specimen: 'waterfall' };
 
 export function Editor({ mode }: { mode: 'spreads' | 'cover' | 'jacket' }) {
@@ -127,6 +128,24 @@ export function Editor({ mode }: { mode: 'spreads' | 'cover' | 'jacket' }) {
     for (const s of surfaces) for (const el of surfaceEls(project, s)) out.push({ el, surface: s });
     return out;
   }, [surfaces, project]);
+
+  // Frames set to fit their text follow the depth the story actually uses.
+  useEffect(() => {
+    const fixes: { id: string; h: number }[] = [];
+    for (const { el, surface } of allEls) {
+      if (el.type !== 'text' || !el.autoHeight) continue;
+      const lay = layoutText(el, { project, surface: surface.key, pageIndex: surface.pageIndex, side: surface.side });
+      const h = Math.max(12, Math.ceil(lay.usedHeight ?? el.h));
+      if (Math.abs(h - el.h) > 0.5) fixes.push({ id: el.id, h });
+    }
+    if (!fixes.length) return;
+    useStore.getState().update((d) => {
+      for (const f of fixes) {
+        const loc = findElement(d as Project, f.id);
+        if (loc) surfaceElementsDraft(d as Project, loc.key)![loc.index].h = f.h;
+      }
+    }, { history: false });
+  }, [allEls, project]);
 
   /* ---------------------------------------------------------------- sizing / zoom */
   useLayoutEffect(() => {
@@ -743,6 +762,8 @@ export function Editor({ mode }: { mode: 'spreads' | 'cover' | 'jacket' }) {
       const m = makeMotif(kind);
       if (click) { w = m.w; h = m.h; x -= w / 2; y -= h / 2; }
       el = { ...m, x, y, w: Math.max(8, w), h: Math.max(8, h) };
+    } else if (t === 'table') {
+      el = makeTableFromDrag(s.project, surface, x, y, w, h, click);
     } else if (t === 'ornament' && click && surface.kind !== 'cover' && surface.kind !== 'jacket') {
       // Click: frame the whole text block, decorating the margins.
       const g = computeGrid(s.project.book, surface.side);
@@ -937,6 +958,7 @@ export function Editor({ mode }: { mode: 'spreads' | 'cover' | 'jacket' }) {
         if (!hit) return;
         if (hit.el.type === 'text') st().setTextEditing(hit.el.id);
         else if (hit.el.type === 'path') st().setTool('node');
+        else if (hit.el.type === 'table') tableDoubleClick(hit.el, toLocal(hit.el, hit.surface, calc, toScene(e)));
       }}
       onDragOver={(e) => e.preventDefault()}
       onDrop={onDrop}
@@ -1080,6 +1102,7 @@ export function Editor({ mode }: { mode: 'spreads' | 'cover' | 'jacket' }) {
           })()}
         </g>
       </svg>
+      <TableOverlay items={allEls} selection={selection} tool={tool} zoom={zoom} pan={pan} size={size} calc={calc} project={project} />
       <canvas
         ref={liveRef}
         width={Math.round(size.w * dpr)}

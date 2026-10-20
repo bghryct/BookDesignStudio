@@ -19,6 +19,8 @@ import { importFiles } from '../importFiles';
 import { parseSvgCached, svgMarkupFromDataUrl, svgPrims } from '../../render/svgImport';
 import { makePath } from '../../model/factory';
 import { MotifPanel } from './MotifPanel';
+import { TablePanel } from './TablePanel';
+import type { TableElement } from '../../model/table';
 import { spacingReport } from '../canvas/SpacingOverlay';
 import { getMotif } from '../../engine/motifs';
 import type { MotifElement } from '../../model/types';
@@ -107,6 +109,93 @@ function AlignButtons({ onAlign }: { onAlign: (m: 'l' | 'c' | 'r' | 't' | 'm' | 
   );
 }
 
+/** Type on a path: the text stands on the path, rotated to it. */
+function PathTextControls({ e, set, live, begin }: { e: PathElement; set: (p: Partial<Element>) => void; live: (p: Partial<Element>) => void; begin: () => void }) {
+  const pt = e.pathText;
+  const up = (p: Partial<NonNullable<PathElement['pathText']>>, history = true) => (history ? set : live)({ pathText: { ...pt!, ...p } } as Partial<Element>);
+  return (
+    <div className="rounded-md border border-ink-700 p-2">
+      <Toggle label="Type on the path" checked={!!pt} onChange={(v) => set({ pathText: v ? { text: 'Type on a path follows every curve', fontFamily: 'eb-garamond', size: 14, weight: 400, italic: false, color: '#2a2118', tracking: 20, offset: 0, align: 'start', side: 'over', baselineShift: 0 } : null } as Partial<Element>)} />
+      {pt && (
+        <div className="mt-1.5 space-y-1.5">
+          <TextInput label="Text" value={pt.text} onChange={(v) => up({ text: v }, false)} />
+          <Select label="Typeface" value={pt.fontFamily} options={getFamilies().filter((f) => !f.system).map((f) => ({ value: f.id, label: f.name }))} onChange={(v) => up({ fontFamily: v })} />
+          <Row>
+            <NumberField label="Size" unit="pt" value={pt.size} min={2} max={400} step={0.5} onScrubStart={begin} onChange={(v) => up({ size: v })} />
+            <NumberField label="Weight" value={pt.weight} min={100} max={900} step={50} decimals={0} onChange={(v) => up({ weight: v })} />
+            <NumberField label="Tracking" unit="‰" value={pt.tracking} step={5} decimals={0} onScrubStart={begin} onChange={(v) => up({ tracking: v })} />
+            <NumberField label="Shift" unit="pt" value={pt.baselineShift} step={0.5} onScrubStart={begin} onChange={(v) => up({ baselineShift: v })} />
+          </Row>
+          <Slider label="Position along the path" value={pt.offset} min={0} max={100} step={0.5} onStart={begin} onChange={(v) => up({ offset: v }, false)} format={(v) => `${v.toFixed(1)}%`} />
+          <Row>
+            <Select label="Align" value={pt.align} options={[{ value: 'start', label: 'From the point' }, { value: 'center', label: 'Centred on it' }, { value: 'end', label: 'Ending at it' }]} onChange={(v) => up({ align: v as 'start' })} />
+            <Select label="Side" value={pt.side} options={[{ value: 'over', label: 'On the path' }, { value: 'under', label: 'Below the path' }]} onChange={(v) => up({ side: v as 'over' })} />
+          </Row>
+          <div className="grid grid-cols-2 gap-y-1">
+            <Toggle label="Italic" checked={pt.italic} onChange={(v) => up({ italic: v })} />
+            <Toggle label="Reverse direction" checked={!!pt.reverse} onChange={(v) => up({ reverse: v })} />
+          </div>
+          <ColorField label="Colour" value={pt.color} onChange={(v) => v && up({ color: v })} />
+          <Hint>Set the stroke to none to show only the type. Draw any path with the pen (P) or the ellipse and convert it.</Hint>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Text frame options beyond columns: insets per side, balance, column rules, auto height, wrap. */
+function FrameExtras({ e, set }: { e: TextElement; set: (p: Partial<Element>) => void }) {
+  const sides = e.insetSides;
+  const rule = e.columnRule;
+  return (
+    <div className="space-y-1.5">
+      <div className="grid grid-cols-2 gap-y-1.5">
+        <Toggle label="Balance columns" checked={!!e.balanceColumns} onChange={(v) => set({ balanceColumns: v } as Partial<Element>)} hint="End every column at the same depth" />
+        <Toggle label="Fit height to text" checked={!!e.autoHeight} onChange={(v) => set({ autoHeight: v } as Partial<Element>)} hint="The frame grows and shrinks with its story" />
+        <Toggle label="Column rule" checked={!!rule} onChange={(v) => set({ columnRule: v ? { weight: 0.5, color: '#2a2118' } : null } as Partial<Element>)} />
+        <Toggle label="Ignore text wrap" checked={!!e.wrapIgnore} onChange={(v) => set({ wrapIgnore: v } as Partial<Element>)} />
+        <Toggle label="Inset per side" checked={!!sides} onChange={(v) => set({ insetSides: v ? { top: e.inset, right: e.inset, bottom: e.inset, left: e.inset } : null } as Partial<Element>)} />
+      </div>
+      {rule && (
+        <Row>
+          <NumberField label="Rule weight" unit="pt" value={rule.weight} min={0.1} max={6} step={0.25} onChange={(v) => set({ columnRule: { ...rule, weight: v } } as Partial<Element>)} />
+          <Select label="Rule style" value={rule.style ?? 'solid'} options={[{ value: 'solid', label: 'Solid' }, { value: 'dashed', label: 'Dashed' }, { value: 'dotted', label: 'Dotted' }]} onChange={(v) => set({ columnRule: { ...rule, style: v as 'solid' } } as Partial<Element>)} />
+          <ColorField label="Rule colour" value={rule.color} onChange={(v) => v && set({ columnRule: { ...rule, color: v } } as Partial<Element>)} />
+        </Row>
+      )}
+      {sides && (
+        <Row>
+          {(['top', 'right', 'bottom', 'left'] as const).map((k) => (
+            <NumberField key={k} label={k[0].toUpperCase() + k.slice(1)} length value={sides[k]} min={0} onChange={(v) => set({ insetSides: { ...sides, [k]: v } } as Partial<Element>)} />
+          ))}
+        </Row>
+      )}
+    </div>
+  );
+}
+
+/** Text wrap: text frames on the same page flow around this item. */
+function WrapTools({ el, set }: { el: Element; set: (p: Partial<Element>) => void }) {
+  const w = el.wrap;
+  return (
+    <div>
+      <span className="mb-1 block text-[10.5px] text-ink-400">Text wrap</span>
+      <Segmented value={w?.mode ?? 'none'} onChange={(v) => set({ wrap: v === 'none' ? null : { offset: w?.offset ?? 6, side: w?.side ?? 'both', mode: v } } as Partial<Element>)} options={[
+        { value: 'none', label: 'None', title: 'Text ignores this item' },
+        { value: 'box', label: 'Box', title: 'Wrap around the bounding box' },
+        { value: 'shape', label: 'Shape', title: 'Wrap around the shape (ellipses and circles)' },
+        { value: 'jump', label: 'Jump', title: 'Text jumps over the item' },
+      ]} />
+      {w && (
+        <Row className="mt-1.5">
+          <NumberField label="Offset" unit="pt" value={w.offset} min={0} max={72} step={1} onChange={(v) => set({ wrap: { ...w, offset: v } } as Partial<Element>)} />
+          {w.mode !== 'jump' && <Select label="Text on" value={w.side} options={[{ value: 'both', label: 'Both sides' }, { value: 'largest', label: 'Largest side' }, { value: 'left', label: 'Left side' }, { value: 'right', label: 'Right side' }]} onChange={(v) => set({ wrap: { ...w, side: v as 'both' } } as Partial<Element>)} />}
+        </Row>
+      )}
+    </div>
+  );
+}
+
 /** Fit an item to its page or across the spread, and choose how a gutter-crossing item stacks. */
 function SpreadTools({ el, project, set }: { el: Element; project: Project; set: (p: Partial<Element>) => void }) {
   const loc = findElement(project, el.id);
@@ -186,6 +275,7 @@ function SinglePanel({ el, surfaceKey, project }: { el: Element; surfaceKey: str
           <AlignButtons onAlign={alignToPage} />
         </div>
         {!onCover && <SpreadTools el={el} project={project} set={set} />}
+        {!onCover && <WrapTools el={el} set={set} />}
       </Section>
       <Section title="Appearance" id="el-appearance">
         <Slider label="Opacity" value={el.opacity} min={0} max={1} onStart={begin} onChange={(v) => live({ opacity: v })} format={(v) => `${Math.round(v * 100)}%`} />
@@ -200,7 +290,7 @@ function SinglePanel({ el, surfaceKey, project }: { el: Element; surfaceKey: str
 const TITLES: Record<Element['type'], string> = {
   text: 'Text frame', image: 'Image frame', shape: 'Shape', rule: 'Rule', path: 'Path', svg: 'SVG graphic', pattern: 'Kinetic pattern · Schrofer',
   ornament: 'Marginalia · Cleves', initial: 'Illuminated initial', overprint: 'Overprint · Martens', gradient: 'Tonal gradient · Sato',
-  cutout: 'Die-cut · Munari', drawing: 'Drawing', gridtype: 'Grid alphabet · Crouwel', motif: 'Motif',
+  cutout: 'Die-cut · Munari', drawing: 'Drawing', gridtype: 'Grid alphabet · Crouwel', motif: 'Motif', table: 'Table',
 };
 
 function familyOptions() {
@@ -256,8 +346,11 @@ function TypeSpecific({ el, project }: { el: Element; project: Project }) {
             <NumberField label="Columns" value={e.columns} min={1} max={12} decimals={0} onChange={(v) => set({ columns: Math.round(v) } as Partial<Element>)} />
             <NumberField label="Gutter" length value={e.columnGap} min={0} onChange={(v) => set({ columnGap: v } as Partial<Element>)} />
             <NumberField label="Inset" length value={e.inset} min={0} onChange={(v) => set({ inset: v } as Partial<Element>)} />
-            <Select label="Vertical align" value={e.verticalAlign} options={[{ value: 'top', label: 'Top' }, { value: 'middle', label: 'Middle' }, { value: 'bottom', label: 'Bottom' }]} onChange={(v) => set({ verticalAlign: v } as Partial<Element>)} />
+            <Select label="Vertical align" value={e.verticalAlign} options={[{ value: 'top', label: 'Top' }, { value: 'middle', label: 'Middle' }, { value: 'bottom', label: 'Bottom' }, { value: 'justify', label: 'Justify' }]} onChange={(v) => set({ verticalAlign: v } as Partial<Element>)} />
+            <Select label="First baseline" value={e.firstBaseline ?? 'cap'} options={[{ value: 'cap', label: 'Cap height' }, { value: 'ascent', label: 'Ascent' }, { value: 'x-height', label: 'x-height' }, { value: 'leading', label: 'Leading' }, { value: 'fixed', label: 'Fixed' }]} onChange={(v) => set({ firstBaseline: v } as Partial<Element>)} />
+            <NumberField label={e.firstBaseline === 'fixed' ? 'Offset' : 'Minimum'} unit="pt" value={e.firstBaselineMin ?? 0} min={0} step={0.5} onChange={(v) => set({ firstBaselineMin: v } as Partial<Element>)} />
           </Row>
+          <FrameExtras e={e} set={set} />
           <ColorField label="Frame fill" value={e.fill} allowNone onChange={(v) => set({ fill: v } as Partial<Element>)} />
           {layout && e.style.writingMode !== 'vertical' && (() => {
             const rep = spacingReport(layout.lines);
@@ -355,6 +448,7 @@ function TypeSpecific({ el, project }: { el: Element; project: Project }) {
           <Hint>Use the Direct selection tool (A) to drag anchors and Bézier handles.</Hint>
           <StrokeControls el={e} set={set} live={live} begin={begin} />
           <Select label="Fill rule" value={e.fillRule} options={[{ value: 'nonzero', label: 'Non-zero' }, { value: 'evenodd', label: 'Even-odd' }]} onChange={(v) => set({ fillRule: v } as Partial<Element>)} />
+          <PathTextControls e={e} set={set} live={live} begin={begin} />
           <TextInput label="Path data" mono multiline rows={3} value={e.d} onChange={(v) => live({ d: v } as Partial<Element>)} />
           <Button className="w-full" onClick={() => {
             // Re-fit the box to the path's geometry.
@@ -548,6 +642,8 @@ function TypeSpecific({ el, project }: { el: Element; project: Project }) {
     }
     case 'motif':
       return <MotifPanel el={el as MotifElement} />;
+    case 'table':
+      return <TablePanel el={el as TableElement} project={project} />;
     case 'gridtype': {
       const e = el as GridTypeElement;
       return (

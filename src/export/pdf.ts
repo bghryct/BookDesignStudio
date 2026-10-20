@@ -15,12 +15,13 @@ import {
   pushGraphicsState, popGraphicsState, concatTransformationMatrix, moveTo, lineTo, appendBezierCurve, closePath, fill, stroke,
   fillAndStroke, endPath, setFillingRgbColor, setFillingCmykColor, setStrokingRgbColor, setStrokingCmykColor, setLineWidth,
   setDashPattern, setLineCap, setLineJoin, setGraphicsState, drawObject, setCharacterSpacing, LineCapStyle, LineJoinStyle, cmyk, rgb,
+  setTextRenderingMode, TextRenderingMode,
   type PDFImage,
 } from 'pdf-lib';
 import fontkit from '@pdf-lib/fontkit';
 import type { BlendMode, Element, Finish, Project } from '../model/types';
 import type { Paint, Prim, TextRun, Matrix, PathPrim, GradientStop } from '../render/primitives';
-import { multiply } from '../render/primitives';
+import { multiply, runMatrix } from '../render/primitives';
 import { compileElement, elementMatrix, type CompileContext } from '../render/compile';
 import { renderToCanvas, preloadImages } from '../render/canvasBackend';
 import { parsePath } from '../lib/pathData';
@@ -97,7 +98,9 @@ class PageWriter {
    * and placed with `Do`; it inherits the current fill colour, so one definition serves every
    * colour and size. This keeps outlined text compact.
    */
-  glyph(key: string, d: string): PDFName {
+  /** A glyph outline as a form XObject (filled, or filled and stroked for outlined type). */
+  glyph(key: string, d: string, outlined = false): PDFName {
+    if (outlined) key += '|B';
     let ref = this.glyphs.get(key);
     if (!ref) {
       const ops: PDFOperator[] = [];
@@ -110,8 +113,9 @@ class PageWriter {
         const pts = s.c === 'C' ? [s.x1, s.y1, s.x2, s.y2, s.x, s.y] : [s.x, s.y];
         for (let i = 0; i < pts.length; i += 2) { x0 = Math.min(x0, pts[i]); x1 = Math.max(x1, pts[i]); y0 = Math.min(y0, pts[i + 1]); y1 = Math.max(y1, pts[i + 1]); }
       }
-      ops.push(fill());
-      const form = this.doc.context.formXObject(ops, { BBox: [Math.floor(x0) - 1, Math.floor(y0) - 1, Math.ceil(x1) + 1, Math.ceil(y1) + 1] });
+      ops.push(outlined ? fillAndStroke() : fill());
+      const pad = outlined ? 120 : 1;
+      const form = this.doc.context.formXObject(ops, { BBox: [Math.floor(x0) - pad, Math.floor(y0) - pad, Math.ceil(x1) + pad, Math.ceil(y1) + pad] });
       ref = this.doc.context.register(form);
       this.glyphs.set(key, ref);
     }
@@ -361,7 +365,8 @@ async function emitRun(w: PageWriter, r: TextRun, alpha: number, blend: BlendMod
     const a = (r.rotate * Math.PI) / 180, c = Math.cos(a), s = Math.sin(a);
     w.push(concatTransformationMatrix(c, s, -s, c, r.x - c * r.x + s * r.y, r.y - s * r.x - c * r.y));
   }
-  if (r.scaleX && r.scaleX !== 1) w.push(concatTransformationMatrix(r.scaleX, 0, 0, 1, r.x - r.scaleX * r.x, 0));
+  const rm = runMatrix(r);
+  if (rm) w.push(concatTransformationMatrix(rm[0], rm[1], rm[2], rm[3], rm[4], rm[5]));
   const g = w.gs(alpha, blend, false);
   if (g) w.push(setGraphicsState(g));
   const ls = r.letterSpacing ?? 0;
@@ -370,6 +375,8 @@ async function emitRun(w: PageWriter, r: TextRun, alpha: number, blend: BlendMod
   if (pdfFont) {
     w.push(concatTransformationMatrix(1, 0, 0, -1, r.x, r.y));
     if (ls) w.push(setCharacterSpacing(ls));
+    // Outlined type: fill and stroke the glyphs (text render mode 2).
+    if (r.stroke) { w.setColor(r.stroke.color, true, st.spot); w.push(setLineWidth(r.stroke.width), setTextRenderingMode(TextRenderingMode.FillAndOutline)); }
     await w.pendingImages();
     w.flush();
     const color = st.spot ? cmyk(...SPOTS[st.spot]?.cmyk ?? [0, 0, 0, 1]) : w.opts.colorMode === 'cmyk' ? cmyk(...w.cmykOf(r.color)) : (() => { const c = parseColor(r.color); return rgb(c.r / 255, c.g / 255, c.b / 255); })();
@@ -394,6 +401,8 @@ async function emitRun(w: PageWriter, r: TextRun, alpha: number, blend: BlendMod
     if (ls) w.push(setCharacterSpacing(0));
   } else if (canOutline(r.text, r.font)) {
     w.setColor(r.color, false, st.spot);
+    // Outlined type: the glyph forms fill and stroke; the line width is set in glyph units below.
+    if (r.stroke) w.setColor(r.stroke.color, true, st.spot);
     const shaped = shape(r.text, r.font)!;
     const gk = glyphKerns(shaped, r.kern);
     let x = 0;
@@ -402,9 +411,10 @@ async function emitRun(w: PageWriter, r: TextRun, alpha: number, blend: BlendMod
       const gp = glyphPath(r.font, gl.id);
       if (gp && gp.d) {
         const k = r.size / gp.upm;
-        const name = w.glyph(`${r.font.face}|${JSON.stringify(r.font.axes)}|${gl.id}`, gp.d);
+        const name = w.glyph(`${r.font.face}|${JSON.stringify(r.font.axes)}|${gl.id}`, gp.d, !!r.stroke);
         w.push(pushGraphicsState());
         w.push(concatTransformationMatrix(k, 0, 0, -k, r.x + x + gl.xOffset * r.size, r.y - gl.yOffset * r.size));
+        if (r.stroke) w.push(setLineWidth(r.stroke.width / k), setLineJoin(LineJoinStyle.Round));
         if (r.font.oblique) w.push(concatTransformationMatrix(1, 0, Math.tan((12 * Math.PI) / 180), 1, 0, 0));
         w.push(drawObject(name));
         w.push(popGraphicsState());

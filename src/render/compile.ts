@@ -7,8 +7,8 @@ import type {
   Element, Project, TextElement, ShapeElement, ImageElement, PathElement, CutoutElement, DrawingElement, SurfaceKey, BookSpec,
 } from '../model/types';
 import type { GroupPrim, Matrix, PathPrim, Prim } from './primitives';
-import { ellipsePath, multiply, rectPath, rotate, translate, polylinePath, IDENTITY } from './primitives';
-import { layoutStory, frameSpecOf, type FrameLayout, type TokenContext, type StoryStyles } from '../engine/textLayout';
+import { ellipsePath, multiply, rectPath, rotate, translate, polylinePath, IDENTITY, applyMatrix, invert } from './primitives';
+import { layoutStory, frameSpecOf, type FrameLayout, type FrameSpec, type TokenContext, type StoryStyles, type WrapShape } from '../engine/textLayout';
 import { ensureFamily, resolveFont, measure, fontMetrics, useFontStore } from '../engine/fonts';
 import { textBlock, type PageSide } from '../engine/grid';
 import type { GenContext } from '../engine/generators/context';
@@ -17,9 +17,11 @@ import { renderStrokes } from '../engine/brushes';
 import { getMotif, type MotifContext } from '../engine/motifs';
 import { parseSvgCached, svgPrims, svgMarkupFromDataUrl } from './svgImport';
 import { transformPath } from '../lib/pathData';
-import { findElement, pageSide, facingOf } from '../model/surfaces';
+import { findElement, pageSide, facingOf, surfaceElements } from '../model/surfaces';
 import { getImage } from './images';
 import { mix, parseColor } from '../lib/color';
+import { compileTable, tableContextKey } from './table';
+import { pathTextPrims } from './pathText';
 
 /* -------------------------------------------------------------------------- */
 /* Generator context                                                           */
@@ -49,9 +51,31 @@ export interface CompileContext {
   side: PageSide;
 }
 
+/** Running heads: the latest chapter heading at or before each page (a `# ` line, or a frame named "Chapter…"). */
+const chapterCache = new WeakMap<object, string[]>();
+const plainText = (s: string) => s.replace(/<\/?(?:\{[^}]*\}|[^<>]{0,40})>|\{[^}]*\}|\[[^\]]*\]\s*|[*^\\]/g, '').replace(/\s+/g, ' ').trim();
+function chapterAt(project: Project, pageIndex: number | null): string {
+  if (pageIndex == null) return '';
+  let list = chapterCache.get(project.pages);
+  if (!list) {
+    list = [];
+    let cur = '';
+    for (const p of project.pages) {
+      for (const e of p.elements) {
+        if (e.type !== 'text') continue;
+        if (/chapter/i.test(e.name) && !/number|no\.?$/i.test(e.name) && e.text.trim()) cur = plainText(e.text.split('\n')[0]);
+        for (const line of e.text.split('\n')) if (/^#\s/.test(line)) cur = plainText(line.slice(2));
+      }
+      list.push(cur);
+    }
+    chapterCache.set(project.pages, list);
+  }
+  return list[Math.min(pageIndex, list.length - 1)] ?? '';
+}
+
 function tokensFor(project: Project, pageIndex: number | null): TokenContext {
   const b = project.book;
-  return { page: (pageIndex ?? 0) + 1, pages: project.pages.length, title: b.title, subtitle: b.subtitle, author: b.author, publisher: b.publisher };
+  return { page: (pageIndex ?? 0) + 1, pages: project.pages.length, title: b.title, subtitle: b.subtitle, author: b.author, publisher: b.publisher, chapter: chapterAt(project, pageIndex) };
 }
 
 function gridFor(spec: BookSpec, side: PageSide, el: Element, surface: SurfaceKey) {
@@ -67,7 +91,7 @@ function gridFor(spec: BookSpec, side: PageSide, el: Element, surface: SurfaceKe
 /* Text layout service                                                         */
 /* -------------------------------------------------------------------------- */
 
-interface ChainCache { members: Element[]; book: BookSpec; styles: string; version: number; tokens: string; layouts: Map<string, FrameLayout> }
+interface ChainCache { members: Element[]; book: BookSpec; styles: string; version: number; tokens: string; wraps: string; layouts: Map<string, FrameLayout> }
 const chainCache = new WeakMap<Element, ChainCache>();
 const singleCache = new WeakMap<Element, Map<string, FrameLayout>>();
 
@@ -109,11 +133,53 @@ export function threadOf(project: Project, id: string): string[] {
 const stylesIds = new WeakMap<object, number>();
 let stylesCounter = 0;
 function storyStyles(project: Project): { styles: StoryStyles | null; key: string } {
-  const para = project.paragraphStyles ?? [], char = project.characterStyles ?? [];
-  if (!para.length && !char.length) return { styles: null, key: '-' };
+  const para = project.paragraphStyles ?? [], char = project.characterStyles ?? [], hyph = project.hyphenDictionary ?? [];
+  if (!para.length && !char.length && !hyph.length) return { styles: null, key: '-' };
   const id = (o: object) => { let v = stylesIds.get(o); if (v == null) { v = ++stylesCounter; stylesIds.set(o, v); } return v; };
   for (const d of [...para, ...char]) if (d.props.fontFamily) void ensureFamily(d.props.fontFamily);
-  return { styles: { para, char }, key: `${id(para)}/${id(char)}` };
+  return { styles: { para, char, hyphenation: hyph }, key: `${id(para)}/${id(char)}/${id(hyph)}` };
+}
+
+/* Text wrap: items with a wrap setting push the text of frames on the same page aside. */
+function cornersBox(m: Matrix, w: number, h: number) {
+  const pts = [applyMatrix(m, 0, 0), applyMatrix(m, w, 0), applyMatrix(m, 0, h), applyMatrix(m, w, h)];
+  const xs = pts.map((p) => p[0]), ys = pts.map((p) => p[1]);
+  return { x0: Math.min(...xs), y0: Math.min(...ys), x1: Math.max(...xs), y1: Math.max(...ys) };
+}
+
+function wrapsFor(el: TextElement, ctx: CompileContext): WrapShape[] {
+  if (el.wrapIgnore) return [];
+  const { project } = ctx;
+  const others: { e: Element; dx: number }[] = [];
+  const page = ctx.pageIndex != null && ctx.surface.startsWith('page:') ? project.pages[ctx.pageIndex] : null;
+  for (const e of surfaceElements(project, ctx.surface)) others.push({ e, dx: 0 });
+  if (page?.masterId) {
+    const m = project.masters.find((x) => x.id === page.masterId);
+    if (m) for (const e of ctx.side === 'left' ? m.left : m.right) others.push({ e, dx: 0 });
+  }
+  if (page && ctx.pageIndex != null) for (const c of crossovers(project, ctx.pageIndex)) others.push({ e: c.el, dx: c.dx });
+  const inv = invert(elementMatrix(el));
+  const out: WrapShape[] = [];
+  for (const { e, dx } of others) {
+    const wr = e.wrap;
+    if (!wr || e.id === el.id || e.hidden) continue;
+    // The item's box in the frame's own coordinates, grown by the wrap offset.
+    const b = cornersBox(multiply(inv, elementMatrix(e, dx, 0)), e.w, e.h);
+    const off = Math.max(0, wr.offset ?? 0);
+    const x = b.x0 - off, y = b.y0 - off, w = b.x1 - b.x0 + 2 * off, h = b.y1 - b.y0 + 2 * off;
+    if (x > el.w || y > el.h || x + w < 0 || y + h < 0) continue;
+    const round = wr.mode === 'shape' && ((e.type === 'shape' && e.shape === 'ellipse') || (e.type === 'cutout' && e.shape === 'ellipse'));
+    out.push({ x, y, w, h, shape: round ? 'ellipse' : 'rect', side: wr.side ?? 'both', jump: wr.mode === 'jump' });
+  }
+  return out;
+}
+
+const wrapKey = (w: WrapShape[]) => w.map((r) => `${r.x.toFixed(1)},${r.y.toFixed(1)},${r.w.toFixed(1)},${r.h.toFixed(1)},${r.shape[0]}${r.side[0]}${r.jump ? 'j' : ''}`).join(';');
+
+/** Auto-height frames are set in a tall frame; the editor then fits the frame to `usedHeight`. */
+function frameFor(el: TextElement, grid: FrameSpec['grid'], wraps: WrapShape[]): FrameSpec {
+  const f = frameSpecOf(el, grid, wraps);
+  return el.autoHeight ? { ...f, h: Math.max(el.h, 20000), verticalAlign: 'top' } : f;
 }
 
 export function layoutText(el: TextElement, ctx: CompileContext): FrameLayout {
@@ -129,27 +195,30 @@ export function layoutText(el: TextElement, ctx: CompileContext): FrameLayout {
     const head = chain[0].el;
     const tokens = tokensFor(project, chain[0].pageIndex);
     const tokensKey = JSON.stringify(tokens);
+    const wraps = chain.map((c) => wrapsFor(c.el, { project, surface: c.surface, pageIndex: c.pageIndex, side: c.pageIndex != null ? pageSide(project, c.pageIndex) : 'right' }));
+    const wk = wraps.map(wrapKey).join('|');
     const cached = chainCache.get(head);
-    if (cached && cached.version === version && cached.book === project.book && cached.styles === ss.key && cached.tokens === tokensKey &&
+    if (cached && cached.version === version && cached.book === project.book && cached.styles === ss.key && cached.tokens === tokensKey && cached.wraps === wk &&
       cached.members.length === chain.length && cached.members.every((m, i) => m === chain[i].el)) {
       const hit = cached.layouts.get(el.id);
       if (hit) return hit;
     }
-    const frames = chain.map((c) => frameSpecOf(c.el, c.pageIndex != null ? gridFor(project.book, pageSide(project, c.pageIndex), c.el, c.surface) : null));
+    const frames = chain.map((c, i) => frameFor(c.el, c.pageIndex != null ? gridFor(project.book, pageSide(project, c.pageIndex), c.el, c.surface) : null, wraps[i]));
     const results = layoutStory(head.text, head.style, frames, tokens, ss.styles);
     const layouts = new Map<string, FrameLayout>();
     chain.forEach((c, i) => layouts.set(c.el.id, results[i]));
-    chainCache.set(head, { members: chain.map((c) => c.el), book: project.book, styles: ss.key, version, tokens: tokensKey, layouts });
+    chainCache.set(head, { members: chain.map((c) => c.el), book: project.book, styles: ss.key, version, tokens: tokensKey, wraps: wk, layouts });
     return layouts.get(el.id)!;
   }
   const tokens = tokensFor(project, ctx.pageIndex);
   const grid = gridFor(project.book, ctx.side, el, ctx.surface);
-  const key = `${version}|${ss.key}|${JSON.stringify(tokens)}|${grid ? `${grid.origin.toFixed(3)}/${grid.increment}` : '-'}`;
+  const wraps = wrapsFor(el, ctx);
+  const key = `${version}|${ss.key}|${JSON.stringify(tokens)}|${grid ? `${grid.origin.toFixed(3)}/${grid.increment}` : '-'}|${wrapKey(wraps)}`;
   let m = singleCache.get(el);
   if (!m) { m = new Map(); singleCache.set(el, m); }
   const hit = m.get(key);
   if (hit) return hit;
-  const [layout] = layoutStory(el.text, el.style, [frameSpecOf(el, grid)], tokens, ss.styles);
+  const [layout] = layoutStory(el.text, el.style, [frameFor(el, grid, wraps)], tokens, ss.styles);
   if (m.size > 24) m.clear();
   m.set(key, layout);
   return layout;
@@ -237,7 +306,10 @@ function compileImage(el: ImageElement, project: Project): Prim[] {
 function compilePath(el: PathElement): Prim[] {
   const sx = el.vw ? el.w / el.vw : 1, sy = el.vh ? el.h / el.vh : 1;
   const d = sx === 1 && sy === 1 ? el.d : transformPath(el.d, [sx, 0, 0, sy, 0, 0]);
-  return [{ t: 'path', d, fill: el.fill, stroke: el.stroke, strokeWidth: el.strokeWidth, dash: el.dash, cap: el.cap, join: el.join, fillRule: el.fillRule }];
+  const path: Prim = { t: 'path', d, fill: el.fill, stroke: el.stroke, strokeWidth: el.strokeWidth, dash: el.dash, cap: el.cap, join: el.join, fillRule: el.fillRule };
+  if (!el.pathText) return [path];
+  void ensureFamily(el.pathText.fontFamily);
+  return [path, ...pathTextPrims(el, d)];
 }
 
 export function cutoutPath(el: CutoutElement): string {
@@ -295,6 +367,7 @@ export function compileElementLocal(el: Element, ctx: CompileContext): Prim[] {
         return [{ t: 'path', d: rectPath(0, 0, el.w, el.h), stroke: '#e5483a', strokeWidth: 0.5, dash: [3, 3] }];
       }
     }
+    case 'table': return compileTable(el, ctx);
   }
 }
 
@@ -322,6 +395,7 @@ function bookKey(book: BookSpec): number {
 function contextKey(el: Element, ctx: CompileContext): string {
   const v = useFontStore.getState().version;
   if (el.type === 'motif') return `${v}|${bookKey(ctx.project.book)}`;
+  if (el.type === 'table') return tableContextKey(ctx, v);
   if (el.type === 'image' || el.type === 'svg') return `${v}|${el.assetId ? (ctx.project.assets[el.assetId] ? 1 : 0) : 0}`;
   return String(v);
 }

@@ -247,7 +247,7 @@ function currentSurfaces(project: Project, view: string, spread: number, masterI
 }
 
 const TYPE_GLYPH: Record<Element['type'], string> = {
-  text: 'T', image: '▣', shape: '■', rule: '—', path: '✎', svg: '◇', pattern: '◎', ornament: '❦', initial: 'Ꭿ', overprint: '◐', gradient: '◍', cutout: '◌', drawing: '✐', gridtype: '⌗', motif: '✦',
+  text: 'T', image: '▣', shape: '■', rule: '—', path: '✎', svg: '◇', pattern: '◎', ornament: '❦', initial: 'Ꭿ', overprint: '◐', gradient: '◍', cutout: '◌', drawing: '✐', gridtype: '⌗', motif: '✦', table: '▦',
 };
 
 function LayersPanel() {

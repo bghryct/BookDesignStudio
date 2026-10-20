@@ -6,6 +6,7 @@ import { registerUploadedFont } from '../engine/fonts';
 import { surfaceElementsDraft, findElement } from '../model/surfaces';
 import { parseSvg } from '../render/svgImport';
 import { loadProjectFile } from './projectIO';
+import { tableFromText } from './canvas/TableTools';
 
 export interface ImportOptions {
   place?: { surfaceKey: string; x: number; y: number };
@@ -47,6 +48,12 @@ export async function importFiles(files: File[], opts: ImportOptions = {}): Prom
       if (/\.bds(\.json)?$|\.json$/i.test(file.name)) {
         await loadProjectFile(file);
         messages.push(`Opened ${file.name}.`);
+        continue;
+      }
+      if (/\.(csv|tsv|tab)$/i.test(file.name) || file.type === 'text/csv' || file.type === 'text/tab-separated-values') {
+        const el = opts.place ? tableFromText(await file.text(), opts.place, file.name.replace(/\.[^.]+$/, '')) : null;
+        if (el) { s.addElement(opts.place!.surfaceKey, el); messages.push(`Table made from ${file.name}: ${el.rows.length} rows × ${el.cols.length} columns.`); }
+        else errors.push(`${file.name}: no rows found (drop it on a page to make a table).`);
         continue;
       }
       if (/\.(txt|md)$/i.test(file.name) || file.type === 'text/plain') {

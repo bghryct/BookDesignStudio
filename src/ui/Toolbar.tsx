@@ -2,7 +2,7 @@ import React from 'react';
 import clsx from 'clsx';
 import {
   MousePointer2, Spline, Type, Square, Circle, Star, Minus, PenTool, Image, Brush, Eraser, Orbit, Flower2, TextInitial,
-  Blend, Sparkles, Scissors, Grid3x3, Hand, ZoomIn, LayoutGrid, Ruler, CaseSensitive, Library,
+  Blend, Sparkles, Scissors, Grid3x3, Hand, ZoomIn, LayoutGrid, Ruler, CaseSensitive, Library, Table2,
 } from 'lucide-react';
 import { useStore, type Tool } from '../store/store';
 
@@ -21,6 +21,7 @@ const GROUPS: ToolDef[][] = [
     { id: 'line', icon: <Minus size={16} />, label: 'Rule', key: 'L' },
     { id: 'pen', icon: <PenTool size={16} />, label: 'Pen (Bézier)', key: 'P', hint: 'Click for corners, drag for curves, click the first point to close, Enter to finish' },
     { id: 'image', icon: <Image size={16} />, label: 'Image frame', key: 'I' },
+    { id: 'table', icon: <Table2 size={16} />, label: 'Table', hint: 'Drag a box, or click to span the text block. Click a selected table to pick cells, double-click to type; drag borders to resize' },
   ],
   [
     { id: 'brush', icon: <Brush size={16} />, label: 'Brushes — watercolour, pencil, crayon, marker…', key: 'B', hint: '[ ] change size' },

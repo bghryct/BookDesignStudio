@@ -83,8 +83,15 @@ export interface TextRun {
   kern?: number[];
   /** Rotation in degrees around (x, y) — used for sideways Latin in vertical text. */
   rotate?: number;
-  /** Horizontal compression (tate-chū-yoko). */
+  /** Horizontal scale about (x, y): tate-chū-yoko, glyph-scaling justification, character scale. */
   scaleX?: number;
+  /** Vertical scale about the baseline, and false-italic skew in degrees. */
+  scaleY?: number;
+  skew?: number;
+  /** Outline the glyphs (drawn over the fill). */
+  stroke?: { color: string; width: number };
+  /** Layout-only: underline / strike / highlight, drawn by the text frame as rules. */
+  deco?: { u?: { w: number; o: number; c: string }; s?: { w: number; c: string }; hl?: string };
   /** Measured advance width of the run (pt) — used to clip / stretch in back-ends. */
   width: number;
   dir?: 'ltr' | 'rtl';
@@ -225,3 +232,13 @@ export function smoothPath(pts: [number, number][], close = false, tension = 0.5
 }
 
 export const fmt = f;
+
+/**
+ * Character transforms of a run about its origin on the baseline: horizontal and vertical scale
+ * and false-italic skew, as an SVG / canvas / PDF matrix [a b c d e f], or null when none apply.
+ */
+export function runMatrix(r: TextRun): Matrix | null {
+  const sx = r.scaleX ?? 1, sy = r.scaleY ?? 1, k = r.skew ? Math.tan((r.skew * Math.PI) / 180) : 0;
+  if (sx === 1 && sy === 1 && !k) return null;
+  return [sx, 0, -k * sy, sy, r.x - sx * r.x + k * sy * r.y, r.y - sy * r.y];
+}

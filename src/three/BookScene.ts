@@ -283,10 +283,12 @@ export class BookScene {
     this.model = model;
     const k = SCENE_UNITS_PER_PT;
     const sx = layout.rtl ? -1 : 1;
-    const zt = (layout.coverH / 2) * k;
+    // Standing, the book rests on its tail-most point; lying, on its lowest one (a jacket or the
+    // sewing thread under the back cover lifts the book off the ground).
+    const zt = model.zTail * k;
     this.stagePivot.position.set(0, 0, zt);
     this.root.scale.set(sx * k, k, k);
-    this.root.position.set(-sx * k * ((layout.a0 + layout.a1) / 2), 0, -zt);
+    this.root.position.set(-sx * k * ((layout.a0 + layout.a1) / 2), model.groundLift * k, -zt);
     this.root.add(model.group);
     this.span = Math.max(layout.a1 - layout.a0, layout.coverH, layout.W * 2) * k;
     // Clamp the interactive leaf state to the leaves this book models.
@@ -653,6 +655,15 @@ export class BookScene {
       this.motion.rotation.set(tilt, spin * (this.layout?.rtl ? -1 : 1), 0);
       this.motionInner.position.set(-c.x, 0, -c.z);
       this.motion.updateMatrixWorld(true);
+      // A tilted book rocks on its lowest edge rather than sinking into the floor.
+      const m = this.motionInner.matrixWorld;
+      let low = Infinity;
+      const p = new Vector3();
+      for (const q of this.rest.corners) low = Math.min(low, p.copy(q).applyMatrix4(m).y);
+      if (low < 0) {
+        this.motion.position.y -= low;
+        this.motion.updateMatrixWorld(true);
+      }
     }
     const key = [s.open, stage, lift, spin, tilt, s.jacket ?? 0].map((v) => v.toFixed(5)).join('|') + s.leaves.map((v) => v.toFixed(5)).join(',');
     if (key !== this.lastPose) {
@@ -873,6 +884,30 @@ export class BookScene {
     return this.canvas.toDataURL('image/png');
   }
 
+  /**
+   * Near / far planes hugging the shot: the near plane as far out as the book and the floor in
+   * front of the lens allow (depth precision for leaves 0.1 mm apart, no z-fighting on the
+   * floor), the far plane just past the backdrop. Pure in the camera and pose, so frames match.
+   */
+  private fitClipPlanes(): void {
+    const cam = this.camera;
+    cam.updateMatrixWorld();
+    const dir = cam.getWorldDirection(new Vector3());
+    const m = this.motionInner.matrixWorld;
+    const p = new Vector3();
+    let nearest = Infinity;
+    for (const q of this.rest.corners) nearest = Math.min(nearest, p.copy(q).applyMatrix4(m).sub(cam.position).dot(dir));
+    // The floor and backdrop can come closer than the book on a low camera.
+    const floorGap = Math.max(Math.abs(cam.position.y), 0.02 * this.span) * 0.6;
+    const near = Math.max(0.01, 0.5 * Math.min(nearest, floorGap));
+    const far = cam.position.distanceTo(this.rest.center) + this.span * 10;
+    if (Math.abs(near - cam.near) > 1e-6 || Math.abs(far - cam.far) > 1e-6) {
+      cam.near = near;
+      cam.far = far;
+      cam.updateProjectionMatrix();
+    }
+  }
+
   private sortTransparentLeaves(): void {
     const model = this.model;
     if (!model) return;
@@ -897,6 +932,7 @@ export class BookScene {
       this.poseDirty = false;
     }
     this.sortTransparentLeaves();
+    this.fitClipPlanes();
     // See ContactShadow.render: make sure re-posed sheets are re-uploaded this frame
     // (frame-exact video export depends on it).
     this.renderer.info.render.frame++;

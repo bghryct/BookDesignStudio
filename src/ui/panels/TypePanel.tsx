@@ -8,8 +8,9 @@ import type { TextElement, TextStyle, DropCapFrame } from '../../model/types';
 import { Section, Row, NumberField, Slider, Select, Toggle, ColorField, Segmented, Hint } from '../controls';
 import { getFamilies, getFamily, getFace, resolveFont, useFontStore } from '../../engine/fonts';
 import { threadOf } from '../../render/compile';
-import { HYPHEN_LANGUAGES } from '../../engine/hyphenate';
 import { FrameStyleSection, StylesManager } from './StylesPanel';
+import { FindChangeSection } from './FindChange';
+import { RagSection, JustificationSection, KeepsSection, RulesSection, ListSection, TabsSection, RuleStylesSection, FootnoteSection, HyphenDictionarySection } from './TypeAdvanced';
 import type { KerningMode } from '../../model/types';
 
 const FEATURES: { tag: string; label: string; hint: string }[] = [
@@ -43,6 +44,7 @@ export function TypePanel() {
       <div>
         <div className="p-4 text-[11.5px] leading-relaxed text-ink-400">Select a text frame to set its type. A threaded story shares one style, set on its first frame.</div>
         <StylesManager />
+        <FindChangeSection />
       </div>
     );
   }
@@ -98,6 +100,7 @@ function TypeControls({ el }: { el: TextElement }) {
             { value: 'none', label: 'Off', title: 'Unkerned' },
           ]} />
           <p className="mt-1 text-[10px] leading-snug text-ink-500">Kern one pair by hand in the story editor: cursor between the letters, ⌥← tighter, ⌥→ looser (⇧ ×5).</p>
+          <div className="mt-1.5"><Toggle label="Optical tracking by size" checked={!!st.opticalTracking} onChange={(v) => set((d) => { d.opticalTracking = v; })} hint="As metal type was cut: small sizes a little open, display sizes closed up (+8‰ at 9 pt, −18‰ at 36 pt)" /></div>
         </div>
         <ColorField label="Colour" value={st.color} onChange={(v) => v && set((d) => { d.color = v; })} />
         <Select label="Case" value={st.textTransform} options={[{ value: 'none', label: 'As typed' }, { value: 'uppercase', label: 'CAPITALS' }, { value: 'lowercase', label: 'lowercase (Crouwel)' }, { value: 'small-caps', label: 'Small caps' }]} onChange={(v) => set((d) => { d.textTransform = v; })} />
@@ -176,26 +179,14 @@ function TypeControls({ el }: { el: TextElement }) {
         <Toggle label="First line in small caps" checked={st.firstLineSmallCaps} onChange={(v) => set((d) => { d.firstLineSmallCaps = v; })} />
       </Section>
 
-      <Section title="Justification & hyphenation" id="type-hj" defaultOpen={false}>
-        <span className="block text-[10.5px] text-ink-400">Word spaces in justified lines, % of the desired space</span>
-        <Row>
-          <NumberField label="Minimum" unit="%" value={st.wordSpaceMin ?? 67} min={30} max={100} step={1} decimals={0} onScrubStart={begin} onChange={(v) => set((d) => { d.wordSpaceMin = v; })} />
-          <NumberField label="Maximum" unit="%" value={st.wordSpaceMax ?? 150} min={100} max={400} step={1} decimals={0} onScrubStart={begin} onChange={(v) => set((d) => { d.wordSpaceMax = v; })} hint="Narrow ranges give even colour; the breaker re-tries wider only when nothing fits" />
-        </Row>
-        <Toggle label="Hyphenate" checked={st.hyphenate} onChange={(v) => set((d) => { d.hyphenate = v; })} hint="Liang patterns for the chosen language" />
-        {st.hyphenate && (
-          <>
-            <Select label="Language" value={st.language} options={HYPHEN_LANGUAGES.map((l) => ({ value: l.id, label: l.label }))} onChange={(v) => set((d) => { d.language = v; })} />
-            <Row>
-              <NumberField label="Words longer than" value={st.hyphenMinWord ?? 5} min={3} max={15} decimals={0} onChange={(v) => set((d) => { d.hyphenMinWord = Math.round(v); })} />
-              <NumberField label="Consecutive hyphens" value={st.hyphenLimit ?? 0} min={0} max={9} decimals={0} onChange={(v) => set((d) => { d.hyphenLimit = Math.round(v); })} hint="0 = no limit. Bringhurst: no more than two in a row" />
-              <NumberField label="Letters before break" value={st.hyphenBefore ?? 2} min={1} max={6} decimals={0} onChange={(v) => set((d) => { d.hyphenBefore = Math.round(v); })} />
-              <NumberField label="Letters after break" value={st.hyphenAfter ?? 3} min={1} max={6} decimals={0} onChange={(v) => set((d) => { d.hyphenAfter = Math.round(v); })} />
-            </Row>
-            <Toggle label="Hyphenate capitalised words" checked={st.hyphenateCaps !== false} onChange={(v) => set((d) => { d.hyphenateCaps = v; })} hint="Off keeps names and sentence openings whole" />
-          </>
-        )}
-      </Section>
+      <RagSection st={st} set={set} begin={begin} />
+      <JustificationSection st={st} set={set} begin={begin} />
+      <KeepsSection st={st} set={set} begin={begin} />
+      <ListSection st={st} set={set} begin={begin} />
+      <TabsSection st={st} set={set} begin={begin} />
+      <RulesSection st={st} set={set} begin={begin} />
+      <RuleStylesSection st={st} set={set} begin={begin} />
+      <FootnoteSection st={st} set={set} begin={begin} />
 
       <Section title="Initial / drop cap" id="type-dropcap">
         <Toggle label="Drop cap" checked={st.dropCap.enabled} onChange={(v) => set((d) => { d.dropCap.enabled = v; })} />
@@ -204,6 +195,7 @@ function TypeControls({ el }: { el: TextElement }) {
             <Row>
               <NumberField label="Lines" value={st.dropCap.lines} min={2} max={12} decimals={0} onChange={(v) => set((d) => { d.dropCap.lines = Math.round(v); })} />
               <NumberField label="Gap" unit="pt" value={st.dropCap.gap} min={0} step={0.5} onChange={(v) => set((d) => { d.dropCap.gap = v; })} />
+              <NumberField label="Letters" value={st.dropCap.chars ?? 1} min={1} max={6} decimals={0} onChange={(v) => set((d) => { d.dropCap.chars = Math.round(v); })} hint="Initial letters (an opening quote always comes along)" />
             </Row>
             <Select label="Initial typeface" value={st.dropCap.fontFamily ?? ''} options={[{ value: '', label: 'Same as text' }, ...getFamilies().filter((f) => !f.system).map((f) => ({ value: f.id, label: f.name }))]} onChange={(v) => set((d) => { d.dropCap.fontFamily = v || null; })} />
             <NumberField label="Initial weight" value={st.dropCap.weight} min={100} max={900} step={50} decimals={0} onChange={(v) => set((d) => { d.dropCap.weight = v; })} />
@@ -218,6 +210,8 @@ function TypeControls({ el }: { el: TextElement }) {
       </Section>
 
       <StylesManager />
+      <FindChangeSection />
+      <HyphenDictionarySection />
 
       <Section title="Direction & writing mode" id="type-dir" defaultOpen={false}>
         <Segmented value={st.writingMode} onChange={(v) => set((d) => {

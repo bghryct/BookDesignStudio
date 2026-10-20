@@ -142,7 +142,9 @@ export function FontsPanel() {
         <Section title={`Glyphs · ${face?.fk?.numGlyphs ?? 0}`} id="fonts-glyphs" defaultOpen={false}>
           <div className="grid grid-cols-8 gap-px rounded bg-ink-700 p-px">
             {glyphs.map((g, i) => (
-              <div key={i} title={`U+${g.codePointAt(0)!.toString(16).toUpperCase().padStart(4, '0')}`} className="flex aspect-square items-center justify-center bg-paper text-[17px] text-[#1b1813]" style={style}>{g}</div>
+              <button key={i} type="button" title={`U+${g.codePointAt(0)!.toString(16).toUpperCase().padStart(4, '0')} — click to insert into the story being edited`}
+                onClick={() => { if (!s().textEditing) { s().notify('Open a story (double-click a text frame), then click a glyph to insert it.'); return; } window.dispatchEvent(new CustomEvent('bds:insert', { detail: g })); }}
+                className="flex aspect-square items-center justify-center bg-paper text-[17px] text-[#1b1813] hover:bg-[#f0e2c4]" style={style}>{g}</button>
             ))}
           </div>
         </Section>

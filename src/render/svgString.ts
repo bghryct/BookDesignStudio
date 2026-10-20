@@ -3,6 +3,7 @@
  * Used by the editor (per element, memoised) and by the SVG export (whole pages / spreads).
  */
 import type { Paint, Prim, TextRun, PathPrim, ImagePrim, RasterPrim, GroupPrim, TextPrim } from './primitives';
+import { runMatrix } from './primitives';
 import { fontFeatureCss, fontVariationCss, shape, glyphPath, canOutline, glyphKerns } from '../engine/fonts';
 
 export interface SvgOptions {
@@ -80,9 +81,13 @@ function runStyle(r: TextRun): string {
 function runTransform(r: TextRun): string {
   const parts: string[] = [];
   if (r.rotate) parts.push(`rotate(${n(r.rotate)} ${n(r.x)} ${n(r.y)})`);
-  if (r.scaleX && r.scaleX !== 1) parts.push(`translate(${n(r.x)} 0) scale(${n(r.scaleX)} 1) translate(${n(-r.x)} 0)`);
+  const m = runMatrix(r);
+  if (m) parts.push(`matrix(${m.map(n).join(' ')})`);
   return parts.length ? ` transform="${parts.join(' ')}"` : '';
 }
+
+/** Outline stroke for a run; `scale` converts pt to the coordinates it is drawn in. */
+const runStroke = (r: TextRun, scale = 1) => (r.stroke ? ` stroke="${r.stroke.color}" stroke-width="${n(r.stroke.width / scale)}" stroke-linejoin="round"` : '');
 
 /** Text as glyph outlines (exact in every SVG viewer, no fonts needed). */
 function runOutlines(r: TextRun, w: Writer): string | null {
@@ -112,7 +117,7 @@ function runOutlines(r: TextRun, w: Writer): string | null {
     }
     x += g.xAdvance * r.size + ls + (gk ? gk[gi] : 0);
   }
-  return `<g fill="${r.color}"${runTransform(r)}>${d}</g>`;
+  return `<g fill="${r.color}"${runStroke(r, k)}${runTransform(r)}>${d}</g>`;
 }
 
 function textSvg(p: TextPrim, w: Writer): string {
@@ -125,7 +130,7 @@ function textSvg(p: TextPrim, w: Writer): string {
       if (o) { out += o; continue; }
     }
     const dx = kerned ? ` dx="${[0, ...r.kern!.slice(0, -1)].map(n).join(' ')}"` : '';
-    out += `<text x="${n(r.x)}" y="${n(r.y)}"${dx} fill="${r.color}" style="${runStyle(r)}"${runTransform(r)}>${esc(r.text)}</text>`;
+    out += `<text x="${n(r.x)}" y="${n(r.y)}"${dx} fill="${r.color}"${runStroke(r)} style="${runStyle(r)}"${runTransform(r)}>${esc(r.text)}</text>`;
   }
   return p.opacity != null && p.opacity < 1 || (p.blend && p.blend !== 'normal') ? `<g${common(p)}>${out}</g>` : out;
 }

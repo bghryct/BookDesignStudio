@@ -43,21 +43,89 @@ Van de Graaf, Tschichold 2:3:4:6, golden progression, Bringhurst proportion, Fib
 ### Canvas
 Every item can be moved, resized, rotated, flipped, stacked, locked, hidden and blended (multiply, screen, difference …), and snaps to columns, fields, baselines, margins, ruler guides and other items. **Rulers and guides** work on pages, master pages, the cover and the jacket: drag a guide out of a ruler, drag it back to delete it, or create a column/row guide grid from the Document panel (`⌘;` show/hide, `⌥⌘;` lock). **Spreads**: any item can cross the gutter (a photo, a headline, a brush drawing, a band of colour). It's drawn on both pages in the editor, the thumbnails, the 3D book and every export, and the two halves meet exactly at the fold. On the facing page it sits beneath that page's items, or above them. *Fill page*, *Fill spread* and *Span text* place an item in one click, and new brush layers span the whole spread. There's a pen tool with Bézier handles and a node editor, threaded text frames (click the red `+` overset port, then a frame), master pages with `{page}` `{title}` `{author}` `{page:roman}` tokens, drag-and-drop of images, SVG, fonts and text, and undo/redo.
 
-### Micro-typography (`src/engine/textLayout.ts`, `src/engine/fonts.ts`)
-- **Knuth–Plass** total-fit line breaking for justified *and* ragged text, with fitness classes, flagged-hyphen demerits and runt avoidance.
-- Liang hyphenation in 13 languages, including Latin. You can set the shortest word, the letters before and after a break, a limit on consecutive hyphens (enforced inside the line breaker) and whether capitalised words break.
-- Justification range: the smallest and largest word space, as a percentage of the desired space.
-- **Kerning**: the font's own pairs (metrics), **optical** kerning, or none. Optical kerning is measured from the glyph outlines: it compares the white between two letters with what each has beside its own twin, so it tightens To, AV and Yo but leaves well-spaced pairs alone. Pair kerning by hand: put the cursor between two letters in the story editor and press ⌥← / ⌥→ (⇧ ×5), stored as `{k:-20}`. Kerned text stays live text in the PDF.
-- **Paragraph and character styles**: a starter set (Subhead, Caption, Pull quote, Epigraph, Verse, List, Footnote, Display; Emphasis, Strong, Small caps, Spaced capitals, Rubric, superscript, subscript, old-style figures) or your own. Start a line with `[Caption]` or wrap words in `<Rubric>…</Rubric>`; the story editor's ¶ and a menus do it for you. A frame can follow a paragraph style, and overrides are flagged so you can clear them or redefine the style. Editing a style reflows every frame and paragraph that uses it. Character styles cover typeface, weight, italic, relative size, tracking, colour, case, superscript or subscript (true `sups`/`subs` when the font has them), baseline shift and figure style.
-- Left, right and hanging indents, and space before and after paragraphs.
-- Optical margin alignment and hanging punctuation.
-- Baseline-grid locking.
-- Drop caps sized so the cap height spans exactly N lines, with Cleves illumination frames.
-- First line in small caps; true small caps from the font, synthesised when it has none.
-- RTL lines.
-- **Vertical Japanese (tategaki)** with kinsoku rules, hanging 、。, vertical punctuation forms and tate-chū-yoko.
-- One shaping engine (fontkit) measures with the same font files the browser renders, so the editor, the canvas textures and the PDF agree to the glyph.
-- **Font Studio**: upload OTF / TTF / WOFF / WOFF2, static or variable. It parses the `fvar` axes and named instances (sliders for `wght`, `wdth`, `slnt`, `ital`, `opsz` and custom axes) and lists the GSUB/GPOS features (`kern`, `liga`, `dlig`, `smcp`, `c2sc`, `onum`, `lnum`, `pnum`, `tnum`, `swsh`, `ss01`…), with a glyph grid.
+### Typesetting (`src/engine/text/`, `src/engine/textLayout.ts`, `src/engine/fonts.ts`)
+One shaping engine (fontkit) measures with the same font files the browser renders, so the editor, the 3D textures and the PDF agree to the glyph.
+
+**Composition**
+- **Knuth–Plass** paragraph composer for justified *and* ragged text, with fitness classes, flagged-hyphen demerits and runt avoidance. A single-line (first-fit) composer is also available.
+- **Rag shaping**:
+  - **Swiss rag**: short line, long line, short line, long line, with an adjustable amount and a choice of starting long or short.
+  - **Balanced** lines for headings and captions.
+  - **Wedge** (a centred pyramid).
+  - A **pattern** of line lengths you choose.
+  - "No line ends on a one- or two-letter word".
+- **Justification** by word space, letter spacing and glyph scaling (the hz-programme), each within its own minimum and maximum. You can also set the last-line alignment and how a single-word line is aligned (including spreading its letters).
+- **Hyphenation** (Liang, 13 languages):
+  - shortest word, letters kept before and after a break
+  - a limit on consecutive hyphens, enforced inside the breaker
+  - a hyphenation zone for ragged text
+  - a better-spacing ↔ fewer-hyphens bias
+  - capitalised words and the last word
+  - discretionary hyphens (`{shy}`)
+  - a book-wide exceptions dictionary (`ty-pog-ra-phy`)
+
+**Kerning and spacing**
+- **Kerning modes**:
+  - Metrics: the font's own kerning pairs.
+  - **Optical**: measured from the glyph outlines. Each letter's share of white is what it has beside its own twin, so it tightens To, AV and Yo, leaves well-spaced pairs alone, and fixes fonts with thin kern tables.
+  - None.
+- **Pair kerning by hand**: ⌥← / ⌥→ in the story editor (`{k:-20}`). Kerned text stays live, searchable text in the PDF.
+- Tracking, word space, optical margin alignment with an adjustable strength, and hanging punctuation.
+- **Optical tracking by size**: small sizes open up and display sizes close up along the curve type founders cut into metal (+8‰ at 9 pt, −18‰ at 36 pt). It is applied per run, so a frame that mixes sizes gets each one right.
+- **Special spaces**: em, en, thin, hair, figure, punctuation and no-break spaces, plus non-breaking hyphens.
+
+**Paragraphs**
+- Left, right, first-line and hanging indents; space before and after; drop caps of one to six letters with Cleves illuminations; first line in small caps.
+- **Rules and shading**: rules above and below (solid, dashed, dotted or double; column or text width; offsets and indents). Shading has padding, corner radius and a border.
+- **Lists**: bullets and numbering (1, a, i, I), nesting, start-at and continue, markers aligned on the point. Type `- `, `• `, `1. ` or `a) ` to start a list item.
+- **Tabs**: left, centre, right and decimal stops with leaders that line up from line to line; default tab interval; right-indent tab (`{rtab}`) for contents pages; indent to here (`{here}`).
+- **Keeps**: keep with next, keep lines together, widows, orphans, start in the next column or frame, and column / frame breaks (`{col}`, `{frame}`).
+- **Baseline grid**: every line, or only the first line of each paragraph.
+- **Footnotes** (`{fn:…}`) are set at the foot of the column that holds the reference, under a separator rule. Numbering can be 1, i, a or * † ‡; a line whose note won't fit moves on with it.
+
+**Styles and local formatting**
+- **Paragraph and character styles**:
+  - A starter set, or your own.
+  - A paragraph style can carry any paragraph property, including rag, keeps, lists and justification.
+  - A frame can follow a style, with overrides flagged so you can clear them or redefine the style; editing a style reflows everything that uses it.
+  - **Nested styles** (run-in heads: the first N words, letters or sentences, or up to a character) and **GREP styles** (a character style on every match of a pattern) apply character styles automatically.
+- **Local formatting**: change anything about any run of text inside a frame with `<{size:14; color:#b0331f; track:40; underline}>…</>`, or about a paragraph with `[{align:center; before:12; rag:swiss}]`. The story editor's formatting popovers write these for you. Character properties include:
+  - typeface, absolute or relative size, weight, italic
+  - tracking and colour
+  - case, superscript and subscript (true `sups`/`subs` when the font has them), baseline shift
+  - underline, strikethrough and highlight
+  - horizontal and vertical scale, skew, outline stroke
+  - no-break, hyphenation language and OpenType features
+
+**Frames**
+- Columns with a column rule, **balanced columns**, heads that **span all columns**.
+- **Vertical justification** (top, middle, bottom, justify).
+- First-baseline options (cap height, ascent, x-height, leading, fixed) and insets per side.
+- **Fit the frame to its text**.
+- **Text wrap** around any item: its box, its shape, or jumping it, on both sides, the larger side, left or right, with an offset.
+- Threads across pages. Running heads with `{chapter}`, `{title}` and `{page:roman}`.
+- **Type on a path**: any path can carry a line of type that follows its curves, positioned along the path, on or below it.
+
+**Tables** (`src/model/table.ts`, `src/render/table.ts`)
+- **Columns and rows**: fixed, proportional (fr) or auto-width columns; auto, at-least and exact row heights; tables that fill the frame width or set their own.
+- **Cells**:
+  - Merged cells, header and footer rows, alternating row and column fills.
+  - Cells set by the same text engine as frames: every markup, style and kerning feature works.
+  - Per-cell alignment (including decimal alignment on any character, shared down the column), vertical alignment, padding, fill, rotation, diagonals.
+  - Figure styles: tabular/proportional × lining/old-style.
+- **Rules**: border, head, foot, row, column and stub rules with weight, colour and dash, per-edge overrides, and clean joins.
+- **Table and cell styles**, with presets: Tschichold book rules, Swiss grid, ledger zebra, full grid, tabular without rules.
+- **Editing**: the table tool, CSV/TSV drop and paste, Tab / ⇧Tab between cells (a new row at the end), cell ranges, copy and paste as tab-separated data, and dragging column and row borders.
+
+**Tools**
+- The **story editor** highlights markup and has:
+  - character and paragraph formatting popovers
+  - an Insert menu for breaks, spaces, tabs, footnotes, tokens and typographic characters
+  - ⇧↵ for a line break, ⇥ for a tab, ⌥←/→ for kerning
+- **Generate contents page** (Document panel): finds chapter titles and `#`/`##` headings, including those inside threaded stories, records the page each one is actually set on, and sets the contents with dot leaders. Run it again to refresh the page numbers.
+- **Find / change** across every story in the book, with GREP, `$1` groups and one-click clean-ups (straight → curly quotes, double spaces, ranges → en dashes, thin spaces before French punctuation).
+- RTL lines, and **vertical Japanese (tategaki)** with kinsoku rules, hanging 、。, vertical punctuation forms and tate-chū-yoko.
+- **Font Studio**: upload OTF / TTF / WOFF / WOFF2, static or variable. It parses the `fvar` axes and named instances (sliders for `wght`, `wdth`, `slnt`, `ital`, `opsz` and custom axes) and lists the GSUB/GPOS features (`kern`, `liga`, `dlig`, `smcp`, `c2sc`, `onum`, `lnum`, `pnum`, `tnum`, `swsh`, `ss01`…), with a glyph grid; click a glyph to insert it into the story being edited.
 
 ### Generators (`src/engine/generators/`)
 Live vector objects with their own controls:
