@@ -119,6 +119,12 @@ export function FindChangeSection() {
     <Section title="Find / change" id="type-find" defaultOpen={false}>
       <TextInput label="Find" mono value={find} onChange={(v) => { setFind(v); setPos(null); setMsg(null); }} />
       <TextInput label="Change to" mono value={change} onChange={setChange} />
+      <TextInput label="Find a glyph (paste it, or U+2014)" mono value="" onChange={(v) => {
+        const m = /^\s*(?:U\+|0x|\\u\{?)?([0-9a-f]{4,6})\}?\s*$/i.exec(v);
+        const ch = m ? String.fromCodePoint(parseInt(m[1], 16)) : [...v.trim()][0];
+        if (!ch) return;
+        setFind(`\\u{${ch.codePointAt(0)!.toString(16).toUpperCase()}}`); setGrep(true); setWhole(false); setPos(null); setMsg(null);
+      }} />
       <div className="grid grid-cols-3 gap-1">
         <Toggle label="GREP" checked={grep} onChange={setGrep} hint="Regular expressions; $1 in the change field inserts a group" />
         <Toggle label="Case" checked={caseSensitive} onChange={setCase} />
@@ -137,6 +143,70 @@ export function FindChangeSection() {
         ))}
       </div>
       <Hint>Searches every story in the book: pages, masters, cover and jacket. Markup is searched as written.</Hint>
+    </Section>
+  );
+}
+
+const KINDS: Element['type'][] = ['text', 'image', 'shape', 'rule', 'path', 'svg', 'table', 'pattern', 'ornament', 'initial', 'overprint', 'gradient', 'cutout', 'drawing', 'gridtype', 'motif'];
+
+/** Find objects anywhere in the book by kind, name, colour or story text, and select them. */
+export function FindObjectsSection() {
+  const project = useStore((s) => s.project);
+  const [kind, setKind] = useState<string>('');
+  const [name, setName] = useState('');
+  const [colour, setColour] = useState('');
+  const [text, setText] = useState('');
+  const results = useMemo(() => {
+    if (!kind && !name && !colour && !text) return [];
+    const out: { el: Element; where: string; pageIndex: number | null }[] = [];
+    const test = (e: Element) => {
+      if (kind && e.type !== kind) return false;
+      if (name && !e.name.toLowerCase().includes(name.toLowerCase())) return false;
+      if (colour) {
+        const c = colour.toLowerCase().replace(/^#?/, '#');
+        if (!JSON.stringify(e).toLowerCase().includes(c)) return false;
+      }
+      if (text && !(e.type === 'text' && e.text.toLowerCase().includes(text.toLowerCase()))) return false;
+      return true;
+    };
+    project.pages.forEach((p, i) => { for (const e of p.elements) if (test(e)) out.push({ el: e, where: `p. ${i + 1}`, pageIndex: i }); });
+    for (const m of project.masters) for (const e of [...m.left, ...m.right]) if (test(e)) out.push({ el: e, where: `master ${m.name}`, pageIndex: null });
+    for (const e of project.cover.elements) if (test(e)) out.push({ el: e, where: 'cover', pageIndex: null });
+    for (const e of project.jacket?.elements ?? []) if (test(e)) out.push({ el: e, where: 'jacket', pageIndex: null });
+    return out;
+  }, [project, kind, name, colour, text]);
+  const go = (r: (typeof results)[number]) => {
+    const s = useStore.getState();
+    if (r.pageIndex != null) s.setSpread(spreadIndexOfPage(s.project, r.pageIndex));
+    s.select([r.el.id]);
+  };
+  return (
+    <Section title={`Find objects${results.length ? ` · ${results.length}` : ''}`} id="doc-find-objects" defaultOpen={false}>
+      <div className="grid grid-cols-2 gap-1.5">
+        <label className="text-[10.5px] text-ink-400">Kind
+          <select className="mt-0.5 block h-7 w-full rounded border border-ink-600 bg-ink-800 px-1 text-[11px] text-ink-100" value={kind} onChange={(e) => setKind(e.target.value)}>
+            <option value="">Any</option>{KINDS.map((k) => <option key={k} value={k}>{k}</option>)}
+          </select>
+        </label>
+        <TextInput label="Name contains" value={name} onChange={setName} />
+        <TextInput label="Uses colour" mono value={colour} onChange={setColour} />
+        <TextInput label="Story contains" value={text} onChange={setText} />
+      </div>
+      {results.length > 0 && (
+        <>
+          <Button className="w-full" onClick={() => { const here = results.filter((r) => r.pageIndex == null || spreadIndexOfPage(project, r.pageIndex) === useStore.getState().spread); useStore.getState().select(here.map((r) => r.el.id)); }}>Select the matches on this spread</Button>
+          <div className="max-h-48 space-y-0.5 overflow-auto">
+            {results.slice(0, 200).map((r) => (
+              <button key={r.el.id} type="button" className="flex w-full items-center gap-1.5 rounded px-1 py-0.5 text-left text-[11px] text-ink-300 hover:bg-ink-750 hover:text-ink-100" onClick={() => go(r)}>
+                <span className="w-14 shrink-0 text-[10px] text-ink-500">{r.el.type}</span>
+                <span className="min-w-0 flex-1 truncate">{r.el.name || '(unnamed)'}</span>
+                <span className="shrink-0 text-[10px] text-ink-500">{r.where}</span>
+              </button>
+            ))}
+          </div>
+        </>
+      )}
+      <Hint>Searches pages, masters, cover and jacket; click a result to go to it.</Hint>
     </Section>
   );
 }

@@ -2,13 +2,16 @@ import React, { useState } from 'react';
 import type { Draft } from 'immer';
 import { Plus, Trash } from 'lucide-react';
 import { useStore } from '../../store/store';
-import type { BookSpec, Unit, Swatch, GridMode } from '../../model/types';
+import type { BookSpec, Unit, Swatch, GridMode, Element } from '../../model/types';
 import { mm, fromPt } from '../../model/units';
 import { Section, Row, NumberField, Select, Toggle, TextInput, Segmented, Button, Hint, ColorField } from '../controls';
 import { CANONS, canonMargins, lockGridToBaseline, type CanonKind } from '../../engine/grid';
 import { cmykToHex, rgbToCmyk } from '../../lib/color';
 import { PanelGridEditor, JacketSettings, GuidesSection } from './SurfaceSettings';
 import { generateContents, generateIndex, conditionNames } from '../contents';
+import { checkSpelling, type Misspelling } from '../../engine/spelling';
+import { FindObjectsSection } from './FindChange';
+import { spreadsOf } from '../../model/surfaces';
 import { uid } from '../../lib/random';
 
 export const TRIM_PRESETS: { id: string; label: string; w: number; h: number; group: string }[] = [
@@ -87,6 +90,10 @@ export function DocumentPanel() {
       </Section>
 
       <ConditionsSection />
+
+      <SpellingSection />
+
+      <FindObjectsSection />
 
       <Section title="Format" id="doc-format">
         <Row>
@@ -242,5 +249,95 @@ function ConditionsSection() {
       )) : null}
       <Hint>Wrap text in {'{if:Print}'}…{'{/if}'} (any name; nests, may span paragraphs) to make editions from one story: hide a condition and its text drops out everywhere, re-flowing the book.</Hint>
     </Section>
+  );
+}
+
+/** Check spelling across every story; change, learn or find each unknown word. */
+function SpellingSection() {
+  const [busy, setBusy] = useState(false);
+  const [res, setRes] = useState<{ results: Misspelling[]; skipped: number; words: number } | null>(null);
+  const run = async () => {
+    setBusy(true);
+    try { setRes(await checkSpelling(useStore.getState().project)); } finally { setBusy(false); }
+  };
+  const learn = (w: string) => { useStore.getState().update((d) => { d.spellingDictionary = [...new Set([...(d.spellingDictionary ?? []), w])]; }); setRes((r) => r && { ...r, results: r.results.filter((x) => x.word !== w) }); };
+  const ignore = (w: string) => setRes((r) => r && { ...r, results: r.results.filter((x) => x.word !== w) });
+  const change = (m: Misspelling, to: string) => {
+    // Replace from the last occurrence back, so earlier indices stay valid.
+    const byEl = new Map<string, number[]>();
+    for (const w of m.where) byEl.set(w.elementId, [...(byEl.get(w.elementId) ?? []), w.index]);
+    const s = useStore.getState();
+    s.update((d) => {
+      const visit = (els: Element[]) => {
+        for (const e of els) {
+          const idx = e.type === 'text' ? byEl.get(e.id) : undefined;
+          if (!idx || e.type !== 'text') continue;
+          let t = e.text;
+          for (const i of [...idx].sort((a, b) => b - a)) if (t.slice(i, i + m.word.length) === m.word) t = t.slice(0, i) + to + t.slice(i + m.word.length);
+          e.text = t;
+        }
+      };
+      for (const p of d.pages) visit(p.elements as Element[]);
+      for (const ms of d.masters) { visit(ms.left as Element[]); visit(ms.right as Element[]); }
+      visit(d.cover.elements as Element[]);
+      visit((d.jacket?.elements ?? []) as Element[]);
+    });
+    setRes((r) => r && { ...r, results: r.results.filter((x) => x !== m) });
+  };
+  const find = (m: Misspelling) => {
+    const w = m.where[0];
+    const s = useStore.getState();
+    const pi = s.project.pages.findIndex((p) => p.elements.some((e) => e.id === w.elementId));
+    if (pi >= 0) { const sp = spreadsOf(s.project).findIndex((x) => x.left === pi || x.right === pi); if (sp >= 0) s.setSpread(sp); }
+    s.select([w.elementId]);
+    s.setTextEditing(w.elementId);
+    setTimeout(() => window.dispatchEvent(new CustomEvent('bds:select', { detail: { start: w.index, end: w.index + m.word.length } })), 120);
+  };
+  return (
+    <Section title={`Spelling${res ? ` · ${res.results.length}` : ''}`} id="doc-spelling" defaultOpen={false}>
+      <Button className="w-full" disabled={busy} onClick={() => void run()}>{busy ? 'Checking…' : res ? 'Check again' : 'Check spelling in every story'}</Button>
+      {res && (
+        <Hint>{res.words.toLocaleString()} words checked{res.skipped ? `; ${res.skipped} stor${res.skipped === 1 ? 'y' : 'ies'} in languages without a dictionary skipped` : ''}. {res.results.length ? 'Unknown words, most frequent first:' : 'No unknown words.'}</Hint>
+      )}
+      {res?.results.slice(0, 120).map((m) => (
+        <div key={m.word} className="rounded border border-ink-700 p-1.5 text-[11px]">
+          <div className="flex items-center gap-1.5">
+            <button type="button" className="font-medium text-[#f08a73] underline decoration-dotted" title="Show it in the story" onClick={() => find(m)}>{m.word}</button>
+            <span className="text-ink-500">×{m.count}</span>
+            <span className="flex-1" />
+            <button type="button" className="text-[10px] text-ink-400 hover:text-ink-100" onClick={() => learn(m.word)} title="Add to the book's dictionary">Learn</button>
+            <button type="button" className="text-[10px] text-ink-400 hover:text-ink-100" onClick={() => ignore(m.word)}>Ignore</button>
+          </div>
+          {m.suggestions.length > 0 && (
+            <div className="mt-1 flex flex-wrap gap-1">
+              {m.suggestions.map((sg) => (
+                <button key={sg} type="button" title={`Change every “${m.word}” to “${sg}”`} className="rounded border border-ink-600 px-1 text-[10px] text-ink-200 hover:border-ink-400" onClick={() => change(m, sg)}>{sg}</button>
+              ))}
+            </div>
+          )}
+        </div>
+      ))}
+      <Hint>English (US and UK) dictionaries from SCOWL; a story's language is its Type › Language. The story editor also underlines unknown words as you type.</Hint>
+      <AutocorrectList />
+    </Section>
+  );
+}
+
+/** The autocorrect list (used by the story editor when Smart typing is on). */
+function AutocorrectList() {
+  const list = useStore((st) => st.project.autocorrect) ?? [];
+  const [draft, setDraft] = useState<string | null>(null);
+  const text = draft ?? list.map((a) => `${a.from} → ${a.to}`).join('\n');
+  return (
+    <div className="space-y-1">
+      <TextInput label="Autocorrect (one per line: teh → the)" multiline rows={4} mono value={text} onChange={setDraft} />
+      {draft != null && (
+        <Button className="w-full" onClick={() => {
+          const pairs = draft.split('\n').map((l) => l.split(/\s*(?:→|->|=>|\t)\s*/)).filter((p) => p.length === 2 && p[0].trim() && p[1].trim()).map(([from, to]) => ({ from: from.trim(), to: to.trim() }));
+          useStore.getState().update((d) => { d.autocorrect = pairs; });
+          setDraft(null);
+        }}>Save autocorrect list</Button>
+      )}
+    </div>
   );
 }

@@ -87,7 +87,7 @@ export function indexEntries(project: Project): Map<string, { pages: Set<number>
       if (e.type !== 'text' || e.name === INDEX_NAME) continue;
       const marks = layoutText(e, { project, surface: pageKey(p.id), pageIndex: i, side: pageSide(project, i) }).marks ?? [];
       for (const m of marks) {
-        if (m.startsWith('\u0001') || m.startsWith('\u0002')) continue;
+        if (/^[\u0001-\u0003]/.test(m)) continue;
         const [main, sub] = m.split('!').map((x) => x.trim());
         if (!main) continue;
         const key = main;

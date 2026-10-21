@@ -1,6 +1,7 @@
 import React, { useDeferredValue, useMemo, useRef, useState } from 'react';
 import clsx from 'clsx';
-import { Plus, Trash, Copy, MoreHorizontal, Eye, EyeOff, Lock, LockOpen, ChevronUp, ChevronDown, FileText, Upload, Image as ImageIcon } from 'lucide-react';
+import { Plus, Trash, Copy, MoreHorizontal, Eye, EyeOff, Lock, LockOpen, ChevronUp, ChevronDown, FileText, Upload, Image as ImageIcon, BookPlus } from 'lucide-react';
+import { insertProjectFile } from '../projectIO';
 import { useStore, type LeftTab } from '../../store/store';
 import { spreadsOf, pageKey, masterKey, surfaceElements } from '../../model/surfaces';
 import { compilePage, placedElement } from '../../render/compile';
@@ -98,6 +99,7 @@ function PagesPanel() {
   const spreads = spreadsOf(project);
   const [menu, setMenu] = useState<number | null>(null);
   const [flowOpen, setFlowOpen] = useState(false);
+  const chapterRef = useRef<HTMLInputElement>(null);
   const thumbW = 84;
   const s = useStore.getState;
 
@@ -131,6 +133,19 @@ function PagesPanel() {
         <span className="text-[10.5px] font-semibold uppercase tracking-[0.08em] text-ink-400">Spreads · {project.pages.length} pp</span>
         <div className="flex gap-0.5">
           <button type="button" title="Flow a long text into new pages" className="rounded p-1 text-ink-400 hover:bg-ink-700 hover:text-ink-100" onClick={() => setFlowOpen(!flowOpen)}><FileText size={13} /></button>
+          <button type="button" title="Insert a chapter from another project file (.bds.json) after the current spread — its pages, masters, styles and pictures come along" className="rounded p-1 text-ink-400 hover:bg-ink-700 hover:text-ink-100" onClick={() => chapterRef.current?.click()}><BookPlus size={13} /></button>
+          <input ref={chapterRef} type="file" accept=".json,.bds.json,application/json" className="hidden" onChange={async (e) => {
+            const f = e.target.files?.[0];
+            e.target.value = '';
+            if (!f) return;
+            const st = useStore.getState();
+            const sp = spreadsOf(st.project)[st.spread];
+            const after = Math.max(sp?.left ?? -1, sp?.right ?? -1, -1);
+            try {
+              const r = await insertProjectFile(f, after < 0 ? st.project.pages.length - 1 : after);
+              st.notify(`${f.name}: ${r.pages} page${r.pages === 1 ? '' : 's'} inserted${r.masters ? `, ${r.masters} master${r.masters === 1 ? '' : 's'}` : ''}${r.styles ? `, ${r.styles} new style${r.styles === 1 ? '' : 's'}` : ''}. Styles with the book's names use the book's definitions.`);
+            } catch (err) { st.notify(`${f.name}: ${(err as Error).message}`, 'error'); }
+          }} />
           <button type="button" title="Add spread at the end" className="rounded p-1 text-ink-400 hover:bg-ink-700 hover:text-ink-100" onClick={() => { insertPages(project.pages.length - 1, 2, project.masters[0]?.id ?? null); }}><Plus size={13} /></button>
         </div>
       </div>

@@ -132,7 +132,10 @@ One shaping engine (fontkit) measures with the same font files the browser rende
 
 **Long documents**
 - **Sections**: a section can start on any page, with its own start number, numbering style (1, i, I, a, A), prefix and `{section}` marker. Folios, contents, index, cross-references and the PDF's page labels follow it.
-- **Running heads by style**: `{running:Chapter Title}` prints the first (or `:last`) paragraph in that style on the page, carried over pages that have none.
+- **Running heads by style**: `{running:Chapter Title}` prints the first (or `:last`) paragraph in that paragraph style, or the text in that character style, on the page, carried over pages that have none. `{created}` and `{modified}` print the document's dates.
+- **Numbered lists across stories**: `[{number; continue}]` (or a style's list option) picks up from the story before.
+- **Line styles**: character styles for a paragraph's first lines in turn (small caps on line one, a colour for the next two).
+- **Anchored objects**: `{img:…; anchor:outside}` sets a picture in the margin beside its line, and it travels with the text. Text can also wrap around a picture's **contour** (its transparency).
 - **Jump lines**: in a frame touching a threaded frame, `{nextpage}` and `{prevpage}` give the pages where the story continues and came from.
 - **PDF bookmarks and links**: interior PDFs get a nested outline of chapter titles and headings. `<{link:https://…}>…</>` makes a web link, and cross-references are clickable jumps to their page.
 - **Cross-references**: name a place with `{anchor:fig-3}`, then `{xref:fig-3}` prints the page it lands on and `{xreftext:fig-3}` the text of its paragraph. They update as the book reflows; the story editor lists the book's anchors to insert.
@@ -156,6 +159,12 @@ One shaping engine (fontkit) measures with the same font files the browser rende
   - A PDF's *text* can be set as a story with Pages › Flow text › Load, or with the Image panel's button. Paragraphs are rebuilt from the layout, running heads and folios are dropped, hyphenated line ends are rejoined, and italic and bold are kept.
   - PDFs are read with Mozilla's pdf.js, loaded only when a PDF is opened.
 - **Where to load them**: drop the file on a page, use File › Import, or use Pages › Flow text › Load. A long manuscript flows into as many new pages as it needs. *Moby-Dick* (1.2 million characters) flows into about 800 pages in a second, and an edit re-sets the whole novel in about a tenth of a second.
+
+**Editorial**
+- **Track changes** in the story editor: insertions and deletions are recorded as `{++…++}` / `{--…--}`, shown in colour, and accepted or rejected one at a time or all together. The page always sets the accepted text.
+- **Spelling**: every story is checked against Hunspell dictionaries (SCOWL English, US and UK), with suggestions, Change all, Learn and Find. **Smart typing** curls quotes and makes dashes and ellipses as you type, and an **autocorrect list** fixes your usual slips.
+- **Find objects** by kind, name, colour or story text, and **find glyphs** by code point.
+- **Book assembly**: Pages › Insert a chapter from a project file. Its pages, masters, styles and pictures are merged in; styles the book already has keep the book's definitions.
 
 **Tools**
 - **Hidden characters** (Document panel or ⌥⌘I): word spaces as dots, no-break spaces as rings, ¶ at paragraph ends, ¬ at forced line breaks, # at the end of the story.

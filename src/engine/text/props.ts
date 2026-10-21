@@ -165,6 +165,7 @@ export function parseParaProps(src: string): ParagraphStyleProps {
     if (k0 === 'number' || k0 === 'numbered' || k0 === 'list') { out.list = { ...(out.list as object ?? {}), type: 'number', format: typeof v === 'string' && v !== 'number' ? v : 'decimal' }; continue; }
     if (k0 === 'level') { out.list = { type: 'number', ...(out.list as object ?? {}), level: Number(v) || 0 }; continue; }
     if (k0 === 'multi' || k0 === 'hierarchical') { out.list = { type: 'number', ...(out.list as object ?? {}), hierarchical: v !== false }; continue; }
+    if (k0 === 'continue') { out.list = { type: 'number', ...(out.list as object ?? {}), continueAcross: v !== false }; continue; }
     const k = PARA_KEYS[k0];
     if (!k) continue;
     if (k === 'align' || k === 'lastLineAlign' || k === 'singleWordJustify') out[k] = ALIGNS[String(v).toLowerCase()] === 'justify-all' && k !== 'align' ? 'justify' : ALIGNS[String(v).toLowerCase()] ?? v;

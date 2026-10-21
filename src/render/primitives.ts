@@ -85,7 +85,7 @@ export interface TextRun {
   rotate?: number;
   pivot?: [number, number];
   /** Layout-only: an inline image set in the line (turned into an image primitive by the frame). */
-  obj?: { href: string; w: number; h: number; assetId?: string; pct?: number };
+  obj?: { href: string; w: number; h: number; assetId?: string; pct?: number; anchor?: 'left' | 'right' | 'outside' | 'inside'; dx?: number; dy?: number };
   /** Horizontal scale about (x, y): tate-chū-yoko, glyph-scaling justification, character scale. */
   scaleX?: number;
   /** Vertical scale about the baseline, and false-italic skew in degrees. */

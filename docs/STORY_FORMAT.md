@@ -41,7 +41,7 @@ a) A lettered item
 - `---` on its own line is a section break (⁂).
 - A paragraph style goes in square brackets at the start of the line: `[Epigraph] Call me Ishmael.`
 - Local paragraph settings go in braces inside the brackets: `[{align:center; before:12; rag:swiss}] Text`.
-  - Other keys: `size` `leading` `indent` `left` `right` `after` `track` `hyphenate` `keep` `keepprev` `together` `widows` `orphans` `start` `split` `span` `grid` `optical` `composer` `last`.
+  - Other keys: `size` `leading` `indent` `left` `right` `after` `track` `hyphenate` `keep` `keepprev` `together` `widows` `orphans` `start` `split` `span` `grid` `optical` `composer` `last`, and for lists `number` `bullet` `level` `multi` `continue`.
 
 ## Breaks
 
@@ -74,9 +74,10 @@ Inside a paragraph:
 | `{ruby:東京\|とうきょう}` | ruby above a base |
 | `{wari:top\|bottom}` | warichu: two half-size lines inside the line |
 | `{note:…}` | an editorial note, kept in the story, never printed |
-| `{img:asset-id}` · `{img:asset-id; w:100%}` | inline graphic · column-wide figure |
-| `{page}` `{page:roman}` `{lastpage}` `{section}` `{filename}` `{chapter}` `{title}` `{author}` `{date}` | tokens (`{page}` follows the page's section numbering) |
-| `{running:Style}` · `{running:Style:last}` | the first / last paragraph in that style on the page (running heads) |
+| `{++inserted++}` · `{--deleted--}` | tracked changes (the page sets the accepted text) |
+| `{img:asset-id}` · `{img:asset-id; w:100%}` · `{img:asset-id; w:30; anchor:outside; dx:0; dy:0}` | inline graphic · column-wide figure · anchored beside its line (left, right, outside, inside) |
+| `{page}` `{page:roman}` `{lastpage}` `{section}` `{filename}` `{created}` `{modified}` `{chapter}` `{title}` `{author}` `{date}` | tokens (`{page}` follows the page's section numbering) |
+| `{running:Style}` · `{running:Style:last}` | the first / last paragraph (or character-styled text) in that style on the page (running heads) |
 | `{nextpage}` · `{prevpage}` | in a frame touching a threaded frame: where its story continues / came from |
 | `{shy}` `{nbhy}` | discretionary · non-breaking hyphen |
 | `{nbsp}` `{nnbsp}` `{em}` `{en}` `{thin}` `{hair}` `{figure}` `{punct}` | special spaces |

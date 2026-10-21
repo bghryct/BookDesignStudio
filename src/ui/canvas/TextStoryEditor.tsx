@@ -8,6 +8,36 @@ import type { TextElement, CharacterStyleProps } from '../../model/types';
 import { charPropsToString } from '../../engine/text/props';
 import { getFamilies } from '../../engine/fonts';
 import { anchorNames, conditionNames } from '../contents';
+import { trackEdit, listChanges, changeAt, resolveChange, acceptChanges, rejectChanges } from '../../engine/text/changes';
+
+/**
+ * Smart typing: straight quotes curl by context, -- becomes an em dash and ... an ellipsis. Never
+ * inside markup ({…}, […], <…>) on the current line.
+ */
+function smartType(value: string, caret: number, before: string, autocorrect: { from: string; to: string }[] = []): { value: string; caret: number } {
+  if (value.length !== before.length + 1 || caret < 1) return { value, caret };
+  // Autocorrect: the word just finished (by a space or punctuation) is replaced from the list.
+  if (autocorrect.length && /[\s.,;:!?)\]”’]/.test(value[caret - 1])) {
+    const m = /([\p{L}\p{N}'’-]+)$/u.exec(value.slice(0, caret - 1));
+    const hit = m && autocorrect.find((a) => a.from === m[1] || (a.from.toLowerCase() === m[1].toLowerCase() && m[1] === m[1].toLowerCase()));
+    if (m && hit) {
+      const start = caret - 1 - m[1].length;
+      return { value: value.slice(0, start) + hit.to + value.slice(caret - 1), caret: start + hit.to.length + 1 };
+    }
+  }
+  const lineStart = value.lastIndexOf('\n', caret - 1) + 1;
+  const line = value.slice(lineStart, caret);
+  const open = (o: string, c: string) => line.lastIndexOf(o) > line.lastIndexOf(c);
+  if (open('{', '}') || open('[', ']') || open('<', '>')) return { value, caret };
+  const ch = value[caret - 1], prev = value[caret - 2] ?? '';
+  const put = (rep: string, back: number) => ({ value: value.slice(0, caret - back) + rep + value.slice(caret), caret: caret - back + rep.length });
+  const opening = !prev || /[\s([{—–\-“‘\/]/.test(prev);
+  if (ch === '"') return put(opening ? '“' : '”', 1);
+  if (ch === "'") return put(opening ? '‘' : '’', 1);
+  if (ch === '-' && prev === '-') return put('—', 2);
+  if (ch === '.' && value.slice(caret - 3, caret) === '...') return put('…', 3);
+  return { value, caret };
+}
 
 /* -------------------------------------------------------------------------- */
 /* Markup highlighting                                                         */
@@ -27,7 +57,7 @@ function highlight(text: string): string {
     if (list) { out += span('hl-list', list[1]); rest = rest.slice(list[1].length); }
     else if (/^#{1,2}\s/.test(rest)) { out += span('hl-head', rest); rest = ''; }
     else if (/^(-{3,}|\*\s\*\s\*|⁂|\{(col|column|frame)\})\s*$/.test(rest)) { out += span('hl-code', rest); rest = ''; }
-    const re = /(\{fn:(?:[^{}]|\{[^{}]*\})*\})|(\{k:[^}]*\})|(\{[a-z]+(?::[^}]*)?\})|(<\/?\{[^}]*\}>|<\/?[^<>\n]{0,40}>)|(\\.)|(\*\*|\*|\^)|(\t)/g;
+    const re = /(\{fn:(?:[^{}]|\{[^{}]*\})*\})|(\{k:[^}]*\})|(\{[a-z]+(?::[^}]*)?\})|(<\/?\{[^}]*\}>|<\/?[^<>\n]{0,40}>)|(\\.)|(\*\*|\*|\^)|(\t)|(\{\+\+[\s\S]*?\+\+\})|(\{--[\s\S]*?--\})/g;
     let last = 0;
     let m: RegExpExecArray | null;
     while ((m = re.exec(rest))) {
@@ -39,6 +69,8 @@ function highlight(text: string): string {
       else if (m[5]) out += span('hl-mute', m[5]);
       else if (m[6]) out += span('hl-mark', m[6]);
       else if (m[7]) out += span('hl-tab', '\t');
+      else if (m[8]) out += span('hl-ins', m[8]);
+      else if (m[9]) out += span('hl-del', m[9]);
       last = m.index + m[0].length;
     }
     out += esc(rest.slice(last));
@@ -120,7 +152,22 @@ export function TextStoryEditor({ elementId, anchor, viewport }: { elementId: st
   useEffect(() => {
     const on = (e: Event) => insertRef.current((e as CustomEvent<string>).detail);
     window.addEventListener('bds:insert', on);
-    return () => window.removeEventListener('bds:insert', on);
+    // Find / spelling: select a range of the story.
+    const sel = (e: Event) => {
+      const { start, end } = (e as CustomEvent<{ start: number; end: number }>).detail;
+      requestAnimationFrame(() => {
+        const ta = ref.current;
+        if (!ta) return;
+        ta.focus();
+        ta.setSelectionRange(start, end);
+        // Bring the selection into view: put the caret's line near the top.
+        const line = ta.value.slice(0, start).split('\n').length - 1;
+        const lh = parseFloat(getComputedStyle(ta).lineHeight) || 16;
+        ta.scrollTop = Math.max(0, line * lh - ta.clientHeight / 3);
+      });
+    };
+    window.addEventListener('bds:select', sel);
+    return () => { window.removeEventListener('bds:insert', on); window.removeEventListener('bds:select', sel); };
   }, []);
 
   if (!head || head.type !== 'text') return null;
@@ -238,7 +285,7 @@ export function TextStoryEditor({ elementId, anchor, viewport }: { elementId: st
       onDoubleClick={(e) => e.stopPropagation()}
       onWheel={(e) => e.stopPropagation()}
     >
-      <style>{`.hl-para{color:#e0b062}.hl-list{color:#9aa0b0}.hl-head{color:#f0e6d0;font-weight:600}.hl-tag{color:#5ec4b6}.hl-code{color:#7fa8ff}.hl-kern{color:#c39bff}.hl-fn{color:#9ed07f}.hl-mark{color:#e5483a}.hl-mute{color:#777}.hl-tab{background:rgba(127,168,255,.15);border-radius:2px}`}</style>
+      <style>{`.hl-para{color:#e0b062}.hl-list{color:#9aa0b0}.hl-head{color:#f0e6d0;font-weight:600}.hl-tag{color:#5ec4b6}.hl-code{color:#7fa8ff}.hl-kern{color:#c39bff}.hl-fn{color:#9ed07f}.hl-mark{color:#e5483a}.hl-mute{color:#777}.hl-tab{background:rgba(127,168,255,.15);border-radius:2px}.hl-ins{color:#7fd88f;background:rgba(127,216,143,.12);text-decoration:underline}.hl-del{color:#f08a73;text-decoration:line-through;background:rgba(240,138,115,.1)}`}</style>
       <div className="flex items-center gap-0.5 border-b border-ink-700 px-1.5 py-1">
         <span className="mr-1 text-[10.5px] font-semibold uppercase tracking-[0.08em] text-ink-400">Story{chain.length > 1 ? ` · ${chain.length} frames` : ''}</span>
         <button type="button" title="Italic (*text*, ⌘I)" className={tb} onClick={() => wrap('*')}><Italic size={13} /></button>
@@ -271,6 +318,7 @@ export function TextStoryEditor({ elementId, anchor, viewport }: { elementId: st
         <span className="flex-1" />
         <button type="button" title="Close (Esc)" className={tb} onClick={() => useStore.getState().setTextEditing(null)}><X size={13} /></button>
       </div>
+      <ChangesBar text={head.text} caret={caret} tracking={!!project.trackChanges} smart={!!project.smartTyping} onText={(t, c) => { setText(t); if (c != null) requestAnimationFrame(() => { ref.current?.focus(); ref.current?.setSelectionRange(c, c); }); }} />
       {pop === 'char' && <CharFormat onApply={(props) => { if (props) wrap(`<{${props}}>`, '</>'); setPop(null); }} />}
       {pop === 'para' && <ParaFormat onApply={(props) => { paraLocal(props); setPop(null); }} />}
       {pop === 'insert' && (
@@ -313,7 +361,15 @@ export function TextStoryEditor({ elementId, anchor, viewport }: { elementId: st
           lang={head.style.language}
           dir={head.style.direction}
           onScroll={(e) => { if (hlRef.current) hlRef.current.scrollTop = (e.target as HTMLTextAreaElement).scrollTop; }}
-          onChange={(e) => { setText(e.target.value); setCaret(e.target.selectionStart); }}
+          onChange={(e) => {
+            const ta = e.target;
+            let value = ta.value, pos = ta.selectionStart;
+            if (project.smartTyping) ({ value, caret: pos } = smartType(value, pos, head.text, project.autocorrect));
+            if (project.trackChanges) ({ text: value, caret: pos } = trackEdit(head.text, value, pos));
+            setText(value);
+            setCaret(pos);
+            if (value !== ta.value || pos !== ta.selectionStart) requestAnimationFrame(() => ta.setSelectionRange(pos, pos));
+          }}
           onSelect={(e) => setCaret((e.target as HTMLTextAreaElement).selectionStart)}
           onKeyDown={(e) => {
             e.stopPropagation();
@@ -465,6 +521,30 @@ function ParaFormat({ onApply }: { onApply: (props: string | null) => void }) {
         <button type="button" className="rounded border border-ink-600 px-2 py-1 text-[11px] text-ink-300" onClick={() => onApply(null)} title="Remove local paragraph formatting">Clear</button>
         <button type="button" disabled={!preview} className="rounded bg-rubric px-2 py-1 text-[11px] text-white disabled:opacity-40" onClick={() => onApply(preview || null)}>Apply</button>
       </div>
+    </div>
+  );
+}
+
+/** Track changes and smart typing: the toggles, the change count, accept / reject. */
+function ChangesBar({ text, caret, tracking, smart, onText }: { text: string; caret: number; tracking: boolean; smart: boolean; onText: (t: string, caret?: number) => void }) {
+  const changes = useMemo(() => listChanges(text), [text]);
+  const here = changeAt(text, caret);
+  const toggle = (k: 'trackChanges' | 'smartTyping', v: boolean) => useStore.getState().update((d) => { d[k] = v; }, { history: false });
+  const btn = 'rounded border border-ink-700 px-1.5 py-0.5 text-[10px] text-ink-300 hover:border-ink-500 hover:text-ink-100 disabled:opacity-35';
+  return (
+    <div className="flex flex-wrap items-center gap-1 border-b border-ink-700 px-1.5 py-1 text-[10px] text-ink-400">
+      <label className="flex items-center gap-1" title="Record insertions and deletions as tracked changes; the page sets the text with every change accepted"><input type="checkbox" checked={tracking} onChange={(e) => toggle('trackChanges', e.target.checked)} />Track changes</label>
+      <label className="ml-1.5 flex items-center gap-1" title="Curly quotes, -- to an em dash, ... to an ellipsis as you type"><input type="checkbox" checked={smart} onChange={(e) => toggle('smartTyping', e.target.checked)} />Smart typing</label>
+      {changes.length > 0 && (
+        <>
+          <span className="ml-auto tabular-nums">{changes.length} change{changes.length === 1 ? '' : 's'}</span>
+          <button type="button" className={btn} disabled={!here} title="Accept the change at the cursor" onClick={() => here && onText(resolveChange(text, here, true), here.start)}>Accept</button>
+          <button type="button" className={btn} disabled={!here} title="Reject the change at the cursor" onClick={() => here && onText(resolveChange(text, here, false), here.start)}>Reject</button>
+          <button type="button" className={btn} title="Go to the next change" onClick={() => { const n = changes.find((c) => c.start > caret) ?? changes[0]; if (n) onText(text, n.start + 3); }}>Next</button>
+          <button type="button" className={btn} onClick={() => onText(acceptChanges(text))}>Accept all</button>
+          <button type="button" className={btn} onClick={() => onText(rejectChanges(text))}>Reject all</button>
+        </>
+      )}
     </div>
   );
 }

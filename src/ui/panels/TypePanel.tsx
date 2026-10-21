@@ -201,6 +201,8 @@ function TypeControls({ el }: { el: TextElement }) {
             </Row>
             <Select label="Initial typeface" value={st.dropCap.fontFamily ?? ''} options={[{ value: '', label: 'Same as text' }, ...getFamilies().filter((f) => !f.system).map((f) => ({ value: f.id, label: f.name }))]} onChange={(v) => set((d) => { d.dropCap.fontFamily = v || null; })} />
             <NumberField label="Initial weight" value={st.dropCap.weight} min={100} max={900} step={50} decimals={0} onChange={(v) => set((d) => { d.dropCap.weight = v; })} />
+            <Select label="Character style" value={st.dropCap.charStyle ?? ''} options={[{ value: '', label: 'None' }, ...(useStore.getState().project.characterStyles ?? []).map((c) => ({ value: c.name, label: c.name }))]} onChange={(v) => set((d) => { d.dropCap.charStyle = v || null; })} hint="Its typeface, weight, italic, colour and figures apply to the initial" />
+            <Toggle label="Scale for descenders" checked={!!st.dropCap.scaleDescenders} onChange={(v) => set((d) => { d.dropCap.scaleDescenders = v; })} hint="An initial with a descender (J, Q, g…) shrinks so the descender fits the drop too" />
             <Select<DropCapFrame> label="Illumination (Cleves)" value={st.dropCap.frame} options={[{ value: 'none', label: 'None — rubricated letter' }, { value: 'gilded', label: 'Burnished gold square' }, { value: 'vine', label: 'Vine tracery on colour' }, { value: 'rubric', label: 'Penwork flourishes' }, { value: 'box', label: 'Coloured box' }, { value: 'outline', label: 'Double rule' }]} onChange={(v) => set((d) => { d.dropCap.frame = v; })} />
             <Row>
               <ColorField label="Letter" value={st.dropCap.color} onChange={(v) => v && set((d) => { d.dropCap.color = v; })} />

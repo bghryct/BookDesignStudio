@@ -26,6 +26,7 @@ import {
 } from './text/compose';
 
 export { applyParagraphStyle } from './text/props';
+import { mergeCs } from './text/props';
 export type { StoryStyles } from './text/story';
 
 /* -------------------------------------------------------------------------- */
@@ -48,8 +49,10 @@ export interface TokenContext {
   section?: string;
   /** Running heads by paragraph style (lower-case name): first and last such paragraph on the page. */
   running?: Record<string, { first: string; last: string }>;
-  /** The project's name ({filename}). */
+  /** The project's name ({filename}), and when it was created and last changed ({created}, {modified}). */
   filename?: string;
+  created?: number;
+  modified?: number;
   /** Jump lines: where the threaded story this frame touches continues, and where it came from. */
   nextPage?: string;
   prevPage?: string;
@@ -61,6 +64,10 @@ export interface WrapShape {
   shape: 'rect' | 'ellipse';
   side: 'both' | 'largest' | 'left' | 'right';
   jump?: boolean;
+  /** Contour wrap: the outline's extent per row (frame x), rows of `rowH` from `rowY0`. */
+  rows?: ([number, number] | null)[];
+  rowY0?: number;
+  rowH?: number;
 }
 
 export interface FrameSpec {
@@ -188,8 +195,11 @@ export function expandTokens(text: string, t: TokenContext): string {
     const r = t.running?.[name.trim().toLowerCase()];
     return r ? (which === 'last' ? r.last : r.first) : '';
   });
-  return text.replace(/\{(page|pages|title|subtitle|author|publisher|year|chapter|date|lastpage|section|nextpage|prevpage|filename)(?::(roman|ROMAN))?\}/g, (_, k: string, fmt?: string) => {
+  return text.replace(/\{(page|pages|title|subtitle|author|publisher|year|chapter|date|lastpage|section|nextpage|prevpage|filename|created|modified)(?::(roman|ROMAN))?\}/g, (_, k: string, fmt?: string) => {
+    const day = (ms?: number) => (ms ? new Date(ms).toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' }) : '');
     switch (k) {
+      case 'created': return day(t.created ?? t.modified);
+      case 'modified': return day(t.modified);
       case 'filename': return t.filename ?? '';
       case 'nextpage': return t.nextPage ?? '';
       case 'prevpage': return t.prevPage ?? '';
@@ -218,6 +228,10 @@ interface PreparedPara { para: Paragraph; ps: ParaStyle; items: Item[]; ragged: 
 interface Prepared { key: string; paras: PreparedPara[]; dropCap: DropCapInfo | null; styles: StoryStyles | null }
 
 interface DropCapInfo {
+  /** Colour from the initial's character style (else the drop cap colour). */
+  color?: string;
+  /** How far the initial is raised so its descender sits on the last line's baseline. */
+  raise?: number;
   text: string;
   font: ReturnType<typeof resolveFont>;
   size: number;
@@ -261,7 +275,7 @@ function cachedBreaks(items: Item[], widthAt: (ln: number) => number, style: Tex
 
 function prepare(text: string, style: TextStyle, firstWidth: number, styles: StoryStyles | null): Prepared {
   // Images are keyed by id and size only: their data URLs are far too large to stringify.
-  const sk = styles ? JSON.stringify({ p: styles.para, c: styles.char, h: styles.hyphenation, x: styles.hiddenConditions }) + Object.entries(styles.images ?? {}).map(([k, v]) => `${k}:${v.w}x${v.h}`).join(',') : '';
+  const sk = styles ? JSON.stringify({ p: styles.para, c: styles.char, h: styles.hyphenation, x: styles.hiddenConditions, l: styles.listStart }) + Object.entries(styles.images ?? {}).map(([k, v]) => `${k}:${v.w}x${v.h}`).join(',') : '';
   const key = `${useFontStore.getState().version}|${JSON.stringify(style)}|${Math.round(firstWidth)}|${sk}|${text}`;
   const hit = storyCache.get(key);
   if (hit) return hit;
@@ -294,14 +308,22 @@ function prepare(text: string, style: TextStyle, firstWidth: number, styles: Sto
       paras[0] = { ...paras[0], words: restText ? [{ ...w0, pieces, text: restText, shy: shy?.length ? shy : undefined }, ...paras[0].words.slice(1)] : paras[0].words.slice(1) };
       const bodyFont = resolveFont({ family: style.fontFamily, weight: style.weight, italic: style.italic, axes: style.axes, features: style.features, size: style.fontSize });
       const capBody = fontMetrics(bodyFont).capHeight * style.fontSize;
-      const dcFont0 = resolveFont({ family: dc.fontFamily ?? style.fontFamily, weight: dc.weight, italic: false, axes: {}, features: { lnum: true }, size: 72 });
-      const capRatio = fontMetrics(dcFont0).capHeight || 0.68;
+      // A character style for the initial overrides the drop cap's own typeface, weight and colour.
+      const cs = dc.charStyle ? styles?.char.find((c) => c.name.toLowerCase() === dc.charStyle!.toLowerCase())?.props : undefined;
+      const fam = cs?.fontFamily ?? dc.fontFamily ?? style.fontFamily;
+      const dcWeight = cs?.weight ?? dc.weight, dcItalic = cs?.italic ?? false, dcFeatures = { lnum: true, ...(cs?.features ?? {}) };
+      const dcFont0 = resolveFont({ family: fam, weight: dcWeight, italic: dcItalic, axes: {}, features: dcFeatures, size: 72 });
+      const m0 = fontMetrics(dcFont0);
+      const capRatio = m0.capHeight || 0.68;
       const lines = Math.max(2, Math.round(dc.lines));
-      const size = ((lines - 1) * style.leading + capBody) / capRatio;
-      const font = resolveFont({ family: dc.fontFamily ?? style.fontFamily, weight: dc.weight, italic: false, axes: {}, features: { lnum: true }, size });
+      const drop = (lines - 1) * style.leading + capBody;
+      // Scale for descenders: cap height plus descender fill the drop, the initial raised to match.
+      const desc = dc.scaleDescenders && /[JQgjpqy,;]/.test(letter) ? Math.abs(m0.descender || 0.22) * 0.9 : 0;
+      const size = drop / (capRatio + desc);
+      const font = resolveFont({ family: fam, weight: dcWeight, italic: dcItalic, axes: {}, features: dcFeatures, size });
       const width = measure(letter, font, size);
       const pad = dc.frame === 'none' ? 0 : style.leading * 0.35;
-      dropCap = { text: letter, font, size, width, capBody, lines, boxW: width + pad * 2, pad };
+      dropCap = { text: letter, font, size, width, capBody, lines, boxW: width + pad * 2, pad, color: cs?.color, raise: desc * size };
     }
   }
 
@@ -310,7 +332,7 @@ function prepare(text: string, style: TextStyle, firstWidth: number, styles: Sto
     const ps = paraStyle(para, pst);
     if (dropCap && i === 0) ps.indent = 0;
     const ragged = ps.align === 'left' || ps.align === 'right' || ps.align === 'center';
-    const special = i === 0 && (!!dropCap || style.firstLineSmallCaps);
+    const special = (i === 0 && (!!dropCap || style.firstLineSmallCaps)) || !!pst.lineStyles?.length;
     const ik = special ? '' : `${ctxId}|${jsonOf(pst)}|${para.kind}|${para.first}|${para.marker}|${para.level}|${JSON.stringify(para.words)}`;
     let items = special ? undefined : itemCache.get(ik);
     if (!items) {
@@ -331,6 +353,30 @@ function prepare(text: string, style: TextStyle, firstWidth: number, styles: Sto
         if (count === scCount) break;
         scCount = count;
         items = buildItems(para, pst, ps, scCount, ragged, dict, styles?.images);
+      }
+    }
+    // Line styles: character styles on the first lines in sequence. Which words fall on which line
+    // depends on the styling, so set, break and re-set until the line ends settle.
+    const lineSegs = (pst.lineStyles ?? []).map((ls) => ({ props: styles?.char.find((c) => c.name.toLowerCase() === ls.style.toLowerCase())?.props, lines: Math.max(1, Math.round(ls.lines)) })).filter((x) => x.props);
+    if (lineSegs.length && para.words.length) {
+      const fw = Math.max(1, firstWidth - ps.left - ps.right);
+      let ends: number[] = lineSegs.map(() => 0);
+      for (let pass = 0; pass < 4; pass++) {
+        const styled: Paragraph = { ...para, words: para.words.map((w, wi) => {
+          const k = ends.findIndex((e) => wi < e);
+          return k < 0 ? w : { ...w, pieces: w.pieces.map((pc) => ({ ...pc, st: { ...pc.st, cs: mergeCs([lineSegs[k].props!, ...(pc.st.cs ? [pc.st.cs] : [])]) } })) };
+        }) };
+        const its = buildItems(styled, pst, ps, 0, ragged, dict, styles?.images);
+        items = its;
+        // The first lines are narrower beside a drop cap.
+        const widthAt = (ln: number) => (i === 0 && dropCap && ln < dropCap.lines ? fw - (dropCap.boxW + style.dropCap.gap) : fw);
+        const lines = linesFromBreaks(its, breakParagraph(its, widthAt, pst, ragged), 0);
+        const lastWord = lines.map((l) => { let w = -1; for (let k = l.start; k < l.end; k++) { const it = its[k]; if (it.t === 'box' && it.word >= 0) w = Math.max(w, it.word); } return w; });
+        const next: number[] = [];
+        let line = 0;
+        for (const sg of lineSegs) { line += sg.lines; const li = Math.min(line, lines.length) - 1; next.push(li >= 0 ? lastWord[li] + 1 : 0); }
+        if (next.every((v, k) => v === ends[k])) break;
+        ends = next;
       }
     }
     return { para, ps, items, ragged };
@@ -383,6 +429,12 @@ function bandIntervals(x0: number, w: number, y0: number, y1: number, wraps: Wra
       if (dy >= ry) continue;
       const half = rx * Math.sqrt(1 - (dy / ry) ** 2);
       ex0 = cx - half; ex1 = cx + half;
+    } else if (wr.rows && wr.rowH) {
+      // Contour: the widest extent of the outline over the rows this band touches.
+      const r0 = Math.max(0, Math.floor((y0 - wr.rowY0!) / wr.rowH)), r1 = Math.min(wr.rows.length - 1, Math.floor((y1 - wr.rowY0!) / wr.rowH));
+      ex0 = Infinity; ex1 = -Infinity;
+      for (let r = r0; r <= r1; r++) { const sp = wr.rows[r]; if (sp) { ex0 = Math.min(ex0, sp[0]); ex1 = Math.max(ex1, sp[1]); } }
+      if (!Number.isFinite(ex0)) continue;
     } else { ex0 = wr.x; ex1 = wr.x + wr.w; }
     if (ex1 <= x0 || ex0 >= x0 + w) continue;
     if (wr.jump) return [];
@@ -657,15 +709,25 @@ function layoutFrame(prep: Prepared, style: TextStyle, frame: FrameSpec, cursor:
         const o = r.obj;
         let { w, h } = o;
         let x = r.x;
-        if (o.pct) {
+        let y: number | undefined;
+        if (o.anchor) {
+          // Custom anchored object: beside the column at this line; outside/inside follow the page.
+          const recto = frame.page == null || frame.page % 2 === 1;
+          const side = o.anchor === 'outside' ? (recto ? 'right' : 'left') : o.anchor === 'inside' ? (recto ? 'left' : 'right') : o.anchor;
+          const gap = ps.size * 0.8;
+          const c0 = colXAt(slot.col), c1 = c0 + colW;
+          x = (side === 'left' ? c0 - gap - w : c1 + gap) + (o.dx ?? 0);
+          y = r.y - body.capHeight * ps.size + (o.dy ?? 0);
+        } else if (o.pct) {
           const img = prep.styles?.images?.[o.assetId ?? ''];
           w = (o.pct / 100) * lineW;
           h = w * (img && img.w > 0 ? img.h / img.w : 0.75);
           x = ps.align === 'center' ? xOff + (lineW - w) / 2 : ps.align === 'right' ? xOff + lineW - w : xOff;
         }
+        if (y == null) y = r.y - h;
         const children: Prim[] = o.href
-          ? [{ t: 'image', href: o.href, x, y: r.y - h, w, h, assetId: o.assetId }]
-          : [{ t: 'path', d: `M${x} ${r.y - h}H${x + w}V${r.y}H${x}Z`, fill: '#e7e1d4', stroke: '#b9b0a0', strokeWidth: 0.5 }, { t: 'path', d: `M${x} ${r.y - h}L${x + w} ${r.y}M${x + w} ${r.y - h}L${x} ${r.y}`, stroke: '#b9b0a0', strokeWidth: 0.5 }];
+          ? [{ t: 'image', href: o.href, x, y, w, h, assetId: o.assetId }]
+          : [{ t: 'path', d: `M${x} ${y}H${x + w}V${y + h}H${x}Z`, fill: '#e7e1d4', stroke: '#b9b0a0', strokeWidth: 0.5 }, { t: 'path', d: `M${x} ${y}L${x + w} ${y + h}M${x + w} ${y}L${x} ${y + h}`, stroke: '#b9b0a0', strokeWidth: 0.5 }];
         images.push({ g: { t: 'group', matrix: [1, 0, 0, 1, 0, 0], children }, col: slot.col, para: paraNo });
       }
       // Index terms marked in the words of this line.
@@ -679,6 +741,19 @@ function layoutFrame(prep: Prepared, style: TextStyle, frame: FrameSpec, cursor:
           // Cross-reference anchors ride along as "\u0001name\u0001paragraph text".
           if (wd.anchors) for (const a of wd.anchors) marks.push(`\u0001${a}\u0001${pp.para.words.map((w) => w.text).join(' ')}`);
         }
+      }
+      // Character styles set on this line, for running heads by character style ("\u0003name\u0003text").
+      {
+        const byName = new Map<string, string[]>();
+        let lastWord = -1;
+        for (let k = line.start; k < line.end; k++) {
+          const it = pl.items[k];
+          if (it.t !== 'box' || it.word < 0 || it.word === lastWord) continue;
+          lastWord = it.word;
+          const wd = pp.para.words[it.word];
+          for (const n of new Set(wd?.pieces.flatMap((pc) => pc.st.csn ?? []) ?? [])) byName.set(n, [...(byName.get(n) ?? []), wd.pieces.filter((pc) => pc.st.csn?.includes(n)).map((pc) => pc.text).join('')]);
+        }
+        for (const [n, ws] of byName) marks.push(`\u0003${n}\u0003${ws.join(' ')}`);
       }
       // Paragraph styles in use, for running heads by style ("\u0002name\u0002text").
       if (pl.startsPara && li === 0 && pp.para.styleNames) for (const n of pp.para.styleNames) marks.push(`\u0002${n}\u0002${pp.para.words.map((w) => w.text).join(' ')}`);
@@ -750,7 +825,7 @@ function layoutFrame(prep: Prepared, style: TextStyle, frame: FrameSpec, cursor:
         hasDropCap = true;
         const dc = pl.dc;
         const lead = gridLeading(ps.leading, grid);
-        const dcBaseline = slot.baseline + (dc.lines - 1) * lead;
+        const dcBaseline = slot.baseline + (dc.lines - 1) * lead - (dc.raise ?? 0);
         const boxTop = slot.baseline - dc.capBody - dc.pad;
         const boxH = (dc.lines - 1) * lead + dc.capBody + dc.pad * 2;
         const bx = rtl ? slot.x + slot.w - dc.boxW : slot.x + ps.left;
@@ -759,7 +834,7 @@ function layoutFrame(prep: Prepared, style: TextStyle, frame: FrameSpec, cursor:
           children.push(...illuminatedFrame(style.dropCap.frame, { x: bx, y: boxTop, w: dc.boxW, h: boxH },
             { frame: style.dropCap.frameColor, ground: style.dropCap.frameColor, gold: '#c9a227' }, dc.text.charCodeAt(0)));
         }
-        children.push({ t: 'text', runs: [{ x: bx + dc.pad, y: dcBaseline, text: dc.text, font: dc.font, size: dc.size, color: style.dropCap.color, width: dc.width }] });
+        children.push({ t: 'text', runs: [{ x: bx + dc.pad, y: dcBaseline, text: dc.text, font: dc.font, size: dc.size, color: dc.color ?? style.dropCap.color, width: dc.width }] });
         dcPrims.push({ g: { t: 'group', matrix: [1, 0, 0, 1, 0, 0], children }, col: slot.col, para: paraNo });
       }
 
@@ -777,14 +852,15 @@ function layoutFrame(prep: Prepared, style: TextStyle, frame: FrameSpec, cursor:
       const ws = pl.rows ? pl.base(0) : part.slot;
       const x0 = ws.x + ps.left, x1 = ws.x + ws.w - ps.right;
       const yTop = s0.baseline - body.capHeight * ps.size, yBot = s1.baseline + ps.size * 0.22;
-      if (pst.shading && pst.shading.color) {
+      // Shading, a border (stroke only), or both.
+      if (pst.shading && (pst.shading.color || (pst.shading.stroke && (pst.shading.strokeWidth ?? 0.5) > 0))) {
         const pad = pst.shading.padding ?? 3;
         const r = pst.shading.radius ?? 0;
         const X0 = x0 - pad, X1 = x1 + pad, Y0 = yTop - pad, Y1 = yBot + pad;
         const d = r > 0
           ? `M${X0 + r} ${Y0}H${X1 - r}Q${X1} ${Y0} ${X1} ${Y0 + r}V${Y1 - r}Q${X1} ${Y1} ${X1 - r} ${Y1}H${X0 + r}Q${X0} ${Y1} ${X0} ${Y1 - r}V${Y0 + r}Q${X0} ${Y0} ${X0 + r} ${Y0}Z`
           : `M${X0} ${Y0}H${X1}V${Y1}H${X0}Z`;
-        under.unshift({ g: { t: 'group', matrix: [1, 0, 0, 1, 0, 0], children: [{ t: 'path', d, fill: pst.shading.color, stroke: pst.shading.stroke ?? undefined, strokeWidth: pst.shading.strokeWidth }] }, col, para: paraNo });
+        under.unshift({ g: { t: 'group', matrix: [1, 0, 0, 1, 0, 0], children: [{ t: 'path', d, fill: pst.shading.color || undefined, stroke: pst.shading.stroke ?? undefined, strokeWidth: pst.shading.strokeWidth ?? 0.5 }] }, col, para: paraNo });
       }
       const tx = (rule: NonNullable<TextStyle['ruleAbove']>) => rule.width === 'text' && Number.isFinite(part.minX) ? [part.minX, part.maxX] : [x0, x1];
       if (pst.ruleAbove && pst.ruleAbove.weight > 0 && pl.startsPara && part.first === 0) {
@@ -1138,7 +1214,7 @@ export function layoutStory(text: string, style: TextStyle, frames: FrameSpec[],
   const f0 = frames[0];
   const in0 = f0?.insets ? f0.insets.left + f0.insets.right : (f0?.inset ?? 0) * 2;
   const firstColW = f0 ? f0.colWidth ?? (f0.w - in0 - f0.columnGap * (Math.max(1, f0.columns) - 1)) / Math.max(1, f0.columns) : 100;
-  const useStyles = styles && (styles.para.length || styles.char.length || styles.hyphenation?.length || styles.hiddenConditions?.length || /\{img:/.test(expanded)) ? styles : null;
+  const useStyles = styles && (styles.para.length || styles.char.length || styles.hyphenation?.length || styles.hiddenConditions?.length || styles.listStart?.length || /\{img:/.test(expanded)) ? styles : null;
   const prep = prepare(expanded, style, firstColW, useStyles);
   const out: FrameLayout[] = [];
   let cursor: Cursor | null = { para: 0, item: 0 };

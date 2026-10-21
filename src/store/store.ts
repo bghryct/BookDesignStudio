@@ -130,8 +130,10 @@ export const useStore = create<State>((set, get) => ({
 
   update: (recipe, opts) => {
     const { project, past } = get();
-    const next = produce(project, recipe);
-    if (next === project) return;
+    const changed = produce(project, recipe);
+    if (changed === project) return;
+    // Every change stamps the modification time ({modified}).
+    const next = produce(changed, (d) => { d.modifiedAt = Date.now(); if (d.createdAt == null) d.createdAt = Date.now(); });
     const now = performance.now();
     // A burst of changes (dragging in a colour picker, holding an arrow key) is one undo step.
     const burst = now - lastHistoryAt < 300;

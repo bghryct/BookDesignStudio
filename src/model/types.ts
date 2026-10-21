@@ -54,6 +54,10 @@ export interface DropCapStyle {
   gap: number;
   /** Characters set as the initial (1 = one letter; an opening quote always comes along). */
   chars?: number;
+  /** A character style for the initial (its typeface, weight, italic, colour, features). */
+  charStyle?: string | null;
+  /** Shrink an initial with a descender (J, Q, g …) so the descender also fits the drop. */
+  scaleDescenders?: boolean;
 }
 
 export interface TextStyle {
@@ -170,6 +174,8 @@ export interface TextStyle {
   grepStyles?: GrepStyle[];
   /** Nested styles: character styles applied to the start of the paragraph (run-in heads). */
   nestedStyles?: NestedStyle[];
+  /** Line styles: character styles for the paragraph's first lines, in sequence (e.g. small caps for line 1). */
+  lineStyles?: { style: string; lines: number }[];
 
   /** Footnotes set at the foot of the column: numbering, size (% of the text) and separator rule. */
   footnoteNumbering?: 'decimal' | 'roman' | 'alpha' | 'symbols';
@@ -216,6 +222,8 @@ export interface ListSpec {
   level?: number;
   /** Multi-level numbers that include the parent levels: 2.1, 2.2, 2.2.1 … */
   hierarchical?: boolean;
+  /** Continue numbering from the previous story in the book (numbered notes, figures, exercises across chapters). */
+  continueAcross?: boolean;
 }
 
 export interface TabStop { pos: number; align: 'left' | 'center' | 'right' | 'decimal'; leader?: string; char?: string }
@@ -334,7 +342,7 @@ export interface ElementBase {
 
 export interface TextWrap {
   /** Around the bounding box, around the shape (ellipses, circles), or jump over it. */
-  mode: 'box' | 'shape' | 'jump';
+  mode: 'box' | 'shape' | 'jump' | 'contour';
   /** Distance kept between the item and the text, pt. */
   offset: number;
   /** Text on both sides, on the side with more room, or only left / right. */
@@ -836,6 +844,17 @@ export interface Project {
   hyphenDictionary?: string[];
   /** Conditional text ({if:Name}…{/if}) whose condition is hidden. */
   hiddenConditions?: string[];
+  /** Story editor: record edits as tracked changes ({++…++} / {--…--}). */
+  trackChanges?: boolean;
+  /** Story editor: typographer's quotes, dashes and ellipses as you type. */
+  smartTyping?: boolean;
+  /** Words the spelling check accepts. */
+  spellingDictionary?: string[];
+  /** Autocorrect while typing in the story editor (with smart typing on): "teh" → "the". */
+  autocorrect?: { from: string; to: string }[];
+  /** Created / last modified (ms since epoch), for {created} / {modified}. */
+  createdAt?: number;
+  modifiedAt?: number;
   /** Sections: page numbering restarts and changes style where a section starts (src/model/sections.ts). */
   sections?: PageSection[];
   /** Named paragraph and character styles (`[Name]` / `<Name>…</Name>` in stories). */

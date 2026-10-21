@@ -274,6 +274,15 @@ export function RuleStylesSection({ st, set }: P) {
         </div>
       ))}
       <Button variant="ghost" className="w-full" disabled={!chars.length} onClick={() => set((d) => { d.nestedStyles = [...nested, { style: chars[0].name, count: 3, unit: 'words' }]; })}><Plus size={12} className="mr-1 inline" />Add nested style (run-in head)</Button>
+      <span className="block text-[10.5px] font-semibold uppercase tracking-[0.08em] text-ink-500">Line styles (the first lines, in turn)</span>
+      {(st.lineStyles ?? []).map((n, i) => (
+        <div key={i} className="flex items-end gap-1">
+          <div className="min-w-0 flex-1"><Select label="Style" value={n.style} options={names} onChange={(v) => set((d) => { d.lineStyles = (st.lineStyles ?? []).map((x, k) => (k === i ? { ...x, style: v } : x)); })} /></div>
+          <NumberField className="w-[60px]" label="Lines" value={n.lines} min={1} max={20} decimals={0} onChange={(v) => set((d) => { d.lineStyles = (st.lineStyles ?? []).map((x, k) => (k === i ? { ...x, lines: Math.round(v) } : x)); })} />
+          <IconButton title="Remove" onClick={() => set((d) => { d.lineStyles = (st.lineStyles ?? []).filter((_, k) => k !== i); })}><Trash size={12} /></IconButton>
+        </div>
+      ))}
+      <Button variant="ghost" className="w-full" disabled={!chars.length} onClick={() => set((d) => { d.lineStyles = [...(st.lineStyles ?? []), { style: chars[0].name, lines: 1 }]; })}><Plus size={12} className="mr-1 inline" />Add line style (e.g. small caps for line one)</Button>
       <span className="block text-[10.5px] font-semibold uppercase tracking-[0.08em] text-ink-500">GREP (every match)</span>
       {grep.map((g, i) => (
         <div key={i} className="flex items-end gap-1">

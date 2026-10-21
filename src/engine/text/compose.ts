@@ -55,7 +55,7 @@ export interface Seg {
   /** A footnote reference (its text is the label). */
   fn?: boolean;
   /** An inline graphic (its width is the image's; `pct` = % of the column, resolved when placed). */
-  obj?: { href: string; w: number; h: number; assetId?: string; pct?: number };
+  obj?: { href: string; w: number; h: number; assetId?: string; pct?: number; anchor?: 'left' | 'right' | 'outside' | 'inside'; dx?: number; dy?: number };
   /** Character rotation, degrees. */
   rot?: number;
   /** Lead-in before the first glyph (spaced-out ruby bases start half a space in). */
@@ -157,9 +157,11 @@ export class ItemBuilder {
     let w = o.w ?? (o.h != null ? o.h / ar : Math.min(160, (img?.w ?? 120) * 0.75));
     let h = o.h ?? w * ar;
     if (o.pct) { w = 1; h = 1; }
+    // An anchored object sits outside the text: it takes no room on the line.
+    const adv = o.anchor ? 0 : w;
     return {
-      text: '', font: this.font(PLAIN), size: this.ps.size, ls: 0, width: w, glyphW: w, color: this.style.color, dy: o.shift || undefined,
-      obj: { href: img?.href ?? '', w, h, assetId: o.id, pct: o.pct },
+      text: '', font: this.font(PLAIN), size: this.ps.size, ls: 0, width: adv, glyphW: adv, color: this.style.color, dy: o.shift || undefined,
+      obj: { href: img?.href ?? '', w, h, assetId: o.id, pct: o.pct, anchor: o.anchor, dx: o.dx, dy: o.dy },
     };
   }
 

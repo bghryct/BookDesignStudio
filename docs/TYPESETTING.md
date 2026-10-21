@@ -62,13 +62,13 @@ Markup is written in the story itself; see [STORY_FORMAT.md](STORY_FORMAT.md).
 | Indent to here, right-indent tab | ✅ | ✅ | `{here}`, `{rtab}` |
 | Space before / after | ✅ | ✅ | `before:` `after:` |
 | Drop caps: lines, characters | ✅ | ✅ ★ | Type › Drop cap, with illuminated frames |
-| Drop cap character style, scale for descenders | ✅ | ◐ | Font, weight and colour only |
+| Drop cap character style, scale for descenders | ✅ | ✅ | Type › Drop cap › Character style, Scale for descenders |
 | Nested styles | ✅ | ✅ | Type › Rule styles; `nestedStyles` (words, characters, sentences, up to a character) |
 | GREP styles | ✅ | ✅ | Type › Rule styles |
-| Line styles (first N lines) | ✅ | ◐ | First line in small caps only |
+| Line styles (first N lines) | ✅ | ✅ | Type › Nested & GREP styles › Line styles: character styles for the first lines in turn (re-set until the lines settle) |
 | Paragraph rules above / below | ✅ | ✅ | Type › Rules (solid, dashed, dotted, double; column or text width; indents; offset) |
 | Paragraph shading | ✅ | ✅ | Type › Rules (padding, corner radius) |
-| Paragraph border | ✅ | ◐ | Done as shading with a stroke |
+| Paragraph border | ✅ | ✅ | Type › Rules › shading stroke, with or without a fill (padding, corner radius) |
 | Span columns | ✅ | ✅ | Keeps & breaks › Span all columns, at the top of a frame or mid-story (columns above are balanced) |
 | Split column | ✅ | ✅ | Keeps & breaks › Split column, Split gap; `[{split:3}]` |
 | Keep with next | ✅ | ✅ | Keeps & breaks |
@@ -77,7 +77,7 @@ Markup is written in the story itself; see [STORY_FORMAT.md](STORY_FORMAT.md).
 | Keep lines together (first N / last N lines) | ✅ | ✅ | Orphans and widows |
 | Start in next column / frame / odd page / even page | ✅ | ✅ | Keeps & breaks; `{col}` `{frame}` `{odd}` `{even}` lines |
 | Bullets and numbering, multi-level, restart | ✅ | ✅ | Type › Lists; `- ` `1. ` `a) `, two spaces per level; Multi-level numbers |
-| Numbering lists across stories | ✅ | ✗ | Each story numbers its own lists |
+| Numbering lists across stories | ✅ | ✅ | List › Continue across stories; `[{number; continue}]` picks up from the story before, in page order |
 | Tab stops: left, centre, right, decimal, align on character; leaders | ✅ | ✅ | Type › Tabs |
 | Align to baseline grid: all lines / first line only | ✅ | ✅ | Type; Keeps & breaks |
 | Custom baseline grid per frame | ✅ | ✅ | Frame › Own baseline grid |
@@ -117,10 +117,10 @@ Markup is written in the story itself; see [STORY_FORMAT.md](STORY_FORMAT.md).
 | Threading, overset indicator | ✅ | ✅ | The + port; it turns red when text is overset |
 | Autoflow into new pages | ✅ | ✅ | Pages › Flow text, or File › Import of a long manuscript. A 1.2-million-character novel flows into ~800 pages in about a second |
 | Text wrap: bounding box, shape, jump object; wrap side | ✅ | ✅ | Frame › Text wrap (both, largest, left, right) |
-| Wrap around an image's alpha contour | ✅ | ✗ | Box and ellipse shapes only |
+| Wrap around an image's alpha contour | ✅ | ✅ | Frame › Text wrap › Contour (images and SVGs with transparency; follows fit, zoom and offset) |
 | Ignore text wrap | ✅ | ✅ | Frame |
 | Text on a path, with effects | ✅ | ✅ | Path › Text on path: offset, alignment, over / under, reverse; Rainbow, Skew, 3D ribbon, Stair step and Gravity |
-| Inline and anchored graphics | ✅ | ◐ | `{img:id}` inline, `{img:id; w:100%}` column-wide figure. No custom anchored positioning |
+| Inline and anchored graphics | ✅ | ✅ | `{img:id}` inline, `{img:id; w:100%}` column-wide figure, `{img:id; w:30; anchor:outside; dx:..; dy:..}` custom anchored beside its line (left, right, outside, inside) |
 
 ## Long documents
 
@@ -135,11 +135,11 @@ Markup is written in the story itself; see [STORY_FORMAT.md](STORY_FORMAT.md).
 | Text variables: page, page count, chapter, title, author, date | ✅ | ✅ | `{page}` `{page:roman}` `{lastpage}` `{chapter}` `{title}` `{author}` `{date}` |
 | Running head from a paragraph style (first / last on the page) | ✅ | ✅ | `{running:Style}`, `{running:Style:last}`; carries over pages without one |
 | File name variable | ✅ | ✅ | `{filename}` |
-| Running head from a character style; modification date | ✅ | ✗ | |
+| Running head from a character style; creation and modification dates | ✅ | ✅ | `{running:Style}` also takes character styles; `{created}`, `{modified}` |
 | "Continued on / from page" jump lines | ✅ | ✅ | `{nextpage}` / `{prevpage}` in a frame touching a threaded frame; tables show "continues on p. N" labels |
 | Master (parent) pages | ✅ | ✅ | Pages › Masters |
 | Sections and restarted page numbering | ✅ | ✅ | Pages › page menu › Start a section: start number, 1 / i / I / a / A, prefix, `{section}` marker. Used by folios, contents, index, cross-references and the PDF's page labels |
-| Book files (several documents) | ✅ | ✗ | One document per book |
+| Book files (several documents) | ✅ | ◐ | Pages › Insert a chapter from a project file: its pages, masters, styles and pictures are merged in (same-named styles use the book's). One document then holds the whole book (an 800-page novel tested), with sections numbering its parts. Chapters are merged, not kept as live-linked files |
 | PDF bookmarks | ✅ | ✅ | Interior PDFs get an outline from chapter titles and `#` / `##` headings (nested) |
 | PDF hyperlinks | ✅ | ✅ | `<{link:https://…}>…</>` for URLs; cross-references jump to their page |
 
@@ -169,12 +169,13 @@ Markup is written in the story itself; see [STORY_FORMAT.md](STORY_FORMAT.md).
 | Feature | InDesign | Here | Where |
 |---|---|---|---|
 | Find / change text with GREP, across stories | ✅ | ✅ | Type › Find / Change (with presets) |
-| Find glyph / object | ✅ | ✗ | |
+| Find glyph / object | ✅ | ✅ | Find / Change › Find a glyph (paste it or U+2014); Document › Find objects (kind, name, colour, story text) |
 | Show hidden characters | ✅ | ✅ | Document › Hidden characters, ⌥⌘I: spaces ·, no-break °, ¶, ¬, # |
 | Story editor | ✅ | ✅ | Double-click a frame; syntax-highlighted markup |
-| Spell check | ✅ | ◐ | The story editor uses the browser's spell checker in the story's language; no autocorrect |
+| Spell check | ✅ | ✅ | Document › Spelling: every story checked against Hunspell (SCOWL en-US, en-GB), with suggestions, Change all, Learn, Ignore and Find; the story editor underlines as you type |
+| Autocorrect | ✅ | ✅ | Story editor › Smart typing (curly quotes, dashes, ellipses) and Document › Spelling › Autocorrect list |
 | Notes | ✅ | ✅ | `{note:…}` stays in the story, never prints |
-| Track changes | ✅ | ✗ | |
+| Track changes | ✅ | ✅ | Story editor › Track changes: insertions and deletions recorded as `{++…++}` / `{--…--}`, shown in colour; Accept, Reject, Next, Accept all, Reject all. The page sets the accepted text |
 | Place Word (.docx) | ✅ | ✅ | Drop, File › Import, or Pages › Flow text › Load. Keeps headings, italic, bold, small caps, super- and subscript, underline, strikethrough, footnotes, endnotes, lists, tabs, breaks and alignment; maps Word style names onto the book's paragraph styles. Tables come in as tab-separated lines. |
 | Place plain text / Markdown | ✅ | ✅ ★ | Hard-wrapped text is unwrapped. Project Gutenberg books are cleaned up: the licence text is removed, chapters become headings, `_italics_` become italics, straight quotes become typographer's quotes and `--` becomes an em dash |
 | Place PDF as a graphic (any page) | ✅ | ✅ | Drop or File › Import; the Image panel picks the page. The page stays vector in the exported PDF |
@@ -186,18 +187,10 @@ Markup is written in the story itself; see [STORY_FORMAT.md](STORY_FORMAT.md).
 
 ## What remains
 
-These InDesign typesetting features are not here yet:
+Every row above is ✅ or ★ except two partial ones:
 
-- Running heads from a character style, and a modification-date variable.
-- Wrap around an image's alpha contour.
-- Custom anchored-object positions.
-- Numbering a list across several stories.
-- Glyph and object search.
-- Autocorrect.
-- Track changes.
-- Book files (several documents in one book).
-- A drop cap character style with scaling for descenders.
-- Line styles beyond small caps on the first line.
+- **Book files:** chapters prepared as separate files are merged into the book, not kept as live-linked documents.
+- **Getting text out of a PDF:** it can't recover structure the PDF doesn't record.
 
 ## Performance
 

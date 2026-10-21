@@ -195,6 +195,7 @@ function WrapTools({ el, set }: { el: Element; set: (p: Partial<Element>) => voi
         { value: 'box', label: 'Box', title: 'Wrap around the bounding box' },
         { value: 'shape', label: 'Shape', title: 'Wrap around the shape (ellipses and circles)' },
         { value: 'jump', label: 'Jump', title: 'Text jumps over the item' },
+        ...(el.type === 'image' || el.type === 'svg' ? [{ value: 'contour' as const, label: 'Contour', title: "Wrap around the picture's opaque outline (its transparency)" }] : []),
       ]} />
       {w && (
         <Row className="mt-1.5">

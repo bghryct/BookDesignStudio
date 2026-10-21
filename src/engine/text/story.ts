@@ -12,6 +12,7 @@
  *   {fn:footnote text} footnote
  * Paragraph styles may add nested styles (run-in heads) and GREP styles (pattern → character style).
  */
+import { acceptChanges } from './changes';
 import type {
   TextStyle, ParagraphStyleProps, CharacterStyleProps, ParagraphStyleDef, CharacterStyleDef, ListSpec,
 } from '../../model/types';
@@ -26,6 +27,8 @@ export interface StoryStyles {
   images?: Record<string, { href: string; w: number; h: number }>;
   /** Conditional text whose condition is hidden. */
   hiddenConditions?: string[];
+  /** Last list numbers of the story before (per level), for lists that continue across stories. */
+  listStart?: number[];
 }
 
 /**
@@ -52,9 +55,14 @@ export function applyConditions(text: string, hidden: string[] | undefined): str
 }
 
 /** An inline graphic: `{img:assetId; w:120; h:80; shift:2}` (w may be a % of the column). */
-export interface InlineObj { id: string; w?: number; h?: number; pct?: number; shift?: number }
+export interface InlineObj {
+  id: string; w?: number; h?: number; pct?: number; shift?: number;
+  /** Custom anchored object: set beside the column (left / right, or the page's outside / inside) at its line, out of the text flow. */
+  anchor?: 'left' | 'right' | 'outside' | 'inside';
+  dx?: number; dy?: number;
+}
 
-export interface SpanStyle { italic: boolean; bold: boolean; sc: boolean; cs: CharacterStyleProps | null; fn?: boolean; obj?: InlineObj; ruby?: string; wari?: [string, string] }
+export interface SpanStyle { italic: boolean; bold: boolean; sc: boolean; cs: CharacterStyleProps | null; fn?: boolean; obj?: InlineObj; ruby?: string; wari?: [string, string]; csn?: string[] }
 /** `kern[i]`: manual kerning after UTF-16 unit `i`, thousandths of an em. */
 export interface Piece { text: string; st: SpanStyle; kern?: number[] }
 /** What separates a word from the one before it. */
@@ -214,12 +222,14 @@ export function stripNotes(text: string): string {
   return out;
 }
 
-export function parseStory(text: string, style: TextStyle, styles: StoryStyles | null): Paragraph[] {
-  text = applyConditions(stripNotes(text), styles?.hiddenConditions);
+export function parseStory(text: string, style: TextStyle, styles: StoryStyles | null, out?: { lastNumbers?: number[] }): Paragraph[] {
+  text = applyConditions(acceptChanges(stripNotes(text)), styles?.hiddenConditions);
   const pmap = new Map((styles?.para ?? []).map((d) => [nameKey(d.name), d.props]));
   const cmap = new Map((styles?.char ?? []).map((d) => [nameKey(d.name), d.props]));
   const paras: Paragraph[] = [];
   const counters: number[] = [];
+  const lastNumbers: number[] = [...(styles?.listStart ?? [])];
+  if (out) out.lastNumbers = lastNumbers;
   const fn = { count: 0, en: 0, endnotes: [] as Footnote[] };
   let afterBreak = true;
   let pendingBreak: Paragraph['breakBefore'] = null;
@@ -273,8 +283,12 @@ export function parseStory(text: string, style: TextStyle, styles: StoryStyles |
           marker = typed;
           const n = parseInt(typed, 10);
           counters[lv] = Number.isFinite(n) ? n : (counters[lv] ?? 0) + 1;
+          lastNumbers[lv] = counters[lv];
         } else {
-          counters[lv] = list.start != null ? list.start : (counters[lv] ?? 0) + 1;
+          // A list that continues across stories picks up from the story before.
+          const carry = list.continueAcross && counters[lv] == null ? styles?.listStart?.[lv] ?? 0 : 0;
+          counters[lv] = list.start != null ? list.start : (counters[lv] ?? carry) + 1;
+          lastNumbers[lv] = counters[lv];
           const path = list.hierarchical ? counters.slice(0, lv + 1).map((c) => c ?? 1) : [counters[lv]];
           marker = path.map((c) => formatNumber(c, list!.format)).join('.') + (list.suffix ?? '.');
         }
@@ -283,7 +297,8 @@ export function parseStory(text: string, style: TextStyle, styles: StoryStyles |
 
     body = applyRuleStyles(body, eff, cmap);
     const { words, footnotes, hasTabs } = parseInline(body, eff, cmap, fn);
-    const only = words.length === 1 && words[0].pieces.length === 1 ? words[0].pieces[0].st.obj : undefined;
+    const lone = words.length === 1 && words[0].pieces.length === 1 ? words[0].pieces[0].st.obj : undefined;
+    const only = lone && !lone.anchor ? lone : undefined;
     paras.push({ kind, words, first: afterBreak, style: eff, pstyle, list, marker, level, breakBefore: pendingBreak, footnotes, hasTabs, figure: only ?? null, styleNames: styleNames.length ? styleNames : undefined });
     pendingBreak = null;
     afterBreak = kind !== 'body';
@@ -319,6 +334,9 @@ const CODES: Record<string, string> = { nbsp: ' ', thin: ' ', hair: ' ', en
 function parseInline(s: string, style: TextStyle, cmap: Map<string, CharacterStyleProps>, fn: { count: number; en: number; endnotes: Footnote[] }) {
   const st: SpanStyle = { ...PLAIN };
   const csStack: CharacterStyleProps[] = [];
+  // Names of the open character styles ('' for local formatting), for running heads by style.
+  const csNames: string[] = [];
+  const setNames = () => { const n = csNames.filter(Boolean); if (n.length) st.csn = n; else delete st.csn; };
   const words: Word[] = [];
   const footnotes: Footnote[] = [];
   let cur: Piece[] = [];
@@ -426,6 +444,10 @@ function parseInline(s: string, style: TextStyle, cmap: Map<string, CharacterSty
           const parts = content.split(';').map((x) => x.trim()).filter(Boolean);
           const obj: InlineObj = { id: parts[0] ?? '' };
           for (const p of parts.slice(1)) {
+            const a = /^(anchor|pos)\s*:\s*(left|right|outside|inside)$/i.exec(p);
+            if (a) { obj.anchor = a[2].toLowerCase() as InlineObj['anchor']; continue; }
+            const o = /^(dx|dy)\s*:\s*(-?[\d.]+)$/i.exec(p);
+            if (o) { if (o[1].toLowerCase() === 'dx') obj.dx = parseFloat(o[2]); else obj.dy = parseFloat(o[2]); continue; }
             const m = /^(w|width|h|height|shift)\s*:\s*([\d.]+)(%?)$/i.exec(p);
             if (!m) continue;
             const v = parseFloat(m[2]);
@@ -458,12 +480,12 @@ function parseInline(s: string, style: TextStyle, cmap: Map<string, CharacterSty
     if (ch === '<') {
       const rest = s.slice(i, i + 400);
       const local = /^<\{([^}]*)\}>/.exec(rest);
-      if (local) { flush(); csStack.push(parseCharProps(local[1])); st.cs = mergeCs(csStack); i += local[0].length - 1; continue; }
+      if (local) { flush(); csStack.push(parseCharProps(local[1])); csNames.push(''); st.cs = mergeCs(csStack); i += local[0].length - 1; continue; }
       const m = /^<(\/?)([^<>/{}]{0,40})>/.exec(rest);
       if (m) {
         const name = nameKey(m[2]);
-        if (m[1] && csStack.length && (!name || cmap.has(name))) { flush(); csStack.pop(); st.cs = mergeCs(csStack); i += m[0].length - 1; continue; }
-        if (!m[1] && cmap.has(name)) { flush(); csStack.push(cmap.get(name)!); st.cs = mergeCs(csStack); i += m[0].length - 1; continue; }
+        if (m[1] && csStack.length && (!name || cmap.has(name))) { flush(); csStack.pop(); csNames.pop(); setNames(); st.cs = mergeCs(csStack); i += m[0].length - 1; continue; }
+        if (!m[1] && cmap.has(name)) { flush(); csStack.push(cmap.get(name)!); csNames.push(m[2].trim()); setNames(); st.cs = mergeCs(csStack); i += m[0].length - 1; continue; }
       }
     }
     if (ch === '*' && s[i + 1] === '*') { flush(); st.bold = !st.bold; i++; continue; }
