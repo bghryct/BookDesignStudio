@@ -7,7 +7,7 @@ import {
   type BackdropPreset, type CameraPose,
 } from '../three';
 import { computeBinding, computeJacket } from '../engine/binding';
-import { buildBookTextures, pageInfos, TextureRefiner } from '../render/bookTextures';
+import { buildBookTextures, pageInfos, releaseBookTextures, TextureRefiner } from '../render/bookTextures';
 import { useFontStore } from '../engine/fonts';
 import { exportVideo, getVideoSupport, type VideoFormat, type VideoSupport } from '../export/video';
 import { downloadBlob, safeName } from './projectIO';
@@ -152,13 +152,16 @@ export default function Viewer3D() {
   // Textures follow every visual change (debounced).
   useEffect(() => {
     const signal = { cancelled: false };
+    const abort = new AbortController();
     setBuilding(true);
     const t = setTimeout(async () => {
       try {
-        const tex = await buildBookTextures(project, calc, { signal, jacket });
-        if (!tex || signal.cancelled) return;
+        const tex = await buildBookTextures(project, calc, { signal, abort: abort.signal, jacket });
+        if (!tex || signal.cancelled) { releaseBookTextures(tex); return; }
+        const old = texRef.current;
         texRef.current = tex;
         scene()?.setTextures(tex);
+        if (old !== tex) releaseBookTextures(old);
         refinerRef.current?.reset(project, calc, jacket, tex);
       } catch (e) {
         setError(`Could not render textures: ${(e as Error).message}`);
@@ -166,7 +169,7 @@ export default function Viewer3D() {
         if (!signal.cancelled) setBuilding(false);
       }
     }, 350);
-    return () => { signal.cancelled = true; clearTimeout(t); };
+    return () => { signal.cancelled = true; abort.abort(); clearTimeout(t); };
   }, [project, calc, fontVersion, jacket]);
 
   // Lighting / backdrop / camera follow the settings.

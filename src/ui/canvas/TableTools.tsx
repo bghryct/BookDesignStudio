@@ -226,6 +226,30 @@ function linkFrames(d: Draft<Project>, fromId: string, toId: string) {
   from.flowNext = toId;
 }
 
+/** Frames can only be threaded within one "place": the document's pages, one master, the cover or the jacket. */
+const domainOf = (key: string) => (key.startsWith('master:') ? key.split(':').slice(0, 2).join(':') : key.startsWith('page:') ? 'pages' : key);
+const placeName = (key: string) => (key.startsWith('master:') ? 'a master page' : key.startsWith('page:') ? 'the document pages' : key === 'jacket' ? 'the dust jacket' : 'the cover');
+
+function domainError(fromKey: string, toKey: string): string | null {
+  if (domainOf(fromKey) === domainOf(toKey)) return null;
+  if (fromKey.startsWith('master:')) return 'A table on a master continues only on the same master (its left or right page): a master repeats on many pages, so it cannot run on into one document page.';
+  if (toKey.startsWith('master:')) return 'A table on the document pages cannot continue on a master page — master items repeat on every page that uses them.';
+  return `A table on ${placeName(fromKey)} continues only on ${placeName(fromKey)}.`;
+}
+
+/** Where "continue in a new frame" would put the next frame, or why it cannot. */
+export function continueTarget(project: Project, frameId: string): { ok: boolean; label: string; why?: string } {
+  const th = tableThreadOf(project, frameId);
+  const last = th?.frames[th.frames.length - 1];
+  if (!last) return { ok: false, label: 'Continue in a new frame on the next page', why: 'Place the table on a page first.' };
+  if (last.surface.startsWith('master:')) {
+    if (last.surface.endsWith(':left') && project.book.facing) return { ok: true, label: 'Continue on the master’s right page' };
+    return { ok: false, label: 'Continue on a further page', why: 'A master table can run from the master’s left page to its right page only — a master repeats on many pages, so it cannot continue onto one document page.' };
+  }
+  if (last.pageIndex == null) return { ok: false, label: 'Continue in a new frame on the next page', why: 'A table on the cover or jacket cannot run on to another page; thread it to another table frame on the cover instead.' };
+  return { ok: true, label: 'Continue in a new frame on the next page' };
+}
+
 /**
  * A click while threading a table (Editor linking mode). Returns false when the frame being
  * threaded is not a table, so text threading handles the click.
@@ -237,6 +261,10 @@ export function tableLinkClick(linkingId: string, hit: Element | null, at: { key
   const project = s.project;
   const th = tableThreadOf(project, from.id);
   const head = th?.head ?? from;
+  const fromKey = findElement(project, from.id)?.key ?? '';
+  const toKey = hit ? findElement(project, hit.id)?.key ?? '' : at?.key ?? '';
+  const bad = toKey ? domainError(fromKey, toKey) : null;
+  if (bad) { s.notify(bad, 'error'); return true; }
   if (hit) {
     if (hit.type !== 'table') { s.notify('A table continues only in a table frame — click an empty table frame, or an empty spot to make one.', 'error'); return true; }
     if (th?.frames.some((f) => f.el.id === hit.id) || hit.id === from.id) { s.notify('That frame is already part of this table.', 'error'); return true; }
@@ -271,7 +299,23 @@ export function continueTableOnNextPage(frameId: string) {
   const th = t ? tableThreadOf(project, t.id) : null;
   if (!t || !th) { s.notify('Place the table on a page first.', 'error'); return; }
   const last = th.frames[th.frames.length - 1];
-  if (last.pageIndex == null) { s.notify('A table on the cover cannot run on to a page.', 'error'); return; }
+  const target = continueTarget(project, t.id);
+  if (!target.ok) { s.notify(target.why ?? 'The table cannot continue from here.', 'error'); return; }
+  if (last.surface.startsWith('master:')) {
+    // A master spread: from the left page to the right one.
+    const key = last.surface.replace(/:left$/, ':right');
+    const blk = textBlock(project.book, 'right');
+    const L0 = layoutOf(project, th.head);
+    const frame = makeContinuation(th.head, { x: blk.x, y: blk.y, w: L0.width || th.head.w, h: blk.h });
+    s.update((d) => {
+      surfaceElementsDraft(d as Project, key)?.push(frame as Draft<Element>);
+      linkFrames(d, last.el.id, frame.id);
+      settleThread(d, [...th.frames.map((f) => f.el.id), frame.id]);
+    });
+    s.notify('The table continues on the master’s right page.');
+    return;
+  }
+  if (last.pageIndex == null) return;
   const next = last.pageIndex + 1;
   if (next >= project.pages.length) insertPages(project.pages.length - 1, 2, project.pages[last.pageIndex].masterId);
   const p2 = useStore.getState().project;
@@ -642,6 +686,44 @@ export function TableOverlay({ items, selection, tool, zoom, pan, size, calc, pr
     }
   }
 
+  // Where a thread goes off this spread: "from p. 5" at the frame's head, "to p. 7" at its foot.
+  const visible = new Set(tables.map((x) => x.el.id));
+  const where = (f: { pageIndex: number | null; surface: string }) => (f.pageIndex != null ? `p. ${f.pageIndex + 1}` : f.surface.startsWith('master:') ? `master ${f.surface.endsWith(':left') ? 'left' : 'right'}` : f.surface);
+  const goTo = (f: { el: TableElement; pageIndex: number | null }) => (e: React.PointerEvent) => {
+    e.stopPropagation();
+    e.preventDefault();
+    const s = useStore.getState();
+    if (f.pageIndex != null && !s.masterEdit) s.setSpread(spreadIndexOfPage(project, f.pageIndex));
+    s.select([f.el.id]);
+  };
+  const chip = (key: string, x: number, y: number, text: string, anchor: 'start' | 'end', color: string, title: string, onDown?: (e: React.PointerEvent) => void) => {
+    const w = text.length * 5.4 + 10;
+    const x0 = anchor === 'start' ? x : x - w;
+    return (
+      <g key={key} style={{ pointerEvents: onDown ? 'all' : 'none', cursor: onDown ? 'pointer' : 'default' }} onPointerDown={onDown}>
+        <title>{title}</title>
+        <rect x={x0} y={y - 8} width={w} height={15} rx={7.5} fill={color} />
+        <text x={x0 + w / 2} y={y + 3} textAnchor="middle" fontSize={9.5} fill="#fff" style={{ fontFamily: 'ui-sans-serif, system-ui' }}>{text}</text>
+      </g>
+    );
+  };
+  const chips: React.ReactNode[] = [];
+  for (const { el, surface } of tables) {
+    const m = screenM(el, surface);
+    const L = layouts.get(el.id);
+    const th = tableThreadOf(project, el.id);
+    if (th && th.frames.length > 1) {
+      const prev = th.frames[th.index - 1], next = th.frames[th.index + 1];
+      if (prev && !visible.has(prev.el.id)) { const q = sp(m, 0, 0); chips.push(chip(`cf${el.id}`, q.x - 4, q.y + 24, `from ${where(prev)}`, 'end', '#5aa9e6', `Continued from ${where(prev)} — click to go there`, goTo(prev))); }
+      if (next && !visible.has(next.el.id)) { const q = sp(m, el.w, el.h); chips.push(chip(`ct${el.id}`, q.x + 4, q.y + 12, `continues on ${where(next)}`, 'start', '#5aa9e6', `Continues on ${where(next)} — click to go there`, goTo(next))); }
+    }
+    if (L?.stuck) {
+      const q = sp(m, 0, el.h);
+      const rowsTxt = L.stuck.r0 === L.stuck.r1 ? `row ${L.stuck.r0 + 1}` : `rows ${L.stuck.r0 + 1}–${L.stuck.r1 + 1}`;
+      chips.push(chip(`st${el.id}`, q.x, q.y + 12, `⚠ ${rowsTxt} taller than the frame`, 'start', '#e5483a', 'These rows do not fit even an empty frame. Allow rows to break across frames (Table panel), make the frame taller, or shrink the rows — they are not printed until they fit.'));
+    }
+  }
+
   // Thread lines between the frames of the selected table that are on screen.
   const threadLines: React.ReactNode[] = [];
   if (thread && thread.frames.length > 1) {
@@ -732,6 +814,7 @@ export function TableOverlay({ items, selection, tool, zoom, pan, size, calc, pr
           );
         })()}
         {markers}
+        {chips}
       </svg>
       {editorNode}
     </>

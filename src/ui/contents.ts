@@ -9,6 +9,31 @@ import { pageSide, spreadsOf, pageKey } from '../model/surfaces';
 import { makeText, textStyle } from '../model/factory';
 import { textBlock } from '../engine/grid';
 
+/** Every text in the book: pages, masters, cover and jacket. */
+function allTexts(project: Project): string[] {
+  const out: string[] = [];
+  const add = (els: Element[]) => { for (const e of els) if (e.type === 'text') out.push(e.text); };
+  for (const p of project.pages) add(p.elements);
+  for (const m of project.masters) { add(m.left); add(m.right); }
+  add(project.cover.elements);
+  add(project.jacket?.elements ?? []);
+  return out;
+}
+
+/** Condition names used by conditional text ({if:Name}…{/if}), in order of first use. */
+export function conditionNames(project: Project): string[] {
+  const seen = new Map<string, string>();
+  for (const t of allTexts(project)) for (const m of t.matchAll(/\{if:([^}]+)\}/g)) { const n = m[1].trim(); if (n && !seen.has(n.toLowerCase())) seen.set(n.toLowerCase(), n); }
+  return [...seen.values()];
+}
+
+/** Cross-reference anchors ({anchor:name}) set anywhere in the book. */
+export function anchorNames(project: Project): string[] {
+  const seen = new Set<string>();
+  for (const t of allTexts(project)) for (const m of t.matchAll(/\{anchor:([^}]+)\}/g)) seen.add(m[1].trim());
+  return [...seen].filter(Boolean);
+}
+
 const plain = (s: string) => s.replace(/<\/?(?:\{[^}]*\}|[^<>]{0,40})>|\{[^}]*\}|\[[^\]]*\]\s*|[*^\\]/g, '').replace(/\s+/g, ' ').trim();
 export const CONTENTS_NAME = 'Contents (generated)';
 
@@ -61,6 +86,7 @@ export function indexEntries(project: Project): Map<string, { pages: Set<number>
       if (e.type !== 'text' || e.name === INDEX_NAME) continue;
       const marks = layoutText(e, { project, surface: pageKey(p.id), pageIndex: i, side: pageSide(project, i) }).marks ?? [];
       for (const m of marks) {
+        if (m.startsWith('\u0001')) continue;
         const [main, sub] = m.split('!').map((x) => x.trim());
         if (!main) continue;
         const key = main;

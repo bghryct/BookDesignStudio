@@ -26,7 +26,7 @@ import { StrokeEdit, TableStylesLibrary } from './TableStyleEditor';
 import { contextForElement } from '../../render/compile';
 import { findElement, surfaceElementsDraft } from '../../model/surfaces';
 import { uid } from '../../lib/random';
-import { useTableUi, selectedTableRange, continueTableOnNextPage, unthreadTable } from '../canvas/TableTools';
+import { useTableUi, selectedTableRange, continueTableOnNextPage, unthreadTable, continueTarget } from '../canvas/TableTools';
 
 const FIGURES: { value: FigureStyle; label: string }[] = [
   { value: 'default', label: 'As the font' }, { value: 'tabular-lining', label: 'Tabular lining' }, { value: 'tabular-oldstyle', label: 'Tabular oldstyle' },
@@ -596,13 +596,21 @@ function ThreadSection({ frame, head, th, mut }: { frame: TableElement; head: Ta
   const last = lastRef ? layoutTable(lastRef.el, { project, pageIndex: lastRef.pageIndex }) : null;
   const L = layoutTable(frame, { project, pageIndex: th?.frames[i].pageIndex ?? null });
   const body = L.rowMap.filter((r) => r >= head.headerRows && r < head.rows.length - head.footerRows);
+  const target = continueTarget(project, frame.id);
+  const stuckAt = (th?.frames ?? []).map((f) => layoutTable(f.el, { project, pageIndex: f.pageIndex }).stuck).find(Boolean) ?? L.stuck;
   return (
     <Section title="Flow across frames" id="el-table-flow">
       <div className="flex items-center justify-between rounded-md border border-ink-700 bg-ink-900 px-2 py-1.5 text-[11px] text-ink-300">
         <span>{n > 1 ? `Frame ${i + 1} of ${n}` : 'One frame'}{body.length ? ` · body rows ${Math.min(...body) + 1}–${Math.max(...body) + 1}` : ''}</span>
         {last?.overset && <span className="font-medium text-[#e5483a]" title="Rows that fit no frame are not printed">Overset rows</span>}
       </div>
-      <Button className="w-full" onClick={() => continueTableOnNextPage(frame.id)}><BetweenHorizontalEnd size={12} /> Continue in a new frame on the next page</Button>
+      {stuckAt && (
+        <div className="rounded-md border border-[#e5483a]/60 bg-[#e5483a]/10 px-2 py-1.5 text-[11px] leading-snug text-ink-200">
+          {stuckAt.r0 === stuckAt.r1 ? `Row ${stuckAt.r0 + 1} is` : `Rows ${stuckAt.r0 + 1}–${stuckAt.r1 + 1} (joined by a merged cell) are`} taller than a whole frame, so the table stops there and the rest is overset. Allow rows to break across frames, make the frames taller, or shrink those rows.
+        </div>
+      )}
+      <Button className="w-full" disabled={!target.ok} title={target.why} onClick={() => continueTableOnNextPage(frame.id)}><BetweenHorizontalEnd size={12} /> {target.label}</Button>
+      {!target.ok && target.why && <Hint>{target.why}</Hint>}
       <div className="grid grid-cols-2 gap-1">
         <Button title="Then click an empty table frame, or an empty spot on a page" onClick={() => { s().setLinking(frame.id); s().notify('Click an empty table frame, or an empty spot on any page, to continue the table there (Esc cancels).'); }}><Link size={12} /> Thread to…</Button>
         <Button disabled={!frame.flowNext} title="The frames after this one let go of the table" onClick={() => unthreadTable(frame.id)}><Unlink size={12} /> Unthread</Button>
@@ -611,7 +619,7 @@ function ThreadSection({ frame, head, th, mut }: { frame: TableElement; head: Ta
       <Toggle label="Skip the head in the first frame" checked={!!head.skipFirstHeader} onChange={(v) => mut((t) => { t.skipFirstHeader = v; })} hint="For a 'continued' head that only shows after a break" />
       <Toggle label="Repeat the foot in every frame" checked={head.repeatFooter !== false} onChange={(v) => mut((t) => { t.repeatFooter = v; })} hint="Off: the foot rows appear once, at the end of the table (totals)" />
       <Toggle label="Skip the foot in the last frame" checked={!!head.skipLastFooter} onChange={(v) => mut((t) => { t.skipLastFooter = v; })} />
-      <Toggle label="Allow rows to break across frames" checked={!!head.breakRows} onChange={(v) => mut((t) => { t.breakRows = v; })} hint="A row taller than the space left continues in the next frame; otherwise rows move whole (rows joined by a merged cell stay together)" />
+      <Toggle label="Allow rows to break across frames" checked={!!head.breakRows} onChange={(v) => mut((t) => { t.breakRows = v; })} hint="A row (or rows joined by a merged cell) taller than a whole frame continues in the next frame, its text running on; otherwise such rows wait, overset, and are flagged" />
       <Hint>Rows never split unless allowed. The head and foot repeat as set; the table's rows live in its first frame, the others are empty frames it flows through.</Hint>
     </Section>
   );

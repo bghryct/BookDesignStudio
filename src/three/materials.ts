@@ -21,10 +21,11 @@ import {
 import type { CoverFinish, EdgeTreatment, JacketFinish } from '../model/types';
 import { jacketSpec, type JacketCalc } from '../engine/binding';
 import { hash2, rng } from '../lib/random';
+import { finishParams, finishPixels, JACKET_FINISH, maskFromRGBA, type FinishParams } from './finishing';
 import { mix, parseColor } from '../lib/color';
 import { mm } from '../model/units';
 import { EDGE_TILE, type BookLayout } from './layout';
-import type { BookSceneInput, BookTextures, FinishKey, PageInfo, PanelArt } from './types';
+import type { BookSceneInput, BookTextures, FinishKey, PageInfo, PanelArt, PanelMaps } from './types';
 export type { PanelArt } from './types';
 
 /* ------------------------------------------------------------------------- */
@@ -92,41 +93,8 @@ function heightCanvas(h: Float32Array, size: number): HTMLCanvasElement {
 /* Covering finishes                                                          */
 /* ------------------------------------------------------------------------- */
 
-export type DetailKind = 'weave' | 'leather' | 'tooth' | 'none';
-
-export interface FinishParams {
-  roughness: number;
-  /** Base clear-coat amount (laminate / wax). */
-  clearcoat: number;
-  clearcoatRoughness: number;
-  sheen: number;
-  sheenRoughness: number;
-  detail: DetailKind;
-  /** Physical size of one tile of the detail map, pt. */
-  tile: number;
-  threads: number;
-  /** Buckram filler flattening the weave, 0–1. */
-  fill: number;
-  detailScale: number;
-}
-
-export function finishParams(f: CoverFinish): FinishParams {
-  const base: FinishParams = {
-    roughness: 0.75, clearcoat: 0, clearcoatRoughness: 0.3, sheen: 0, sheenRoughness: 0.6,
-    detail: 'tooth', tile: mm(8), threads: 0, fill: 0, detailScale: 0.3,
-  };
-  switch (f) {
-    case 'cloth': return { ...base, roughness: 0.88, sheen: 0.55, sheenRoughness: 0.5, detail: 'weave', tile: mm(6.4), threads: 16, detailScale: 1.1 };
-    case 'buckram': return { ...base, roughness: 0.8, sheen: 0.3, sheenRoughness: 0.45, detail: 'weave', tile: mm(8), threads: 10, fill: 0.3, detailScale: 1.3 };
-    case 'leather': return { ...base, roughness: 0.5, sheen: 0.12, sheenRoughness: 0.4, detail: 'leather', tile: mm(16), detailScale: 0.65 };
-    case 'paper': return { ...base, roughness: 0.8, detailScale: 0.35 };
-    case 'matte': return { ...base, roughness: 0.62, detailScale: 0.15 };
-    case 'gloss': return { ...base, roughness: 0.38, clearcoat: 1, clearcoatRoughness: 0.04, detailScale: 0.08 };
-    case 'soft-touch': return { ...base, roughness: 0.94, sheen: 0.35, sheenRoughness: 0.85, detailScale: 0.1 };
-    case 'vellum': return { ...base, roughness: 0.45, clearcoat: 0.35, clearcoatRoughness: 0.35, sheen: 0.15, detailScale: 0.2 };
-    default: return base;
-  }
-}
+export { finishParams } from './finishing';
+export type { DetailKind, FinishParams } from './finishing';
 
 /** Tileable height map for the covering texture (luminance = height). */
 export function makeDetailCanvas(fp: FinishParams, seed = 7): HTMLCanvasElement {
@@ -205,84 +173,83 @@ export function makeDetailCanvas(fp: FinishParams, seed = 7): HTMLCanvasElement 
 /* Cover finishing composite                                                  */
 /* ------------------------------------------------------------------------- */
 
-const FOIL: Partial<Record<FinishKey, { color: [number, number, number]; rough: number }>> = {
-  'gold-foil': { color: [236, 192, 98], rough: 0.17 },
-  'silver-foil': { color: [226, 229, 233], rough: 0.14 },
-  'copper-foil': { color: [222, 136, 92], rough: 0.18 },
-  'holo-foil': { color: [218, 222, 228], rough: 0.12 },
-};
-
 export interface CoverComposite {
-  color: CanvasTexture;
+  color: Texture;
   /** R = clear-coat, G = roughness, B = metalness. */
-  surface: CanvasTexture;
+  surface: Texture;
   /** Height (luminance) for the bump map. */
-  bump: CanvasTexture;
-  holo: CanvasTexture | null;
+  bump: Texture;
+  holo: Texture | null;
   hasGloss: boolean;
   hasClearcoat: boolean;
   dispose(): void;
 }
 
-/** Mask coverage 0–1 (luminance × alpha); null when the mask is empty. */
-function readMask(src: HTMLCanvasElement, w: number, h: number, scratch: HTMLCanvasElement): Float32Array | null {
-  const ctx = context2d(scratch, true);
-  ctx.clearRect(0, 0, w, h);
-  ctx.drawImage(src, 0, 0, w, h);
-  const d = ctx.getImageData(0, 0, w, h).data;
-  const n = w * h;
-  const out = new Float32Array(n);
-  let any = 0;
-  for (let i = 0, j = 0; i < n; i++, j += 4) {
-    const a = d[j + 3];
-    if (a === 0) continue;
-    const v = ((0.2126 * d[j] + 0.7152 * d[j + 1] + 0.0722 * d[j + 2]) * a) / 65025;
-    out[i] = v;
-    any += v;
-  }
-  return any > 0 ? out : null;
-}
+/** Art that can feed a texture: a canvas, or an ImageBitmap from a raster worker (unflipped). */
+export type ArtSource = HTMLCanvasElement | ImageBitmap;
 
-/** Separable box blur, applied twice (≈ a tent filter), in place. */
-function blurInPlace(a: Float32Array, w: number, h: number, r: number): void {
-  if (r < 1) return;
-  const line = new Float32Array(Math.max(w, h));
-  const norm = 1 / (2 * r + 1);
-  for (let iter = 0; iter < 2; iter++) {
-    for (let y = 0; y < h; y++) {
-      const o = y * w;
-      let acc = 0;
-      for (let k = -r; k <= r; k++) acc += a[o + Math.min(w - 1, Math.max(0, k))];
-      for (let x = 0; x < w; x++) {
-        line[x] = acc * norm;
-        acc += a[o + Math.min(w - 1, x + r + 1)] - a[o + Math.max(0, x - r)];
-      }
-      a.set(line.subarray(0, w), o);
-    }
-    for (let x = 0; x < w; x++) {
-      let acc = 0;
-      for (let k = -r; k <= r; k++) acc += a[Math.min(h - 1, Math.max(0, k)) * w + x];
-      for (let y = 0; y < h; y++) {
-        line[y] = acc * norm;
-        acc += a[Math.min(h - 1, y + r + 1) * w + x] - a[Math.max(0, y - r) * w + x];
-      }
-      for (let y = 0; y < h; y++) a[y * w + x] = line[y];
-    }
-  }
-}
+const isBitmap = (s: ArtSource): s is ImageBitmap => typeof ImageBitmap !== 'undefined' && s instanceof ImageBitmap;
 
-function dataTexture(canvas: HTMLCanvasElement, anisotropy: number): CanvasTexture {
-  const t = new CanvasTexture(canvas);
-  t.colorSpace = NoColorSpace;
+/**
+ * A texture for art. Canvases upload with flipY; ImageBitmaps ignore flipY, so they are flipped
+ * through the UV transform instead (same result, no extra copy).
+ */
+function artTexture(src: ArtSource, anisotropy: number, srgb: boolean, own = false): Texture {
+  const t = isBitmap(src) ? new Texture(src) : new CanvasTexture(src);
+  if (isBitmap(src)) {
+    t.flipY = false;
+    t.repeat.set(1, -1);
+    t.offset.set(0, 1);
+    t.needsUpdate = true;
+    // An owned bitmap's memory goes with the texture.
+    if (own) t.addEventListener('dispose', () => src.close());
+  }
+  t.colorSpace = srgb ? SRGBColorSpace : NoColorSpace;
   t.anisotropy = anisotropy;
   return t;
 }
 
-export function colorTexture(canvas: HTMLCanvasElement, anisotropy: number): CanvasTexture {
-  const t = new CanvasTexture(canvas);
-  t.colorSpace = SRGBColorSpace;
-  t.anisotropy = anisotropy;
-  return t;
+function dataTexture(src: ArtSource, anisotropy: number, own = false): Texture {
+  return artTexture(src, anisotropy, false, own);
+}
+
+/** sRGB texture for art. `own`: close an ImageBitmap source when the texture is disposed. */
+export function colorTexture(src: ArtSource, anisotropy: number, own = false): Texture {
+  return artTexture(src, anisotropy, true, own);
+}
+
+/** Map a texture onto the UV rectangle [u0, u1] × [v0, v1] of a surface (v up). */
+export function placeTexture(t: Texture, u0: number, u1: number, v0: number, v1: number): void {
+  const flip = t.flipY === false && t.repeat.y < 0;
+  t.repeat.set(1 / (u1 - u0), (flip ? -1 : 1) / (v1 - v0));
+  t.offset.set(-u0 / (u1 - u0), flip ? 1 + v0 / (v1 - v0) : -v0 / (v1 - v0));
+  t.wrapS = t.wrapT = ClampToEdgeWrapping;
+}
+
+function flatCanvas(rgb: [number, number, number]): HTMLCanvasElement {
+  const c = createCanvas(4, 4);
+  const g = context2d(c);
+  g.fillStyle = `rgb(${rgb[0]},${rgb[1]},${rgb[2]})`;
+  g.fillRect(0, 0, 4, 4);
+  return c;
+}
+
+/** Textures from finished maps (main-thread composite or a raster worker's output). `own`: close
+ *  the maps' bitmaps when the composite is disposed. */
+export function compositeFromMaps(m: PanelMaps, anisotropy: number, own = true): CoverComposite {
+  const color = colorTexture(m.color, anisotropy, own);
+  const surface = dataTexture(m.surface ?? flatCanvas(m.flatSurface), anisotropy, own);
+  const bump = dataTexture(m.bump ?? flatCanvas([128, 128, 128]), anisotropy, own);
+  const holo = m.holo ? dataTexture(m.holo, anisotropy, own) : null;
+  return {
+    color, surface, bump, holo, hasGloss: m.hasGloss, hasClearcoat: m.hasClearcoat,
+    dispose() {
+      color.dispose();
+      surface.dispose();
+      bump.dispose();
+      holo?.dispose();
+    },
+  };
 }
 
 /**
@@ -302,8 +269,8 @@ export function composeCover(tex: BookTextures | null, layout: BookLayout, finis
 }
 
 export interface SurfaceSource {
-  art: HTMLCanvasElement | null;
-  masks: Partial<Record<FinishKey, HTMLCanvasElement>>;
+  art: ArtSource | null;
+  masks: Partial<Record<FinishKey, ArtSource>>;
   /** Physical size the art covers, pt. */
   totalW: number;
   totalH: number;
@@ -316,15 +283,14 @@ export interface SurfaceSource {
   maxPixels?: number;
 }
 
-/** Same as composeCover for any printed wrapper (the dust jacket uses it too). */
+/** Same as composeCover for any printed wrapper (the dust jacket uses it too). Main thread. */
 export function composeSurface(src: SurfaceSource): CoverComposite {
   const { fp, anisotropy } = src;
   const map = { totalW: Math.max(1, src.totalW), totalH: Math.max(1, src.totalH) };
-  const material = src.base;
   let w: number, h: number;
   const art = src.art;
   if (art && art.width > 1 && art.height > 1) {
-    // Cap the working size (the finishing pass is per-pixel): ≤ 4096 px and ≤ 6 MP.
+    // Cap the working size (the finishing pass is per-pixel).
     const k = Math.min(1, (src.maxPx ?? 4096) / Math.max(art.width, art.height), Math.sqrt((src.maxPixels ?? 16e6) / (art.width * art.height)));
     w = Math.max(2, Math.round(art.width * k));
     h = Math.max(2, Math.round(art.height * k));
@@ -335,137 +301,37 @@ export function composeSurface(src: SurfaceSource): CoverComposite {
   }
   const colorCanvas = createCanvas(w, h);
   const cctx = context2d(colorCanvas, true);
-  cctx.fillStyle = material || '#6b5a48';
+  cctx.fillStyle = src.base || '#6b5a48';
   cctx.fillRect(0, 0, w, h);
   if (art && art.width > 1) cctx.drawImage(art, 0, 0, w, h);
-
   const masks: Partial<Record<FinishKey, Float32Array>> = {};
-  const entries = Object.entries(src.masks) as [FinishKey, HTMLCanvasElement | undefined][];
   const scratch = createCanvas(w, h);
-  for (const [key, cnv] of entries) {
+  const sctx = context2d(scratch, true);
+  for (const [key, cnv] of Object.entries(src.masks) as [FinishKey, ArtSource | undefined][]) {
     if (!cnv || cnv.width < 1 || cnv.height < 1) continue;
-    const m = readMask(cnv, w, h, scratch);
+    sctx.clearRect(0, 0, w, h);
+    sctx.drawImage(cnv, 0, 0, w, h);
+    const m = maskFromRGBA(sctx.getImageData(0, 0, w, h).data, w * h);
     if (m) masks[key] = m;
   }
-  const baseCC = fp.clearcoat;
-  const hasGloss = !!masks['spot-gloss'];
-  const holo = masks['holo-foil'] ?? null;
-
-  let surfaceCanvas: HTMLCanvasElement;
-  let bumpCanvas: HTMLCanvasElement;
-  let holoCanvas: HTMLCanvasElement | null = null;
-
-  if (Object.keys(masks).length === 0) {
-    surfaceCanvas = createCanvas(4, 4);
-    const sctx = context2d(surfaceCanvas);
-    sctx.fillStyle = `rgb(${Math.round(baseCC * 255)},${Math.round(fp.roughness * 255)},0)`;
-    sctx.fillRect(0, 0, 4, 4);
-    bumpCanvas = createCanvas(4, 4);
-    const bctx = context2d(bumpCanvas);
-    bctx.fillStyle = 'rgb(128,128,128)';
-    bctx.fillRect(0, 0, 4, 4);
-  } else {
-    const n = w * h;
-    const ppp = w / map.totalW;
-    const deb = masks['blind-deboss'] ?? null;
-    const gloss = masks['spot-gloss'] ?? null;
-    const foilKeys = (['gold-foil', 'silver-foil', 'copper-foil', 'holo-foil'] as FinishKey[]).filter((k) => masks[k]);
-    const foilMasks = foilKeys.map((k) => masks[k] as Float32Array);
-    const foilDefs = foilKeys.map((k) => FOIL[k]!);
-    // Faint brushed variation of the foil leaf (64-px tile of horizontal streaks).
-    const grain = new Float32Array(64 * 64);
-    for (let y = 0; y < 64; y++) for (let x = 0; x < 64; x++) grain[y * 64 + x] = 0.94 + 0.06 * hash2(x, y >> 2, 3);
-
-    // Height: deboss presses deep, foil a little, varnish sits proud. Blurred once (blur is linear).
-    const height = new Float32Array(n).fill(0.5);
-    if (deb) for (let i = 0; i < n; i++) height[i] -= 0.42 * deb[i];
-    for (const fm of foilMasks) for (let i = 0; i < n; i++) height[i] -= 0.1 * fm[i];
-    if (gloss) for (let i = 0; i < n; i++) height[i] += 0.05 * gloss[i];
-    blurInPlace(height, w, h, Math.max(1, Math.round(0.45 * ppp)));
-
-    const colorImg = cctx.getImageData(0, 0, w, h);
-    const cd = colorImg.data;
-    surfaceCanvas = createCanvas(w, h);
-    const sctx = context2d(surfaceCanvas);
-    const surf = sctx.createImageData(w, h);
-    const sd = surf.data;
-    bumpCanvas = createCanvas(w, h);
-    const bctx = context2d(bumpCanvas);
-    const bimg = bctx.createImageData(w, h);
-    const bd = bimg.data;
-    let hd: Uint8ClampedArray | null = null;
-    let himg: ImageData | null = null;
-    if (holo) {
-      holoCanvas = createCanvas(w, h);
-      himg = context2d(holoCanvas).createImageData(w, h);
-      hd = himg.data;
-    }
-    const nf = foilMasks.length;
-    for (let i = 0, j = 0; i < n; i++, j += 4) {
-      let r = cd[j], g = cd[j + 1], b = cd[j + 2];
-      let rough = fp.roughness;
-      let metal = 0;
-      let cc = baseCC;
-      if (deb) {
-        const md = deb[i];
-        if (md > 0) {
-          const k = 1 - 0.2 * md;
-          r *= k; g *= k; b *= k;
-          rough += 0.06 * md;
-        }
-      }
-      for (let f = 0; f < nf; f++) {
-        const mf = foilMasks[f][i];
-        if (mf <= 0) continue;
-        const fc = foilDefs[f].color;
-        const gr = grain[((((i / w) | 0) & 63) << 6) | (i % w & 63)];
-        r += (fc[0] * gr - r) * mf;
-        g += (fc[1] * gr - g) * mf;
-        b += (fc[2] * gr - b) * mf;
-        rough += (foilDefs[f].rough - rough) * mf;
-        if (mf > metal) metal = mf;
-        cc *= 1 - mf;
-      }
-      if (gloss) {
-        const mg = gloss[i];
-        if (mg > 0) {
-          rough += (0.08 - rough) * mg;
-          if (mg > cc) cc = mg;
-        }
-      }
-      cd[j] = r; cd[j + 1] = g; cd[j + 2] = b;
-      sd[j] = cc * 255;
-      sd[j + 1] = rough * 255;
-      sd[j + 2] = metal * 255;
-      sd[j + 3] = 255;
-      const hv = height[i] * 255;
-      bd[j] = hv; bd[j + 1] = hv; bd[j + 2] = hv; bd[j + 3] = 255;
-      if (hd && holo) {
-        const v = holo[i] * 255;
-        hd[j] = v; hd[j + 1] = v; hd[j + 2] = v; hd[j + 3] = 255;
-      }
-    }
-    cctx.putImageData(colorImg, 0, 0);
-    sctx.putImageData(surf, 0, 0);
-    bctx.putImageData(bimg, 0, 0);
-    if (holoCanvas && himg) context2d(holoCanvas).putImageData(himg, 0, 0);
-  }
-
-  const color = colorTexture(colorCanvas, anisotropy);
-  const surface = dataTexture(surfaceCanvas, anisotropy);
-  const bump = dataTexture(bumpCanvas, anisotropy);
-  const holoTex = holoCanvas ? dataTexture(holoCanvas, anisotropy) : null;
-  return {
-    color, surface, bump, holo: holoTex,
-    hasGloss,
-    hasClearcoat: hasGloss || baseCC > 0,
-    dispose() {
-      color.dispose();
-      surface.dispose();
-      bump.dispose();
-      holoTex?.dispose();
-    },
+  const colorImg = cctx.getImageData(0, 0, w, h);
+  const maps = finishPixels(colorImg.data, w, h, masks, fp, w / map.totalW);
+  const toCanvas = (d: Uint8ClampedArray) => {
+    const c = createCanvas(w, h);
+    const img = new ImageData(d as unknown as Uint8ClampedArray<ArrayBuffer>, w, h);
+    context2d(c).putImageData(img, 0, 0);
+    return c;
   };
+  if (maps.surface) cctx.putImageData(colorImg, 0, 0);
+  return compositeFromMaps({
+    color: colorCanvas,
+    surface: maps.surface ? toCanvas(maps.surface) : null,
+    flatSurface: maps.flatSurface,
+    bump: maps.bump ? toCanvas(maps.bump) : null,
+    holo: maps.holo ? toCanvas(maps.holo) : null,
+    hasGloss: maps.hasGloss,
+    hasClearcoat: maps.hasClearcoat,
+  }, anisotropy);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -594,7 +460,7 @@ type Cutout = PageInfo['cutouts'][number];
  * windows. Holes cut from either side of the leaf appear on both (mirrored on the back).
  * Returns null when the side is plain opaque paper.
  */
-export function makeLeafAlpha(own: PageInfo | undefined, other: PageInfo | undefined, art: HTMLCanvasElement | null, W: number, H: number): HTMLCanvasElement | null {
+export function makeLeafAlpha(own: PageInfo | undefined, other: PageInfo | undefined, art: ArtSource | null, W: number, H: number): HTMLCanvasElement | null {
   const vellum = own?.material === 'vellum';
   const holes: Cutout[] = [
     ...(own?.cutouts ?? []),
@@ -651,7 +517,7 @@ const PAPER_ROUGHNESS: Record<PageInfo['material'], number> = { paper: 0.86, col
 
 /** Keeps GPU textures for page canvases and the cover composite across rebuilds. */
 export class TextureCache {
-  private pages = new Map<HTMLCanvasElement, CanvasTexture>();
+  private pages = new Map<ArtSource, Texture>();
   private composite: CoverComposite | null = null;
   private compositeKey = '';
   private compositeTex: BookTextures | null = null;
@@ -662,15 +528,16 @@ export class TextureCache {
 
   /** Call when a new BookTextures arrives: reused canvases are re-uploaded, stale ones dropped. */
   refresh(tex: BookTextures | null): void {
-    const keep = new Set<HTMLCanvasElement>();
+    const keep = new Set<ArtSource>();
     for (const p of tex?.pages ?? []) if (p) keep.add(p);
     for (const [cnv, t] of this.pages) {
-      if (keep.has(cnv)) t.needsUpdate = true;
+      // Canvases may have been redrawn in place; bitmaps never change.
+      if (keep.has(cnv)) { if (!isBitmap(cnv)) t.needsUpdate = true; }
       else { t.dispose(); this.pages.delete(cnv); }
     }
   }
 
-  page(canvas: HTMLCanvasElement | null | undefined): CanvasTexture | null {
+  page(canvas: ArtSource | null | undefined): Texture | null {
     if (!canvas || canvas.width < 1 || canvas.height < 1) return null;
     let t = this.pages.get(canvas);
     if (!t) {
@@ -684,7 +551,10 @@ export class TextureCache {
     const key = [finish, material, layout.cover.totalW.toFixed(2), layout.cover.totalH.toFixed(2)].join('|');
     if (this.composite && this.compositeTex === tex && this.compositeKey === key) return this.composite;
     this.composite?.dispose();
-    this.composite = composeCover(tex, layout, finish, material, this.anisotropy);
+    // Finished by a raster worker for this finish and colour (the textures own the bitmaps).
+    this.composite = tex?.coverMaps && tex.coverMapsKey === `${finish}|${material}`
+      ? compositeFromMaps(tex.coverMaps, this.anisotropy, false)
+      : composeCover(tex, layout, finish, material, this.anisotropy);
     this.compositeTex = tex;
     this.compositeKey = key;
     return this.composite;
@@ -696,7 +566,7 @@ export class TextureCache {
     const key = [finish, paper, totalW.toFixed(2), totalH.toFixed(2)].join('|');
     if (this.jacketComposite && this.jacketTex === tex && this.jacketKey === key) return this.jacketComposite;
     this.jacketComposite?.dispose();
-    this.jacketComposite = composeSurface({
+    this.jacketComposite = tex?.jacketMaps && tex.jacketMapsKey === `${finish}|${paper}` ? compositeFromMaps(tex.jacketMaps, this.anisotropy, false) : composeSurface({
       art: tex?.jacket ?? null,
       masks: tex?.jacketFinishMasks ?? {},
       totalW,
@@ -720,8 +590,6 @@ export class TextureCache {
   }
 }
 
-/** Jacket stock finishes expressed as covering finishes. */
-const JACKET_FINISH: Record<JacketFinish, CoverFinish> = { matte: 'matte', gloss: 'gloss', uncoated: 'paper', 'soft-touch': 'soft-touch' };
 
 /* ------------------------------------------------------------------------- */
 /* Material set                                                               */
@@ -731,7 +599,16 @@ interface DetailUniforms {
   detailMap: { value: Texture };
   detailRepeat: { value: Vector2 };
   detailScale: { value: number };
+  /** 1 when the bump map is an ImageBitmap flipped through its UV transform (see artTexture):
+   *  the relief then reads the bump UV flipped back, so it lies exactly as with a canvas. */
+  detailFlip: { value: number };
+  /** Added to the relief's coordinates (tiles): a panel texture covering part of the wrap keeps
+   *  the weave where the whole-wrap texture has it, so sharpening does not shift it. */
+  detailOffset: { value: Vector2 };
 }
+
+/** The detail uniforms of each material that has the relief, for applyComposite. */
+const detailOf = new WeakMap<MeshPhysicalMaterial, DetailUniforms>();
 
 /**
  * Adds a tiled micro-relief (weave / grain / tooth) on top of the cover's bump map, with
@@ -739,18 +616,23 @@ interface DetailUniforms {
  * Foil (metallic) areas keep only a trace of it: the leaf is pressed smooth.
  */
 function installDetailBump(m: MeshPhysicalMaterial, u: DetailUniforms): void {
+  detailOf.set(m, u);
   m.onBeforeCompile = (shader: WebGLProgramParametersWithUniforms) => {
     shader.uniforms.detailMap = u.detailMap;
     shader.uniforms.detailRepeat = u.detailRepeat;
     shader.uniforms.detailScale = u.detailScale;
+    shader.uniforms.detailFlip = u.detailFlip;
+    shader.uniforms.detailOffset = u.detailOffset;
     shader.fragmentShader = shader.fragmentShader
       .replace('#include <bumpmap_pars_fragment>', `#include <bumpmap_pars_fragment>
 #ifdef USE_BUMPMAP
 uniform sampler2D detailMap;
 uniform vec2 detailRepeat;
 uniform float detailScale;
+uniform float detailFlip;
+uniform vec2 detailOffset;
 vec2 detailDHdxy() {
-  vec2 uvD = vBumpMapUv * detailRepeat;
+  vec2 uvD = vec2( vBumpMapUv.x, mix( vBumpMapUv.y, 1.0 - vBumpMapUv.y, detailFlip ) ) * detailRepeat + detailOffset;
   vec2 dx = dFdx( uvD );
   vec2 dy = dFdy( uvD );
   float h = detailScale * texture2D( detailMap, uvD ).x;
@@ -762,7 +644,7 @@ vec2 detailDHdxy() {
         ShaderChunk.normal_fragment_maps.replace('dHdxy_fwd()', 'dHdxy_fwd() + detailDHdxy() * ( 1.0 - 0.8 * metalnessFactor )'),
       );
   };
-  m.customProgramCacheKey = () => 'book-cover-detail-v1';
+  m.customProgramCacheKey = () => 'book-cover-detail-v3';
 }
 
 function coverMaterial(fp: FinishParams, sheenBase: string): MeshPhysicalMaterial {
@@ -795,7 +677,7 @@ export class BookMaterials {
   readonly leafBack: MeshStandardMaterial[] = [];
   /** Leaves drawn with alpha blending (vellum). */
   readonly leafTransparent: boolean[] = [];
-  readonly headbandTexture: CanvasTexture;
+  readonly headbandTexture: Texture;
   /** Dust jacket: printed outside and plain inside (null when the book has no jacket). */
   readonly jacketOuter: MeshPhysicalMaterial | null = null;
   readonly jacketInner: MeshStandardMaterial | null = null;
@@ -810,7 +692,7 @@ export class BookMaterials {
   private readonly panelComp: { cover: CoverComposite | null; jacket: CoverComposite | null } = { cover: null, jacket: null };
   private readonly panelArt: { cover: PanelArt | null; jacket: PanelArt | null } = { cover: null, jacket: null };
   /** Sharper art for individual pages (index → texture), over the base page art. */
-  private readonly pageArt = new Map<number, CanvasTexture>();
+  private readonly pageArt = new Map<number, Texture>();
   private textures: BookTextures | null = null;
   private readonly owned: Texture[] = [];
   private readonly leafAlpha: Texture[] = [];
@@ -837,12 +719,13 @@ export class BookMaterials {
       detailMap: { value: detailTex },
       detailRepeat: { value: new Vector2(map.totalW / fp.tile, map.totalH / fp.tile) },
       detailScale: { value: fp.detail === 'none' ? 0 : fp.detailScale },
+      detailFlip: { value: 0 }, detailOffset: { value: new Vector2() },
     };
 
     this.cover = coverMaterial(fp, caseColor);
     installDetailBump(this.cover, this.detail);
     this.coverFront = coverMaterial(fp, caseColor);
-    this.frontDetail = { detailMap: this.detail.detailMap, detailRepeat: { value: this.detail.detailRepeat.value.clone() }, detailScale: this.detail.detailScale };
+    this.frontDetail = { detailMap: this.detail.detailMap, detailRepeat: { value: this.detail.detailRepeat.value.clone() }, detailScale: this.detail.detailScale, detailFlip: { value: 0 }, detailOffset: { value: new Vector2() } };
     installDetailBump(this.coverFront, this.frontDetail);
 
     this.coverStock = new MeshStandardMaterial({ color: new Color(mix('#f4f1ea', caseColor, 0.06)), roughness: 0.9 });
@@ -904,6 +787,7 @@ export class BookMaterials {
         detailMap: { value: jDetail },
         detailRepeat: { value: new Vector2((jc.width + 2 * jc.bleed) / jfp.tile, (jc.height + 2 * jc.bleed) / jfp.tile) },
         detailScale: { value: jfp.detail === 'none' ? 0 : jfp.detailScale },
+        detailFlip: { value: 0 }, detailOffset: { value: new Vector2() },
       });
       this.jacketOuter = outer;
       const front = coverMaterial(jfp, '#ffffff');
@@ -911,6 +795,7 @@ export class BookMaterials {
         detailMap: { value: jDetail },
         detailRepeat: { value: new Vector2((jc.width + 2 * jc.bleed) / jfp.tile, (jc.height + 2 * jc.bleed) / jfp.tile) },
         detailScale: { value: jfp.detail === 'none' ? 0 : jfp.detailScale },
+        detailFlip: { value: 0 }, detailOffset: { value: new Vector2() },
       };
       installDetailBump(front, fd);
       this.jacketFront = front;
@@ -924,6 +809,8 @@ export class BookMaterials {
     m.roughnessMap = comp.surface;
     m.metalnessMap = comp.surface;
     m.bumpMap = comp.bump;
+    const du = detailOf.get(m);
+    if (du) du.detailFlip.value = comp.bump.flipY === false && comp.bump.repeat.y < 0 ? 1 : 0;
     m.clearcoat = comp.hasClearcoat ? 1 : 0;
     m.clearcoatMap = comp.hasClearcoat ? comp.surface : null;
     m.clearcoatRoughness = comp.hasGloss ? 0.05 : fp.clearcoatRoughness;
@@ -944,9 +831,12 @@ export class BookMaterials {
     if (panel && art) {
       this.applyComposite(m, panel, fp);
       detail.detailRepeat.value.set(art.box.w / fp.tile, art.box.h / fp.tile);
+      // The panel's corner (u0, v0) of the wrap, in tiles: the weave lines up with the base's.
+      detail.detailOffset.value.set((art.box.x + full.o) / fp.tile, (full.h - art.box.y - art.box.h - full.o) / fp.tile);
     } else {
       this.applyComposite(m, base, fp);
       detail.detailRepeat.value.set(full.w / fp.tile, full.h / fp.tile);
+      detail.detailOffset.value.set(0, 0);
     }
   }
 
@@ -968,27 +858,29 @@ export class BookMaterials {
   setPanelArt(which: 'cover' | 'jacket', art: PanelArt | null): void {
     const m = which === 'cover' ? this.coverFront : this.jacketFront;
     const fp = which === 'cover' ? this.fp : this.jfp;
-    if (!m || !fp) return;
+    if (!m || !fp) {
+      // Not modelled: free a worker's bitmaps now.
+      if (art?.maps) for (const b of [art.maps.color, art.maps.surface, art.maps.bump, art.maps.holo]) if (b && isBitmap(b)) b.close();
+      return;
+    }
     this.panelComp[which]?.dispose();
     this.panelComp[which] = null;
     this.panelArt[which] = art;
     if (art) {
       const spec = this.input.spec;
       const baseColor = which === 'cover' ? spec.cover.material : (jacketSpec(spec).paperColor || '#f4f0e8');
-      const comp = composeSurface({
-        art: art.canvas, masks: art.masks, totalW: art.box.w, totalH: art.box.h, fp, base: baseColor,
-        anisotropy: this.cache.anisotropy, maxPx: this.cache.maxTextureSize, maxPixels: 80e6,
-      });
+      // Finished maps from a raster worker, or composite the art and masks here.
+      const comp = art.maps
+        ? compositeFromMaps(art.maps, this.cache.anisotropy)
+        : composeSurface({
+          art: art.canvas ?? null, masks: art.masks ?? {}, totalW: art.box.w, totalH: art.box.h, fp, base: baseColor,
+          anisotropy: this.cache.anisotropy, maxPx: this.cache.maxTextureSize, maxPixels: 80e6,
+        });
       // Map the panel texture onto its rectangle of the wrap's UV space.
       const full = this.wrapSize(which);
       const u0 = (art.box.x + full.o) / full.w, u1 = (art.box.x + art.box.w + full.o) / full.w;
       const v0 = 1 - (art.box.y + art.box.h + full.o) / full.h, v1 = 1 - (art.box.y + full.o) / full.h;
-      for (const t of [comp.color, comp.surface, comp.bump, comp.holo]) {
-        if (!t) continue;
-        t.repeat.set(1 / (u1 - u0), 1 / (v1 - v0));
-        t.offset.set(-u0 / (u1 - u0), -v0 / (v1 - v0));
-        t.wrapS = t.wrapT = ClampToEdgeWrapping;
-      }
+      for (const t of [comp.color, comp.surface, comp.bump, comp.holo]) if (t) placeTexture(t, u0, u1, v0, v1);
       this.panelComp[which] = comp;
     }
     const base = which === 'cover' ? this.cache.cover(this.textures, this.layout, this.input.spec.cover.finish, this.input.spec.cover.material) : null;
@@ -1000,14 +892,14 @@ export class BookMaterials {
   }
 
   /** Sharper art for page `index` (null: back to the base art). Returns true when the page is modelled. */
-  setPageArt(index: number, canvas: HTMLCanvasElement | null): boolean {
+  setPageArt(index: number, canvas: ArtSource | null): boolean {
     const L = this.layout;
     const mat = index < 2 * L.nTurn ? (index % 2 === 0 ? this.leafFront : this.leafBack)[Math.floor(index / 2)] : index === 2 * L.nTurn ? this.blockTop : null;
     if (!mat) return false;
     this.pageArt.get(index)?.dispose();
     this.pageArt.delete(index);
     if (canvas) {
-      const t = colorTexture(canvas, this.cache.anisotropy);
+      const t = colorTexture(canvas, this.cache.anisotropy, true);
       this.pageArt.set(index, t);
       mat.map = t;
     } else {

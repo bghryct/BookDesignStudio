@@ -15,7 +15,8 @@ import { Section, Row, NumberField, Slider, Select, Toggle, ColorField, TextInpu
 import { PATTERN_PARAMS, OVERPRINT_PARAMS, ORNAMENT_PARAMS } from '../../engine/generators';
 import { getFamilies } from '../../engine/fonts';
 import { threadOf, layoutText, contextForElement, crossesGutter } from '../../render/compile';
-import { importFiles } from '../importFiles';
+import { importFiles, pdfPageAsset } from '../importFiles';
+import { autoFlow } from '../../model/pageOps';
 import { parseSvgCached, svgMarkupFromDataUrl, svgPrims } from '../../render/svgImport';
 import { makePath } from '../../model/factory';
 import { MotifPanel } from './MotifPanel';
@@ -155,7 +156,14 @@ function FrameExtras({ e, set }: { e: TextElement; set: (p: Partial<Element>) =>
         <Toggle label="Column rule" checked={!!rule} onChange={(v) => set({ columnRule: v ? { weight: 0.5, color: '#2a2118' } : null } as Partial<Element>)} />
         <Toggle label="Ignore text wrap" checked={!!e.wrapIgnore} onChange={(v) => set({ wrapIgnore: v } as Partial<Element>)} />
         <Toggle label="Inset per side" checked={!!sides} onChange={(v) => set({ insetSides: v ? { top: e.inset, right: e.inset, bottom: e.inset, left: e.inset } : null } as Partial<Element>)} />
+        <Toggle label="Own baseline grid" checked={!!e.customGrid} onChange={(v) => set({ customGrid: v ? { increment: e.style.leading, offset: e.style.leading } : null, style: v ? { ...e.style, baselineGrid: true } : e.style } as Partial<Element>)} hint="A baseline grid for this frame only (sidebars, captions, a second measure), measured from the frame's top" />
       </div>
+      {e.customGrid && (
+        <Row>
+          <NumberField label="Grid increment" unit="pt" value={e.customGrid.increment} min={1} max={144} step={0.5} onChange={(v) => set({ customGrid: { ...e.customGrid!, increment: v } } as Partial<Element>)} />
+          <NumberField label="Grid offset" unit="pt" value={e.customGrid.offset} min={0} max={144} step={0.5} onChange={(v) => set({ customGrid: { ...e.customGrid!, offset: v } } as Partial<Element>)} />
+        </Row>
+      )}
       {rule && (
         <Row>
           <NumberField label="Rule weight" unit="pt" value={rule.weight} min={0.1} max={6} step={0.25} onChange={(v) => set({ columnRule: { ...rule, weight: v } } as Partial<Element>)} />
@@ -390,11 +398,12 @@ function TypeSpecific({ el, project }: { el: Element; project: Project }) {
       return (
         <Section title="Image" id="el-image">
           <Button className="w-full" onClick={() => fileRef.current?.click()}><Upload size={12} /> {e.assetId ? 'Replace image…' : 'Choose image…'}</Button>
-          <input ref={fileRef} type="file" accept="image/*" className="hidden" onChange={async (ev) => {
+          <input ref={fileRef} type="file" accept="image/*,.pdf,application/pdf" className="hidden" onChange={async (ev) => {
             const r = await importFiles(ev.target.files ? [...ev.target.files] : [], { replaceImageId: e.id });
             if (r.errors.length) s().notify(r.errors[0], 'error');
             ev.target.value = '';
           }} />
+          <PdfPageControls e={e} />
           <Segmented value={e.fit} options={[{ value: 'cover', label: 'Fill frame' }, { value: 'contain', label: 'Fit' }, { value: 'fill', label: 'Stretch' }]} onChange={(v) => set({ fit: v } as Partial<Element>)} />
           <Slider label="Zoom" value={e.zoom} min={0.2} max={4} onStart={begin} onChange={(v) => live({ zoom: v } as Partial<Element>)} />
           <Slider label="Offset X" value={e.offsetX} min={-1} max={1} onStart={begin} onChange={(v) => live({ offsetX: v } as Partial<Element>)} />
@@ -661,3 +670,44 @@ function TypeSpecific({ el, project }: { el: Element; project: Project }) {
 }
 
 export { textBlock };
+
+/** A placed PDF: which page shows, and setting the PDF's text as a story. */
+function PdfPageControls({ e }: { e: ImageElement }) {
+  const asset = useStore((st) => (e.assetId ? st.project.assets[e.assetId] : undefined));
+  const [busy, setBusy] = React.useState<string | null>(null);
+  const pdf = asset?.pdf;
+  if (!pdf) return null;
+  const bytes = async () => new Uint8Array(await (await fetch(pdf.src)).arrayBuffer());
+  const goTo = async (page: number) => {
+    const s = useStore.getState();
+    const name = asset!.name.replace(/ · p\. \d+$/, '');
+    // Another page of the same file: reuse its asset if it was placed before.
+    const found = Object.values(s.project.assets).find((a) => a.pdf && a.pdf.src === pdf.src && a.pdf.page === page);
+    setBusy(`Rendering page ${page}…`);
+    try {
+      const a = found ?? await pdfPageAsset(await bytes(), name, page, pdf.src);
+      if (!found) s.update((d) => { d.assets[a.id] = a; });
+      s.updateElement(e.id, { assetId: a.id } as Partial<ImageElement>);
+    } finally { setBusy(null); }
+  };
+  const flowText = async () => {
+    setBusy('Reading the PDF’s text…');
+    try {
+      const { pdfToStory } = await import('../../lib/pdfImport');
+      const r = await pdfToStory(await bytes(), (n, of) => setBusy(`Reading page ${n} of ${of}…`));
+      if (!r.text.trim()) { useStore.getState().notify('This PDF has no text layer (a scan?): there is nothing to set.', 'error'); return; }
+      const p = useStore.getState().project;
+      const n = autoFlow(r.text, { afterIndex: p.pages.length - 1, masterId: p.masters[0]?.id ?? null, startRecto: true });
+      useStore.getState().notify(`${r.paragraphs} paragraphs from ${r.pages} PDF pages flowed into ${n} new page${n === 1 ? '' : 's'}. Check tables, notes and columns by eye.`);
+    } finally { setBusy(null); }
+  };
+  return (
+    <div className="space-y-1.5 rounded border border-ink-700 p-2">
+      <Row>
+        <NumberField label={`PDF page (of ${pdf.pages})`} value={pdf.page} min={1} max={pdf.pages} decimals={0} onChange={(v) => { const n = Math.round(v); if (n !== pdf.page && n >= 1 && n <= pdf.pages) void goTo(n); }} />
+      </Row>
+      <Button className="w-full" onClick={() => void flowText()}>Set the PDF’s text in new pages</Button>
+      <Hint>{busy ?? 'Placed PDF pages stay vector (type and art) in the exported PDF; the canvas and 3D book show a preview.'}</Hint>
+    </div>
+  );
+}

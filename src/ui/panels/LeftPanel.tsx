@@ -15,6 +15,7 @@ import { importFiles } from '../importFiles';
 import { makeImage, makeSvg } from '../../model/factory';
 import { textBlock } from '../../engine/grid';
 import { SAMPLE_ESSAY } from '../../model/defaults';
+import { loadManuscript, MANUSCRIPT_ACCEPT } from '../manuscript';
 
 const TABS: { id: LeftTab; label: string }[] = [
   { id: 'pages', label: 'Pages' },
@@ -211,11 +212,27 @@ function FlowText({ onDone }: { onDone: () => void }) {
   const [text, setText] = useState('');
   const [master, setMaster] = useState(project.masters[0]?.id ?? '');
   const [recto, setRecto] = useState(true);
+  const [loaded, setLoaded] = useState<string | null>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
   return (
     <div className="mb-3 space-y-2 rounded-md border border-ink-700 bg-ink-800 p-2">
-      <Hint>Paste a manuscript. It is set in threaded frames on the text block of as many new pages as it needs.</Hint>
-      <TextInput multiline rows={6} value={text} onChange={setText} placeholder="Paste text — one paragraph per line, # for chapter headings" />
-      <Button variant="ghost" className="w-full" onClick={() => setText(SAMPLE_ESSAY)}>Use the sample essay</Button>
+      <Hint>Paste a manuscript or load a file (.txt, .md, .docx, or a PDF's text — Project Gutenberg texts are cleaned up). It is set in threaded frames on the text block of as many new pages as it needs.</Hint>
+      <input ref={fileRef} type="file" accept={MANUSCRIPT_ACCEPT} className="hidden" onChange={async (e) => {
+        const f = e.target.files?.[0];
+        e.target.value = '';
+        if (!f) return;
+        try {
+          setLoaded(`Reading ${f.name}…`);
+          const r = await loadManuscript(f, (project.paragraphStyles ?? []).map((p) => p.name), (msg) => setLoaded(msg));
+          setText(r.text);
+          setLoaded(`${f.name}: ${r.summary}.`);
+        } catch (err) { useStore.getState().notify(`${f.name}: ${(err as Error).message}`); }
+      }} />
+      <Button className="w-full" onClick={() => fileRef.current?.click()}><Upload size={12} /> Load .txt / .md / .docx / .pdf…</Button>
+      {loaded && <Hint>{loaded}</Hint>}
+      <TextInput multiline rows={6} value={text.length > 200000 ? text.slice(0, 200000) : text} onChange={setText} placeholder="Paste text — one paragraph per line, # for chapter headings" />
+      {text.length > 200000 && <Hint>{text.length.toLocaleString()} characters loaded (the box shows the first 200,000; editing it keeps only those).</Hint>}
+      <Button variant="ghost" className="w-full" onClick={() => { setText(SAMPLE_ESSAY); setLoaded(null); }}>Use the sample essay</Button>
       <Select label="Master" value={master} options={[{ value: '', label: 'None' }, ...project.masters.map((m) => ({ value: m.id, label: m.name }))]} onChange={setMaster} />
       <Toggle label="Start on a recto" checked={recto} onChange={setRecto} />
       <div className="flex gap-1">
@@ -348,7 +365,7 @@ function AssetsPanel() {
   return (
     <div className="p-2">
       <Button className="mb-2 w-full" onClick={() => input.current?.click()}><Upload size={13} /> Upload images, SVG or fonts</Button>
-      <input ref={input} type="file" multiple accept="image/*,.svg,.ttf,.otf,.woff,.woff2" className="hidden" onChange={async (e) => {
+      <input ref={input} type="file" multiple accept="image/*,.svg,.pdf,.ttf,.otf,.woff,.woff2,.docx,.txt,.md,.csv,.tsv" className="hidden" onChange={async (e) => {
         const res = await importFiles(e.target.files ? [...e.target.files] : []);
         if (res.errors.length) s().notify(res.errors[0], 'error');
         else if (res.messages.length) s().notify(res.messages.join(' '));

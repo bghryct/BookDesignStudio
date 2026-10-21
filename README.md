@@ -44,7 +44,7 @@ Van de Graaf, Tschichold 2:3:4:6, golden progression, Bringhurst proportion, Fib
 Every item can be moved, resized, rotated, flipped, stacked, locked, hidden and blended (multiply, screen, difference …), and snaps to columns, fields, baselines, margins, ruler guides and other items. **Rulers and guides** work on pages, master pages, the cover and the jacket: drag a guide out of a ruler, drag it back to delete it, or create a column/row guide grid from the Document panel (`⌘;` show/hide, `⌥⌘;` lock). **Spreads**: any item can cross the gutter (a photo, a headline, a brush drawing, a band of colour). It's drawn on both pages in the editor, the thumbnails, the 3D book and every export, and the two halves meet exactly at the fold. On the facing page it sits beneath that page's items, or above them. *Fill page*, *Fill spread* and *Span text* place an item in one click, and new brush layers span the whole spread. There's a pen tool with Bézier handles and a node editor, threaded text frames (click the red `+` overset port, then a frame), master pages with `{page}` `{title}` `{author}` `{page:roman}` tokens, drag-and-drop of images, SVG, fonts and text, and undo/redo.
 
 ### Typesetting (`src/engine/text/`, `src/engine/textLayout.ts`, `src/engine/fonts.ts`)
-One shaping engine (fontkit) measures with the same font files the browser renders, so the editor, the 3D textures and the PDF agree to the glyph.
+One shaping engine (fontkit) measures with the same font files the browser renders, so the editor, the 3D textures and the PDF agree to the glyph. [docs/TYPESETTING.md](docs/TYPESETTING.md) compares every core typesetting feature with InDesign's: what matches, what goes further, and what is still missing. [docs/STORY_FORMAT.md](docs/STORY_FORMAT.md) describes the story text format and which manuscript files to load.
 
 **Composition**
 - **Knuth–Plass** paragraph composer for justified *and* ragged text, with fitness classes, flagged-hyphen demerits and runt avoidance. A single-line (first-fit) composer is also available.
@@ -63,6 +63,7 @@ One shaping engine (fontkit) measures with the same font files the browser rende
   - capitalised words and the last word
   - discretionary hyphens (`{shy}`)
   - a book-wide exceptions dictionary (`ty-pog-ra-phy`)
+  - **hyphenate across columns** off: no hyphen on the last line of a column or frame
 
 **Kerning and spacing**
 - **Kerning modes**:
@@ -79,8 +80,10 @@ One shaping engine (fontkit) measures with the same font files the browser rende
 - **Rules and shading**: rules above and below (solid, dashed, dotted or double; column or text width; offsets and indents). Shading has padding, corner radius and a border.
 - **Lists**: bullets and numbering (1, a, i, I), nesting, multi-level numbers (2.1, 2.1.1), start-at and continue, markers aligned on the point. Type `- `, `• `, `1. ` or `a) ` to start a list item.
 - **Tabs**: left, centre, right and decimal stops with leaders that line up from line to line; default tab interval; right-indent tab (`{rtab}`) for contents pages; indent to here (`{here}`).
-- **Keeps**: keep with next, keep lines together, widows, orphans, start in the next column or frame, and column / frame breaks (`{col}`, `{frame}`).
-- **Baseline grid**: every line, or only the first line of each paragraph.
+- **Keeps**: keep with next, keep with previous, keep lines together, widows, orphans, start in the next column, frame, odd page or even page, and breaks on a line of their own (`{col}`, `{frame}`, `{odd}`, `{even}`).
+- **Split column**: a paragraph set in two to six balanced sub-columns inside its column (glossaries, lists), with its own gap (`[{split:3}]`).
+- **Baseline grid**: every line, or only the first line of each paragraph. A frame can have its own grid (increment and offset from its top) for sidebars and captions.
+- **Auto leading**: one click sets 120% of the size.
 - **Footnotes** (`{fn:…}`) are set at the foot of the column that holds the reference, under a separator rule. Numbering can be 1, i, a or * † ‡; a line whose note won't fit moves on with it. **Endnotes** (`{en:…}`) are collected at the end of the story under a heading.
 - **Graphics in the text flow**: `{img:…}` sets an image inline in the line (it moves with the text), or on a line of its own as an anchored figure the width you give it (`w:100%` = the column), with room made above it. Pick them from the story editor's Insert menu.
 
@@ -94,7 +97,8 @@ One shaping engine (fontkit) measures with the same font files the browser rende
   - typeface, absolute or relative size, weight, italic
   - tracking and colour
   - case, superscript and subscript (true `sups`/`subs` when the font has them), baseline shift
-  - underline, strikethrough and highlight
+  - underline (solid, double, dashed, dotted or wavy, with weight, offset and colour), strikethrough and highlight
+  - ruby / furigana above a base: `{ruby:東京|とうきょう}`
   - horizontal and vertical scale, skew, character rotation, outline stroke
   - no-break, hyphenation language and OpenType features
 
@@ -104,7 +108,7 @@ One shaping engine (fontkit) measures with the same font files the browser rende
 - First-baseline options (cap height, ascent, x-height, leading, fixed) and insets per side.
 - **Fit the frame to its text**.
 - **Text wrap** around any item: its box, its shape, or jumping it, on both sides, the larger side, left or right, with an offset.
-- Threads across pages. Running heads with `{chapter}`, `{title}` and `{page:roman}`.
+- Threads across pages. Running heads with `{chapter}`, `{title}` and `{page:roman}`; also `{lastpage}` and `{date}`.
 - **Type on a path**: any path can carry a line of type that follows its curves, positioned along the path, on or below it.
 
 **Tables** (`src/model/table.ts`, `src/render/table.ts`)
@@ -122,10 +126,33 @@ One shaping engine (fontkit) measures with the same font files the browser rende
 - **Table and cell styles** with a full property editor that updates every table using them. Presets include Tschichold book rules, Scotch rules, Swiss grid, ledger zebra, full grid, tabular without rules, and a grand-total cell style.
 - **Editing**: the table tool, CSV/TSV drop and paste, Tab / ⇧Tab between cells (a new row at the end), cell ranges, copy and paste as tab-separated data, and dragging column and row borders.
 
+**Long documents**
+- **Cross-references**: name a place with `{anchor:fig-3}`, then `{xref:fig-3}` prints the page it lands on and `{xreftext:fig-3}` the text of its paragraph. They update as the book reflows; the story editor lists the book's anchors to insert.
+- **Conditional text**: `{if:Print}…{/if}` (any name; nests, may span paragraphs). Document › Conditional text shows or hides each condition for the whole book, so one story can make several editions.
+
+**Manuscripts** (`src/lib/docx.ts`, `src/lib/plainText.ts`)
+- **Word (.docx)**:
+  - Brings in headings, italic, bold, small caps, super- and subscript, underline and strikethrough.
+  - Footnotes and endnotes become `{fn:…}` / `{en:…}`.
+  - Also keeps bullet and numbered lists, tabs, line and page breaks, and centred or right-aligned paragraphs.
+  - Word style names that match a paragraph style in the book are applied.
+- **Plain text (.txt) and Markdown (.md)**:
+  - Hard-wrapped text is joined into paragraphs. Verse and letters keep their line breaks, and indented blocks become extracts.
+  - CHAPTER / BOOK / PART lines become headings, and `_underscores_` become italics.
+  - Straight quotes become typographer's quotes, and `--` becomes an em dash.
+  - Project Gutenberg books lose their licence header and footer, and a contents list stays a list.
+- **PDF**:
+  - A PDF dropped on a page (or picked with File › Import) is placed as a graphic. The Image panel chooses which page shows.
+  - The exported PDF embeds the original page, so its type and art stay vector; the canvas and the 3D book show a preview.
+  - A PDF's *text* can be set as a story with Pages › Flow text › Load, or with the Image panel's button. Paragraphs are rebuilt from the layout, running heads and folios are dropped, hyphenated line ends are rejoined, and italic and bold are kept.
+  - PDFs are read with Mozilla's pdf.js, loaded only when a PDF is opened.
+- **Where to load them**: drop the file on a page, use File › Import, or use Pages › Flow text › Load. A long manuscript flows into as many new pages as it needs. *Moby-Dick* (1.2 million characters) flows into about 800 pages in a second, and an edit re-sets the whole novel in about a tenth of a second.
+
 **Tools**
+- **Hidden characters** (Document panel or ⌥⌘I): word spaces as dots, no-break spaces as rings, ¶ at paragraph ends, ¬ at forced line breaks, # at the end of the story.
 - The **story editor** highlights markup and has:
   - character and paragraph formatting popovers
-  - an Insert menu for breaks, spaces, tabs, footnotes, tokens and typographic characters
+  - an Insert menu for breaks, spaces, tabs, footnotes, anchors and cross-references, conditional text, ruby, tokens and typographic characters
   - ⇧↵ for a line break, ⇥ for a tab, ⌥←/→ for kerning
 - **Generate index** (Document panel): mark terms with `{ix:term}` or `{ix:term!subterm}`. The index lists each term with the pages it actually lands on, folds consecutive pages into ranges, groups terms by letter and sets them in two columns.
 - **Generate contents page** (Document panel): finds chapter titles and `#`/`##` headings, including those inside threaded stories, records the page each one is actually set on, and sets the contents with dot leaders. Run it again to refresh the page numbers.
@@ -180,6 +207,10 @@ three.js with PBR materials: cloth weave, buckram, leather grain, matte / gloss 
 - **Backdrops**: studio sweep, solid, gradient, oak desk, linen, concrete, paper, marble, felt or transparent, with your own colours and an optional ground with contact shadow.
 - **Camera**: lens from 15° to 75° field of view (shown as 35 mm equivalent), and standing, angled, lying or open poses.
 - **Stills and video in any orientation**: landscape 3:2, wide 16:9, portrait 4:5, portrait 1:√2, square and 9:16 story. The framing adapts to the aspect ratio.
+- **Sharp textures, off the main thread**:
+  - Close-ups redraw the visible surfaces at the resolution the camera needs. Cover finishes are included, and a Quality setting chooses between Standard, High and Ultra.
+  - The drawing runs in a pool of web workers on OffscreenCanvas (`src/render/rasterPool.ts`, `rasterWorker.ts`), so orbiting and zooming don't stall the page.
+  - If workers aren't available, the textures are drawn on the main thread as before.
 
 ### Export
 - **Print PDF** (pdf-lib):
@@ -201,7 +232,7 @@ three.js with PBR materials: cloth weave, buckram, leather grain, matte / gloss 
 Current Chrome, Edge, Safari and Firefox on desktop. MP4/WebM encoding uses WebCodecs where available (Chrome, Edge, Safari 16.4+, Firefox 130+), otherwise MediaRecorder; GIF works everywhere. A pen tablet or Apple Pencil gives real pressure for the brushes.
 
 ## Keyboard
-`V` select · `A` direct selection · `T` text · `R` rectangle · `E` ellipse · `L` rule · `P` pen · `B` brush · `X` eraser · `K` pattern · `O` ornament · `G` gradient · `D` die-cut · `M` dimension · `H`/Space hand · `Z` zoom · `[ ]` brush size · `⌘Z / ⇧⌘Z` undo/redo · `⌘D` duplicate · `⌘0` fit · `⌘= / ⌘-` zoom · `⌘] / ⌘[` arrange · arrows nudge (⇧ ×10).
+`V` select · `A` direct selection · `T` text · `R` rectangle · `E` ellipse · `L` rule · `P` pen · `B` brush · `X` eraser · `K` pattern · `O` ornament · `G` gradient · `D` die-cut · `M` dimension · `H`/Space hand · `Z` zoom · `[ ]` brush size · `⌘Z / ⇧⌘Z` undo/redo · `⌘D` duplicate · `⌘0` fit · `⌘= / ⌘-` zoom · `⌘] / ⌘[` arrange · `⌥⌘I` hidden characters · arrows nudge (⇧ ×10).
 
 ## Licence
 The application code is licensed under the Apache License 2.0 (see `LICENSE`).

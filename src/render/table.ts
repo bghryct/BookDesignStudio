@@ -28,7 +28,7 @@ export interface CellBox {
   x: number; y: number; w: number; h: number;
   /** Text did not fit (fixed or clipped rows). */
   overflow: boolean;
-  /** The rest of a merged cell whose first row (and text) sits in an earlier frame. */
+  /** The rest of a merged cell whose first row sits in an earlier frame (its story runs on here). */
   ghost?: boolean;
 }
 
@@ -55,6 +55,8 @@ export interface TableLayout {
   hasFr: boolean;
   /** Rows are left over after this, the last frame. */
   overset: boolean;
+  /** In this frame the table stopped at rows too tall for a whole frame (and not allowed to break). */
+  stuck: { r0: number; r1: number } | null;
   /** Position of this frame in its thread. */
   frameIndex: number;
   frameCount: number;
@@ -113,6 +115,10 @@ function tableIndex(project: Project): TableIndex {
   if (idx) return idx;
   const byId = new Map<string, TableFrameRef>();
   project.pages.forEach((pg, pi) => { for (const e of pg.elements) if (e.type === 'table') byId.set(e.id, { el: e, pageIndex: pi, surface: `page:${pg.id}` }); });
+  for (const m of project.masters) {
+    for (const e of m.left) if (e.type === 'table') byId.set(e.id, { el: e, pageIndex: null, surface: `master:${m.id}:left` });
+    for (const e of m.right) if (e.type === 'table') byId.set(e.id, { el: e, pageIndex: null, surface: `master:${m.id}:right` });
+  }
   for (const e of project.cover.elements) if (e.type === 'table') byId.set(e.id, { el: e, pageIndex: null, surface: 'cover' });
   for (const e of project.jacket?.elements ?? []) if (e.type === 'table') byId.set(e.id, { el: e, pageIndex: null, surface: 'jacket' });
   const prev = new Map<string, string>();
@@ -122,7 +128,7 @@ function tableIndex(project: Project): TableIndex {
   return idx;
 }
 
-/** The thread a table frame belongs to (head first, cycle-safe); null when not on a page / cover. */
+/** The thread a table frame belongs to (head first, cycle-safe); null when the frame is not in the project. */
 export function tableThreadOf(project: Project, id: string): TableThread | null {
   const { byId, prev } = tableIndex(project);
   if (!byId.has(id)) return null;
@@ -192,7 +198,7 @@ export function compileTable(el: TableElement, ctx: TableContext): Prim[] {
 function emptyLayout(el: TableElement): TableLayout {
   return {
     colX: [0, el.w], colW: [el.w], rowY: [0], rowMap: [], rowPiece: [], rowH: [], contentMin: [], width: el.w, height: 0,
-    naturalWidth: el.w, naturalHeight: 0, hasFr: true, overset: false, frameIndex: 0, frameCount: 1, cells: [], prims: [],
+    naturalWidth: el.w, naturalHeight: 0, hasFr: true, overset: false, stuck: null, frameIndex: 0, frameCount: 1, cells: [], prims: [],
   };
 }
 
@@ -480,15 +486,18 @@ const innerWOf = (M: Measure, rc: ResolvedCell) => Math.max(1, M.colX[rc.a.c + r
 function computeSingle(el: TableElement, ctx: TableContext): TableLayout {
   const M = measureTable(el, ctx, el.fillHeight);
   if (!M) return emptyLayout(el);
-  const [slice] = paginate(M, [el.autoHeight ? Infinity : el.h]);
-  return renderSlice(M, slice, 0, 1);
+  const heights = [el.autoHeight ? Infinity : el.h];
+  const slices = paginate(M, heights);
+  return renderSlice(M, slices[0], 0, 1, fitMergeParts(M, slices, heights));
 }
 
 function computeThread(head: TableElement, frames: TableElement[], ctx: TableContext): TableLayout[] {
   const M = measureTable(head, ctx, false);
   if (!M) return frames.map(emptyLayout);
-  const slices = paginate(M, frames.map((f) => Math.max(1, f.h)));
-  return slices.map((sl, i) => renderSlice(M, sl, i, frames.length));
+  const heights = frames.map((f) => Math.max(1, f.h));
+  const slices = paginate(M, heights);
+  const parts = fitMergeParts(M, slices, heights);
+  return slices.map((sl, i) => renderSlice(M, sl, i, frames.length, parts));
 }
 
 function measureTable(el: TableElement, ctx: TableContext, fill: boolean): Measure | null {
@@ -599,15 +608,16 @@ function measureTable(el: TableElement, ctx: TableContext, fill: boolean): Measu
     const h = Math.max(contentMin[r], 2);
     return row.mode === 'min' ? Math.max(h, row.h) : h;
   });
-  // Merged rows: the last growable row of the span takes up any shortfall.
+  // Merged rows: the growable rows of the span share any shortfall evenly (so a tall merged
+  // group can still be dealt out over frames row by row).
   for (const rc of cells) {
     if (rc.a.rs < 2) continue;
     const need = demandH(rc);
     const have = rowH.slice(rc.a.r, rc.a.r + rc.a.rs).reduce((s, v) => s + v, 0);
     if (need <= have + 0.01) continue;
-    let target = -1;
-    for (let r = rc.a.r + rc.a.rs - 1; r >= rc.a.r; r--) if (el.rows[r].mode !== 'fixed') { target = r; break; }
-    if (target >= 0) rowH[target] += need - have;
+    const grow: number[] = [];
+    for (let r = rc.a.r; r < rc.a.r + rc.a.rs; r++) if (el.rows[r].mode !== 'fixed') grow.push(r);
+    for (const r of grow) rowH[r] += (need - have) / grow.length;
   }
   const naturalHeight = rowH.reduce((s, v) => s + v, 0);
   if (fill && naturalHeight < el.h - 0.01) {
@@ -653,7 +663,7 @@ interface DisplayRow {
   piece: number;
   cuts?: number[];
 }
-interface Slice { rows: DisplayRow[]; overset: boolean }
+interface Slice { rows: DisplayRow[]; overset: boolean; /** Rows too tall for a whole frame that may not break: the table stops here. */ stuck?: { r0: number; r1: number } | null }
 
 /** Height still needed by a broken row after pieces of the given heights. */
 function restHeight(M: Measure, r: number, cuts: number[]): number {
@@ -678,27 +688,31 @@ function paginate(M: Measure, heights: number[]): Slice[] {
   const { el, rowH, R } = M;
   const hr = el.headerRows, fr = el.footerRows, bodyEnd = R - fr;
   const sum = (a: number, b: number) => { let t = 0; for (let r = a; r < b; r++) t += rowH[r]; return t; };
-  const ftrH = sum(bodyEnd, R);
+  const ftrH = sum(bodyEnd, R), hdrH = sum(0, hr);
   const repeatHeader = el.repeatHeader !== false, repeatFooter = el.repeatFooter !== false;
   const midFooter = fr > 0 && repeatFooter;
   const lastFooter = fr > 0 && (!repeatFooter || !el.skipLastFooter);
+  const showHeader = (i: number) => hr > 0 && (i === 0 ? !el.skipFirstHeader : repeatHeader);
+  /** Body room of frame `i` when it is still empty (−∞ when there is no such frame). */
+  const freshBody = (i: number) => (heights[i] == null ? -Infinity : heights[i] - (showHeader(i) ? hdrH : 0) - (midFooter ? ftrH : 0));
   const groupEnd = (r: number) => { let e = r + 1; while (e < bodyEnd && M.joinedAbove[e]) e++; return e; };
   const slices: Slice[] = [];
   let cur = hr;
   let carry: { r: number; cuts: number[] } | null = null;
   let done = cur >= bodyEnd;
+  let stuck: { r0: number; r1: number } | null = null;
   for (let i = 0; i < heights.length; i++) {
     const H = heights[i];
     const rows: DisplayRow[] = [];
-    if (done && i > 0) { slices.push({ rows, overset: false }); continue; }
+    if ((done || stuck) && i > 0) { slices.push({ rows, overset: false }); continue; }
     let y = 0;
-    if (hr > 0 && (i === 0 ? !el.skipFirstHeader : repeatHeader)) {
-      for (let r = 0; r < hr; r++) { rows.push({ r, h: rowH[r], kind: 'header', piece: -1 }); y += rowH[r]; }
-    }
+    if (showHeader(i)) for (let r = 0; r < hr; r++) { rows.push({ r, h: rowH[r], kind: 'header', piece: -1 }); y += rowH[r]; }
     const room = (final: boolean) => H - ((final ? lastFooter : midFooter) ? ftrH : 0) - y;
     let placed = 0;
+    let stuckHere: { r0: number; r1: number } | null = null;
     while (!done) {
       if (carry) {
+        // A row broken in the previous frame runs on.
         const r = carry.r;
         const rest = restHeight(M, r, carry.cuts);
         if (rest <= room(r === bodyEnd - 1) + 0.01) {
@@ -707,12 +721,11 @@ function paginate(M: Measure, heights: number[]): Slice[] {
           continue;
         }
         const h = room(false);
-        if (h >= M.minPiece[r] || placed === 0) {
-          const ph = Math.max(h, M.minPiece[r]);
-          carry.cuts.push(ph);
-          rows.push({ r, h: ph, kind: 'body', piece: carry.cuts.length - 1, cuts: [...carry.cuts] });
-          y += ph; placed++;
-        }
+        if (h >= M.minPiece[r]) {
+          carry.cuts.push(h);
+          rows.push({ r, h, kind: 'body', piece: carry.cuts.length - 1, cuts: [...carry.cuts] });
+          y += h; placed++;
+        } else if (placed === 0) stuckHere = { r0: r, r1: r };
         break;
       }
       const g = groupEnd(cur);
@@ -722,36 +735,92 @@ function paginate(M: Measure, heights: number[]): Slice[] {
         placed += g - cur; cur = g; done = cur >= bodyEnd;
         continue;
       }
+      // It does not fit what is left of this frame: move it whole when a fresh frame would hold it.
+      if (placed > 0 && (heights[i + 1] == null || gh <= freshBody(i + 1) + 0.01)) break;
+      if (placed > 0 && !el.breakRows) break;
+      // Taller than a whole frame (or this frame is still empty).
       const h = room(false);
-      // Break only a row that would not fit a fresh frame either (or one that starts a frame).
-      const fresh = (heights[i + 1] ?? H) - (hr > 0 && repeatHeader ? sum(0, hr) : 0) - (midFooter ? ftrH : 0);
-      if (el.breakRows && g === cur + 1 && M.breakable[cur] && h >= M.minPiece[cur] && (placed === 0 || gh > fresh + 0.01)) {
-        carry = { r: cur, cuts: [h] };
-        rows.push({ r: cur, h, kind: 'body', piece: 0, cuts: [h] });
-        y += h; placed++;
+      if (!el.breakRows) { stuckHere = { r0: cur, r1: g - 1 }; break; }
+      if (g === cur + 1) {
+        if (M.breakable[cur] && h >= M.minPiece[cur]) {
+          carry = { r: cur, cuts: [h] };
+          rows.push({ r: cur, h, kind: 'body', piece: 0, cuts: [h] });
+          y += h; placed++;
+        } else if (placed === 0) stuckHere = { r0: cur, r1: cur };
         break;
       }
-      if (placed === 0) {
-        // Too tall for any frame: set it anyway (it overruns the frame) so the table moves on.
-        for (let r = cur; r < g; r++) { rows.push({ r, h: rowH[r], kind: 'body', piece: -1 }); y += rowH[r]; }
-        placed += g - cur; cur = g; done = cur >= bodyEnd;
-        if (!done) break;
-        continue;
-      }
+      // Rows joined by a merged cell: as many whole rows as fit here, the rest in the next frame
+      // (the merged cell's story runs on from frame to frame).
+      let r = cur;
+      while (r < g && rowH[r] <= room(false) + 0.01) { rows.push({ r, h: rowH[r], kind: 'body', piece: -1 }); y += rowH[r]; r++; placed++; }
+      if (r === cur && placed === 0) stuckHere = { r0: cur, r1: g - 1 };
+      cur = r;
       break;
     }
+    if (stuckHere) stuck = stuckHere;
     if (fr > 0 && (done && !carry ? lastFooter : midFooter)) for (let r = bodyEnd; r < R; r++) rows.push({ r, h: rowH[r], kind: 'footer', piece: -1 });
-    slices.push({ rows, overset: false });
+    slices.push({ rows, overset: false, stuck: stuckHere });
   }
-  if ((!done || carry) && slices.length) slices[slices.length - 1].overset = true;
+  if ((!done || carry || stuck) && slices.length) slices[slices.length - 1].overset = true;
   return slices;
+}
+
+/** Text frame heights of a split merged cell's parts (padding only at its real top and foot), and this frame's part. */
+function partFrames(rc: ResolvedCell, split: number[], frameIndex: number): { inner: number[]; k: number } {
+  const shown = split.map((ph, i) => ({ ph, i })).filter((q) => q.ph > 0);
+  const n = shown.length;
+  const inner = shown.map((q, j) => Math.max(1, q.ph - (j === 0 ? rc.pad.t : 0) - (j === n - 1 ? rc.pad.b : 0)));
+  return { inner, k: shown.findIndex((q) => q.i === frameIndex) };
+}
+
+/**
+ * Split merged cells whose story needs a little more room in its last part than the rows give
+ * (lines do not divide exactly at a frame's foot): the part's last row grows when the frame allows.
+ */
+function fitMergeParts(M: Measure, slices: Slice[], heights: number[]): Map<ResolvedCell, number[]> {
+  const parts = mergeParts(M, slices);
+  for (const [rc, split] of parts) {
+    if (rotated(rc)) continue;
+    const shown = split.map((ph, i) => ({ ph, i })).filter((q) => q.ph > 0);
+    const last = shown[shown.length - 1];
+    const { inner } = partFrames(rc, split, last.i);
+    inner[inner.length - 1] = BIG;
+    const lays = setTextFrames(rc.text, rc.style, innerWOf(M, rc), inner, M.env);
+    const tail = lays[lays.length - 1];
+    const need = (tail && tail.baselines.length ? measureLayout(tail, rc.style).height : 0) + rc.pad.b;
+    const extra = need - last.ph;
+    if (extra <= 0.01) continue;
+    const sl = slices[last.i];
+    const used = sl.rows.reduce((h, d) => h + d.h, 0);
+    if (used + extra > (heights[last.i] ?? Infinity) + 0.01) continue;
+    let j = -1;
+    sl.rows.forEach((d, idx) => { if (d.kind === 'body' && d.r >= rc.a.r && d.r < rc.a.r + rc.a.rs) j = idx; });
+    if (j < 0) continue;
+    sl.rows[j] = { ...sl.rows[j], h: sl.rows[j].h + extra };
+    split[last.i] += extra;
+  }
+  return parts;
+}
+
+/**
+ * Merged cells whose rows were dealt out over several frames: the height of the cell's part in
+ * each frame (0 where it does not appear). Their stories run on from part to part.
+ */
+function mergeParts(M: Measure, slices: Slice[]): Map<ResolvedCell, number[]> {
+  const out = new Map<ResolvedCell, number[]>();
+  for (const rc of M.cells) {
+    if (rc.a.rs < 2) continue;
+    const parts = slices.map((sl) => sl.rows.reduce((h, d) => h + (d.kind === 'body' && d.r >= rc.a.r && d.r < rc.a.r + rc.a.rs ? d.h : 0), 0));
+    if (parts.filter((h) => h > 0).length > 1) out.set(rc, parts);
+  }
+  return out;
 }
 
 /* -------------------------------------------------------------------------- */
 /* One frame's slice → primitives                                              */
 /* -------------------------------------------------------------------------- */
 
-function renderSlice(M: Measure, slice: Slice, frameIndex: number, frameCount: number): TableLayout {
+function renderSlice(M: Measure, slice: Slice, frameIndex: number, frameCount: number, parts: Map<ResolvedCell, number[]>): TableLayout {
   const { C, colX, cells, byKey, env } = M;
   const rows = slice.rows;
   const N = rows.length;
@@ -790,9 +859,20 @@ function renderSlice(M: Measure, slice: Slice, frameIndex: number, frameCount: n
     const box: CellBox = { r, c, rs: d1 - d0 + 1, cs, x, y, w, h, overflow: false };
     if (ghost) box.ghost = true;
     boxes.push(box);
-    if (ghost) continue;
     const iw = Math.max(1, w - rc.pad.l - rc.pad.r), ih = Math.max(1, h - rc.pad.t - rc.pad.b);
     const x0 = x + rc.pad.l, y0 = y + rc.pad.t;
+    const split = parts.get(rc);
+    if (split && !rotated(rc)) {
+      // A merged cell dealt over several frames: its story runs on through its parts.
+      const { inner, k } = partFrames(rc, split, frameIndex);
+      if (k >= 0) {
+        const lays = setTextFrames(rc.text, rc.style, iw, inner, env);
+        if (lays[k]) placeRuns(rc, lays[k], x0, k === 0 ? y0 : y, iw);
+        if (k === inner.length - 1) box.overflow = !!lays[k]?.overflow;
+      }
+      continue;
+    }
+    if (ghost) continue;
     if (piece >= 0) {
       // A piece of a row broken across frames: the story runs on from piece to piece.
       const cuts = rows[d0].cuts ?? [h];
@@ -865,7 +945,7 @@ function renderSlice(M: Measure, slice: Slice, frameIndex: number, frameCount: n
   return {
     colX, colW: M.colW, rowY, rowMap: rows.map((d) => d.r), rowPiece: rows.map((d) => d.piece), rowH: M.rowH, contentMin: M.contentMin,
     width: colX[C], height: rowY[N], naturalWidth: M.naturalWidth, naturalHeight: M.naturalHeight, hasFr: M.hasFr,
-    overset: slice.overset, frameIndex, frameCount, cells: boxes, prims,
+    overset: slice.overset, stuck: slice.stuck ?? null, frameIndex, frameCount, cells: boxes, prims,
   };
 }
 

@@ -94,7 +94,7 @@ export interface TextRun {
   /** Outline the glyphs (drawn over the fill). */
   stroke?: { color: string; width: number };
   /** Layout-only: underline / strike / highlight, drawn by the text frame as rules. */
-  deco?: { u?: { w: number; o: number; c: string }; s?: { w: number; c: string }; hl?: string };
+  deco?: { u?: { w: number; o: number; c: string; k?: 'double' | 'dashed' | 'dotted' | 'wavy' }; s?: { w: number; c: string }; hl?: string; ruby?: { t: string; s: number; w: number } };
   /** Measured advance width of the run (pt) — used to clip / stretch in back-ends. */
   width: number;
   dir?: 'ltr' | 'rtl';

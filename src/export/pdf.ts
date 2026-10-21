@@ -11,7 +11,7 @@
  *  • Die-cuts as a “CutContour” spot colour; foil / deboss / spot-gloss artwork on named spots.
  */
 import {
-  PDFDocument, PDFPage, PDFOperator, PDFOperatorNames as Op, PDFName, PDFNumber, PDFArray, PDFDict, PDFRef, PDFFont, StandardFonts,
+  PDFDocument, PDFPage, PDFOperator, type PDFEmbeddedPage, PDFOperatorNames as Op, PDFName, PDFNumber, PDFArray, PDFDict, PDFRef, PDFFont, StandardFonts,
   pushGraphicsState, popGraphicsState, concatTransformationMatrix, moveTo, lineTo, appendBezierCurve, closePath, fill, stroke,
   fillAndStroke, endPath, setFillingRgbColor, setFillingCmykColor, setStrokingRgbColor, setStrokingCmykColor, setLineWidth,
   setDashPattern, setLineCap, setLineJoin, setGraphicsState, drawObject, setCharacterSpacing, LineCapStyle, LineJoinStyle, cmyk, rgb,
@@ -468,6 +468,26 @@ async function emitImage(w: PageWriter, href: string, x: number, y: number, widt
   if (grayscale) {
     return emitRaster(w, [{ t: 'image', href, x, y, w: width, h: height, clip: clipRect, filter: 'grayscale' }], clipRect ?? { x, y, w: width, h: height }, alpha, blend, st);
   }
+  // A placed PDF page goes in as the original page: vector type and art, not the preview.
+  const pdfSrc = assetId ? w.project.assets[assetId]?.pdf : undefined;
+  if (pdfSrc) {
+    try {
+      const ep = await embeddedPdfPage(w, pdfSrc);
+      w.push(pushGraphicsState());
+      const g = w.gs(alpha, blend, false);
+      if (g) w.push(setGraphicsState(g));
+      if (clipRect) {
+        w.push(moveTo(clipRect.x, clipRect.y), lineTo(clipRect.x + clipRect.w, clipRect.y), lineTo(clipRect.x + clipRect.w, clipRect.y + clipRect.h), lineTo(clipRect.x, clipRect.y + clipRect.h), closePath());
+        w.push(PDFOperator.of(Op.ClipNonZero), endPath());
+      }
+      const name = w.page.node.newXObject('EP', ep.ref);
+      // The page paints its own space y-up from its lower-left corner: flip it into the box.
+      w.push(concatTransformationMatrix(width / ep.width, 0, 0, -height / ep.height, x, y + height), drawObject(name), popGraphicsState());
+      return;
+    } catch {
+      // A PDF pdf-lib cannot read falls back to the raster preview.
+    }
+  }
   const key = assetId ?? href.slice(0, 120) + href.length;
   let img = w.images.get(key);
   if (!img) {
@@ -488,6 +508,21 @@ async function emitImage(w: PageWriter, href: string, x: number, y: number, widt
   }
   drawImageXObject(w, img, x, y, width, height);
   w.push(popGraphicsState());
+}
+
+/** Embedded PDF pages, one per source page per export. */
+const embeddedPages = new WeakMap<PDFDocument, Map<string, PDFEmbeddedPage>>();
+async function embeddedPdfPage(w: PageWriter, pdf: NonNullable<Project['assets'][string]['pdf']>): Promise<PDFEmbeddedPage> {
+  let m = embeddedPages.get(w.doc);
+  if (!m) { m = new Map(); embeddedPages.set(w.doc, m); }
+  const key = `${pdf.src.length}:${pdf.src.slice(-64)}#${pdf.page}`;
+  let ep = m.get(key);
+  if (!ep) {
+    const { bytes } = await dataUrlBytes(pdf.src);
+    [ep] = await w.doc.embedPdf(bytes, [pdf.page - 1]);
+    m.set(key, ep);
+  }
+  return ep;
 }
 
 function rasterizeHref(href: string, width: number, height: number, dpi: number): HTMLCanvasElement {

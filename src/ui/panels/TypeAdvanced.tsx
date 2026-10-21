@@ -105,6 +105,7 @@ export function JustificationSection({ st, set, begin }: P) {
             <NumberField label="Hyphenation zone" unit="pt" value={st.hyphenZone ?? 0} min={0} max={72} step={1} decimals={0} onChange={(v) => set((d) => { d.hyphenZone = v; })} hint="Ragged text: only break a word when the line would end this far short" />
           </Row>
           <Toggle label="Hyphenate capitalised words" checked={st.hyphenateCaps !== false} onChange={(v) => set((d) => { d.hyphenateCaps = v; })} hint="Off keeps names and sentence openings whole" />
+          <Toggle label="Hyphenate across columns" checked={st.hyphenateAcrossColumns !== false} onChange={(v) => set((d) => { d.hyphenateAcrossColumns = v; })} hint="Off: the last line of a column or frame never ends in a hyphen — the reader need not carry half a word over a column or page turn" />
           <Toggle label="Hyphenate the last word" checked={st.hyphenateLastWord !== false} onChange={(v) => set((d) => { d.hyphenateLastWord = v; })} />
         </>
       )}
@@ -125,10 +126,15 @@ export function KeepsSection({ st, set }: P) {
         <NumberField label="Orphans" unit="lines" value={st.orphans ?? 1} min={1} max={5} decimals={0} onChange={(v) => set((d) => { d.orphans = Math.round(v); })} hint="At least this many lines at the foot of a column" />
       </Row>
       <Toggle label="Keep all lines together" checked={!!st.keepTogether} onChange={(v) => set((d) => { d.keepTogether = v; })} />
+      <Toggle label="Keep with previous" checked={!!st.keepWithPrevious} onChange={(v) => set((d) => { d.keepWithPrevious = v; })} hint="The first line stays in the same column as the end of the paragraph before (captions under figures, a line after a head)" />
       <Toggle label="Span all columns" checked={!!st.spanColumns} onChange={(v) => set((d) => { d.spanColumns = v; })} hint="Heads at the top of a multi-column frame run across all its columns" />
-      <Select label="Start paragraph" value={st.startOn ?? 'anywhere'} options={[{ value: 'anywhere', label: 'Anywhere' }, { value: 'column', label: 'In the next column' }, { value: 'frame', label: 'In the next frame / page' }]} onChange={(v) => set((d) => { d.startOn = v as TextStyle['startOn']; })} />
+      <Row>
+        <NumberField label="Split column" unit="cols" value={st.splitColumns ?? 1} min={1} max={6} decimals={0} onChange={(v) => set((d) => { d.splitColumns = Math.round(v); })} hint="Set paragraphs in balanced sub-columns inside their column (lists, glossaries). Per paragraph: [{split:3}]" />
+        <NumberField label="Split gap" unit="pt" value={st.splitGap ?? Math.max(6, st.fontSize)} min={0} max={72} step={1} onChange={(v) => set((d) => { d.splitGap = v; })} />
+      </Row>
+      <Select label="Start paragraph" value={st.startOn ?? 'anywhere'} options={[{ value: 'anywhere', label: 'Anywhere' }, { value: 'column', label: 'In the next column' }, { value: 'frame', label: 'In the next frame / page' }, { value: 'odd', label: 'On the next odd page' }, { value: 'even', label: 'On the next even page' }]} onChange={(v) => set((d) => { d.startOn = v as TextStyle['startOn']; })} />
       {st.baselineGrid && <Segmented value={st.gridAlign ?? 'all'} onChange={(v) => set((d) => { d.gridAlign = v; })} options={[{ value: 'all', label: 'Every line on the grid' }, { value: 'first', label: 'First line only' }]} />}
-      <Hint>In a story, a line holding only <code>{'{col}'}</code> or <code>{'{frame}'}</code> breaks to the next column or frame.</Hint>
+      <Hint>In a story, a line holding only <code>{'{col}'}</code> or <code>{'{frame}'}</code> breaks to the next column or frame; <code>{'{odd}'}</code> / <code>{'{even}'}</code> to the next odd or even page (chapters that open on a recto).</Hint>
     </Section>
   );
 }

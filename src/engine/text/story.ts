@@ -24,12 +24,37 @@ export interface StoryStyles {
   char: CharacterStyleDef[];
   hyphenation?: string[];
   images?: Record<string, { href: string; w: number; h: number }>;
+  /** Conditional text whose condition is hidden. */
+  hiddenConditions?: string[];
+}
+
+/**
+ * Conditional text: `{if:Name}…{/if}` (nestable, may span paragraphs) is kept when the condition is
+ * shown and removed when it is hidden; the tags themselves never print.
+ */
+export function applyConditions(text: string, hidden: string[] | undefined): string {
+  if (!text.includes('{if:')) return text;
+  const hide = new Set((hidden ?? []).map((h) => h.trim().toLowerCase()));
+  let out = '';
+  const stack: boolean[] = [];
+  const re = /\{if:([^}]*)\}|\{\/if\}/g;
+  let last = 0;
+  let m: RegExpExecArray | null;
+  const visible = () => stack.every((v) => v);
+  while ((m = re.exec(text))) {
+    if (visible()) out += text.slice(last, m.index);
+    if (m[1] != null) stack.push(!hide.has(m[1].trim().toLowerCase()));
+    else stack.pop();
+    last = m.index + m[0].length;
+  }
+  if (visible()) out += text.slice(last);
+  return out;
 }
 
 /** An inline graphic: `{img:assetId; w:120; h:80; shift:2}` (w may be a % of the column). */
 export interface InlineObj { id: string; w?: number; h?: number; pct?: number; shift?: number }
 
-export interface SpanStyle { italic: boolean; bold: boolean; sc: boolean; cs: CharacterStyleProps | null; fn?: boolean; obj?: InlineObj }
+export interface SpanStyle { italic: boolean; bold: boolean; sc: boolean; cs: CharacterStyleProps | null; fn?: boolean; obj?: InlineObj; ruby?: string }
 /** `kern[i]`: manual kerning after UTF-16 unit `i`, thousandths of an em. */
 export interface Piece { text: string; st: SpanStyle; kern?: number[] }
 /** What separates a word from the one before it. */
@@ -44,6 +69,8 @@ export interface Word {
   shy?: number[];
   /** Index entries marked in this word ({ix:term} or {ix:term!sub}). */
   ix?: string[];
+  /** Cross-reference anchors set in this word ({anchor:name}). */
+  anchors?: string[];
 }
 export type ParaKind = 'body' | 'h1' | 'h2' | 'break';
 export interface Footnote { n: number; label: string; text: string }
@@ -57,7 +84,7 @@ export interface Paragraph {
   list: ListSpec | null;
   marker: string | null;
   level: number;
-  breakBefore: 'column' | 'frame' | null;
+  breakBefore: 'column' | 'frame' | 'odd' | 'even' | null;
   footnotes: Footnote[];
   hasTabs: boolean;
   /** A paragraph holding nothing but one graphic: an anchored figure in the text flow. */
@@ -170,18 +197,19 @@ function applyRuleStyles(body: string, eff: TextStyle, cmap: Map<string, Charact
 const LIST_RE = /^((?: {2}|\t)*)(?:([-•▪◦])|(\d{1,3}[.)]|[a-zA-Z]\)))[ \t]+(?=\S)/;
 
 export function parseStory(text: string, style: TextStyle, styles: StoryStyles | null): Paragraph[] {
+  text = applyConditions(text, styles?.hiddenConditions);
   const pmap = new Map((styles?.para ?? []).map((d) => [nameKey(d.name), d.props]));
   const cmap = new Map((styles?.char ?? []).map((d) => [nameKey(d.name), d.props]));
   const paras: Paragraph[] = [];
   const counters: number[] = [];
   const fn = { count: 0, en: 0, endnotes: [] as Footnote[] };
   let afterBreak = true;
-  let pendingBreak: 'column' | 'frame' | null = null;
+  let pendingBreak: Paragraph['breakBefore'] = null;
   for (const rawLine of text.replace(/\r\n?/g, '\n').split('\n')) {
     let line = rawLine.replace(/[ 　]+$/, '');
     if (!line.trim()) continue;
-    const brk = /^\s*\{(col|column|frame)\}\s*$/i.exec(line);
-    if (brk) { pendingBreak = brk[1].toLowerCase() === 'frame' ? 'frame' : 'column'; continue; }
+    const brk = /^\s*\{(col|column|frame|odd|even)\}\s*$/i.exec(line);
+    if (brk) { const k = brk[1].toLowerCase(); pendingBreak = k === 'frame' ? 'frame' : k === 'odd' || k === 'even' ? k : 'column'; continue; }
 
     // Paragraph styles: named [Caption] and local [{align:center}], in any combination.
     let pstyle: ParagraphStyleProps | null = null;
@@ -254,6 +282,12 @@ export function parseStory(text: string, style: TextStyle, styles: StoryStyles |
       paras.push({ kind: 'body', words: r.words, first: i === 0, style: noteStyle, pstyle: { spaceBefore: style.leading * 0.2 }, list: null, marker: null, level: 0, breakBefore: null, footnotes: r.footnotes, hasTabs: false });
     });
   }
+  // Keep with previous: the paragraph before keeps (at least) one line with this one.
+  for (let i = 1; i < paras.length; i++) {
+    if (!paras[i].style.keepWithPrevious) continue;
+    const prev = paras[i - 1];
+    if ((prev.style.keepWithNext ?? 0) < 1) paras[i - 1] = { ...prev, style: { ...prev.style, keepWithNext: 1 } };
+  }
   return paras;
 }
 
@@ -275,6 +309,7 @@ function parseInline(s: string, style: TextStyle, cmap: Map<string, CharacterSty
   let here = false;
   let shy: number[] = [];
   let ix: string[] = [];
+  let anchors: string[] = [];
   let hasTabs = false;
   const wordLen = () => cur.reduce((n, p) => n + p.text.length, 0) + buf.length;
 
@@ -286,11 +321,12 @@ function parseInline(s: string, style: TextStyle, cmap: Map<string, CharacterSty
   const pushWord = (force = false) => {
     flush();
     if (!cur.length && !force) return;
-    words.push({ pieces: cur, text: cur.map((p) => p.text).join(''), before: sep ?? 'none', here: here || undefined, shy: shy.length ? shy : undefined, ix: ix.length ? ix : undefined });
+    words.push({ pieces: cur, text: cur.map((p) => p.text).join(''), before: sep ?? 'none', here: here || undefined, shy: shy.length ? shy : undefined, ix: ix.length ? ix : undefined, anchors: anchors.length ? anchors : undefined });
     cur = [];
     here = false;
     shy = [];
     ix = [];
+    anchors = [];
     sep = null;
   };
   const setSep = (k: Sep) => {
@@ -327,12 +363,25 @@ function parseInline(s: string, style: TextStyle, cmap: Map<string, CharacterSty
         i += m[0].length - 1;
         continue;
       }
-      if (s.startsWith('{fn:', i) || s.startsWith('{en:', i) || s.startsWith('{ix:', i) || s.startsWith('{img:', i)) {
+      if (s.startsWith('{fn:', i) || s.startsWith('{en:', i) || s.startsWith('{ix:', i) || s.startsWith('{img:', i) || s.startsWith('{anchor:', i) || s.startsWith('{ruby:', i)) {
         let depth = 0, j = i;
         for (; j < s.length; j++) { if (s[j] === '{') depth++; else if (s[j] === '}' && --depth === 0) break; }
         const kind = s.slice(i + 1, s.indexOf(':', i));
         const content = s.slice(s.indexOf(':', i) + 1, j).trim();
         i = j;
+        if (kind === 'anchor') {
+          if (!content) continue;
+          if (buf || cur.length) anchors.push(content);
+          else if (words.length) (words[words.length - 1].anchors ??= []).push(content);
+          else anchors.push(content);
+          continue;
+        }
+        if (kind === 'ruby') {
+          // Ruby (furigana): {ruby:base|annotation}, the annotation set small above the base.
+          const [base, ann] = content.split('|');
+          if (base) { flush(); cur.push({ text: base, st: { ...st, ruby: ann ?? '' } }); }
+          continue;
+        }
         if (kind === 'ix') {
           // Index marker: attaches to the word being set (or the one just finished).
           if (!content) continue;

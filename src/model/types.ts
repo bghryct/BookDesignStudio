@@ -144,11 +144,18 @@ export interface TextStyle {
   widows?: number;
   orphans?: number;
   /** Start the paragraph anywhere, in the next column or in the next frame. */
-  startOn?: 'anywhere' | 'column' | 'frame';
+  startOn?: 'anywhere' | 'column' | 'frame' | 'odd' | 'even';
+  /** Keep this paragraph's first line with the end of the previous paragraph. */
+  keepWithPrevious?: boolean;
   /** Baseline grid: every line, or only the first line of each paragraph. */
   gridAlign?: 'all' | 'first';
   /** Span all columns of a multi-column frame (heads at the top of the frame). */
   spanColumns?: boolean;
+  /** Split the paragraph's column into this many sub-columns (balanced). */
+  splitColumns?: number;
+  splitGap?: number;
+  /** Allow a hyphen on the last line of a column or frame (InDesign's "hyphenate across column"). */
+  hyphenateAcrossColumns?: boolean;
 
   ruleAbove?: ParagraphRule | null;
   ruleBelow?: ParagraphRule | null;
@@ -262,6 +269,7 @@ export interface CharacterStyleProps {
   language?: string;
   /** Character rotation, degrees (each character turns about its own centre). */
   rotate?: number;
+  underlineStyle?: 'solid' | 'double' | 'dashed' | 'dotted' | 'wavy';
 }
 
 export interface ParagraphStyleDef { id: ID; name: string; props: ParagraphStyleProps }
@@ -330,6 +338,8 @@ export interface TextElement extends ElementBase {
   wrapIgnore?: boolean;
   /** Grow or shrink the frame's height to fit its text. */
   autoHeight?: boolean;
+  /** A baseline grid of the frame's own (overrides the document grid for this frame). */
+  customGrid?: { increment: number; offset: number } | null;
   /** Thread: overflow continues in this text element (any page). */
   flowNext: ID | null;
   fill: string | null;
@@ -720,6 +730,8 @@ export interface GridSpec {
   secondaryColumns?: number;
   /** Hochuli: tint loose / tight lines and mark hyphen ladders on the canvas. */
   showSpacing?: boolean;
+  /** Hidden characters: spaces, paragraph ends and forced line breaks on the canvas. */
+  showInvisibles?: boolean;
   /** Facing pages: one column grid across the spread, outer margin to outer margin (0 = off). */
   spreadColumns?: number;
   spreadGutter?: number;
@@ -754,10 +766,12 @@ export interface Asset {
   kind: 'image' | 'svg';
   name: string;
   mime: string;
-  /** data: URL (persisted with the project). */
+  /** data: URL (persisted with the project). For a placed PDF page: a raster preview. */
   src: string;
   width: number;
   height: number;
+  /** A placed PDF page: the original file (data: URL) and the page, so PDF export can embed it as vector. */
+  pdf?: { src: string; page: number; pages: number; widthPt: number; heightPt: number };
 }
 
 /** Metadata of a user-uploaded font; the bytes live in IndexedDB / the project file. */
@@ -789,6 +803,8 @@ export interface Project {
   fonts: UploadedFontMeta[];
   /** Hyphenation exceptions: "ty-pog-ra-phy" sets the breaks, a word without hyphens never breaks. */
   hyphenDictionary?: string[];
+  /** Conditional text ({if:Name}…{/if}) whose condition is hidden. */
+  hiddenConditions?: string[];
   /** Named paragraph and character styles (`[Name]` / `<Name>…</Name>` in stories). */
   paragraphStyles?: ParagraphStyleDef[];
   characterStyles?: CharacterStyleDef[];

@@ -11,7 +11,7 @@
  * Geometry is in pt. Column widths may be fixed, proportional (fr) or automatic from content;
  * row heights automatic, a minimum, or fixed.
  */
-import type { ElementBase, ID, TextStyle } from './types';
+import type { Element, ElementBase, ID, Project, TextStyle } from './types';
 
 /* -------------------------------------------------------------------------- */
 /* Types                                                                       */
@@ -669,4 +669,47 @@ export function rowRegion(t: Pick<TableElement, 'rows' | 'headerRows' | 'footerR
   if (r < t.headerRows) return 'header';
   if (r >= t.rows.length - t.footerRows) return 'footer';
   return 'body';
+}
+
+/* -------------------------------------------------------------------------- */
+/* Threads: frames being deleted                                               */
+/* -------------------------------------------------------------------------- */
+
+/** Everything a table frame holds besides its geometry (handed on when its head frame goes). */
+const TABLE_DATA_KEYS = [
+  'name', 'rows', 'cols', 'cells', 'headerRows', 'footerRows', 'tableStyle', 'local', 'style', 'paraStyle', 'fitWidth', 'fillHeight',
+  'repeatHeader', 'skipFirstHeader', 'repeatFooter', 'skipLastFooter', 'breakRows',
+] as const;
+
+/**
+ * Call (inside the same project update) before table frames are removed: a thread closes up
+ * around deleted frames, and when the head goes its table moves into the first frame that stays,
+ * which becomes the new head. Works on an immer draft or a plain project.
+ */
+export function releaseTableFrames(project: Project, ids: Set<string>): void {
+  const all: TableElement[] = [];
+  const visit = (els: Element[]) => { for (const e of els) if (e.type === 'table') all.push(e); };
+  project.pages.forEach((pg) => visit(pg.elements));
+  project.masters.forEach((m) => { visit(m.left); visit(m.right); });
+  visit(project.cover.elements);
+  if (project.jacket) visit(project.jacket.elements);
+  const byId = new Map(all.map((t) => [t.id, t]));
+  const gone = (t: TableElement) => ids.has(t.id) && !t.locked;
+  const prev = new Set<string>();
+  for (const t of all) if (t.flowNext && byId.has(t.flowNext) && t.flowNext !== t.id) prev.add(t.flowNext);
+  for (const head of all) {
+    if (prev.has(head.id) || !head.flowNext || !byId.has(head.flowNext)) continue;
+    const chain: TableElement[] = [];
+    const seen = new Set<string>();
+    for (let cur: TableElement | undefined = head; cur && !seen.has(cur.id); cur = cur.flowNext ? byId.get(cur.flowNext) : undefined) { chain.push(cur); seen.add(cur.id); }
+    if (!chain.some(gone)) continue;
+    const keep = chain.filter((t) => !gone(t));
+    if (!keep.length) continue;
+    if (gone(head)) {
+      const next = keep[0];
+      const rec = next as unknown as Record<string, unknown>, src = head as unknown as Record<string, unknown>;
+      for (const k of TABLE_DATA_KEYS) if (src[k] !== undefined) rec[k] = JSON.parse(JSON.stringify(src[k]));
+    }
+    keep.forEach((t, i) => { t.flowNext = keep[i + 1]?.id ?? null; });
+  }
 }

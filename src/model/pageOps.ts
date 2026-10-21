@@ -2,6 +2,7 @@ import type { Draft } from 'immer';
 import type { Element, Page, Project, TextStyle } from './types';
 import { useStore } from '../store/store';
 import { makePage, makeText, makeMaster, cloneElement, textStyle } from './factory';
+import { releaseTableFrames } from './table';
 import { textBlock } from '../engine/grid';
 import { pageSide, spreadIndexOfPage } from './surfaces';
 import { layoutStory, frameSpecOf, type FrameSpec } from '../engine/textLayout';
@@ -20,6 +21,7 @@ export function deletePage(index: number) {
   if (p.pages.length <= 1) return;
   const ids = new Set(p.pages[index].elements.map((e) => e.id));
   st().update((d) => {
+    releaseTableFrames(d as Project, ids);
     d.pages.splice(index, 1);
     for (const pg of d.pages) for (const e of pg.elements) if (e.type === 'text' && e.flowNext && ids.has(e.flowNext)) e.flowNext = null;
   });
@@ -76,17 +78,20 @@ export function autoFlow(text: string, opts: { afterIndex: number; masterId: str
     return { w: b.w, h: b.h, columns: Math.max(1, spec.grid.columns > 2 ? 1 : spec.grid.columns), columnGap: spec.grid.gutter, inset: 0, verticalAlign: 'top', grid: { origin: spec.grid.baselineOffset, increment: spec.grid.baseline } };
   };
   const tokens = { page: 1, pages: project.pages.length, title: spec.title, subtitle: spec.subtitle, author: spec.author, publisher: spec.publisher };
-  // Find how many frames the story needs (doubling, then trimming the empty tail).
-  let n = 4;
+  // Find how many frames the story needs: estimate from the text's length, grow until it all
+  // fits, then trim the empty tail.
+  const b0 = textBlock(spec, sideFor(insertAt));
+  const perPage = Math.max(200, (b0.w / (style.fontSize * 0.48)) * (b0.h / Math.max(1, style.leading)));
+  let n = Math.max(4, Math.ceil((text.length / perPage) * 1.12) + 4);
   let used = 0;
-  for (let guard = 0; guard < 9; guard++) {
+  for (let guard = 0; guard < 8; guard++) {
     const frames = Array.from({ length: n }, (_, i) => frameFor(i));
     const res = layoutStory(text, style, frames, tokens);
     used = res.reduce((acc, r, i) => (r.lineCount > 0 ? i + 1 : acc), 0);
     if (!res[n - 1].overflow && used < n) break;
-    n *= 2;
+    n = Math.min(4000, Math.ceil(n * 1.35) + 4);
   }
-  used = Math.max(1, Math.min(used, 600));
+  used = Math.max(1, Math.min(used, 4000));
   const pages: Page[] = [];
   const frames: Element[] = [];
   for (let i = 0; i < pad; i++) pages.push(makePage({ masterId: null, paperColor: spec.paper.color }));

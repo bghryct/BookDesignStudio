@@ -24,19 +24,27 @@ export interface BookTextures {
   /** Flat unwrapped cover art. Canvas pixel (0,0) = cover-surface point (-calc.wrap, -calc.wrap);
    *  canvas size = (calc.coverW + 2·wrap, calc.coverH + 2·wrap) × coverPxPerPt.
    *  Horizontal layout of panels (back/spine/front/flaps/joints) is given by calc.panels (x in pt from the left edge of the cover surface, already mirrored for right-to-left books). */
-  cover: HTMLCanvasElement | null;
+  cover: HTMLCanvasElement | ImageBitmap | null;
   coverPxPerPt: number;
   /** Same size/layout as `cover`; white (luminance/alpha) where that finish is applied. */
-  finishMasks: Partial<Record<FinishKey, HTMLCanvasElement>>;
-  /** Trim-sized page art (no bleed), index 0 = page 1 (a recto). null = blank paper. */
-  pages: (HTMLCanvasElement | null)[];
+  finishMasks: Partial<Record<FinishKey, HTMLCanvasElement | ImageBitmap>>;
+  /** Trim-sized page art (no bleed), index 0 = page 1 (a recto). null = blank paper. ImageBitmaps
+   *  come from a raster worker (top row first, like a canvas). */
+  pages: (HTMLCanvasElement | ImageBitmap | null)[];
   pagePxPerPt: number;
   /** Flat dust-jacket art. Pixel (0,0) = jacket point (−bleed, −bleed); size (width + 2·bleed,
    *  height + 2·bleed) × jacketPxPerPt; panels from JacketCalc.panels (RTL already mirrored). */
-  jacket?: HTMLCanvasElement | null;
+  jacket?: HTMLCanvasElement | ImageBitmap | null;
   jacketPxPerPt?: number;
   /** Same size/layout as `jacket`. */
-  jacketFinishMasks?: Partial<Record<FinishKey, HTMLCanvasElement>>;
+  jacketFinishMasks?: Partial<Record<FinishKey, HTMLCanvasElement | ImageBitmap>>;
+  /** The cover (jacket) already finished by a raster worker, same layout as `cover` (`jacket`), for
+   *  the covering finish and colour in `coverMapsKey` ("finish|colour"); used instead of
+   *  compositing `cover` and `finishMasks` on the main thread when the key matches. */
+  coverMaps?: PanelMaps | null;
+  coverMapsKey?: string;
+  jacketMaps?: PanelMaps | null;
+  jacketMapsKey?: string;
 }
 
 export type AnimationMode =
@@ -126,10 +134,26 @@ export interface TextureDemand {
   jacketFront: number;
 }
 
-/** Sharper art for the front panel of the cover / jacket wrap. */
+/**
+ * Finished maps for a printed surface (art + finish masks baked): colour, clear-coat/roughness/
+ * metalness (null = flat `flatSurface` RGB), height (null = flat) and iridescence mask.
+ */
+export interface PanelMaps {
+  color: HTMLCanvasElement | ImageBitmap;
+  surface: HTMLCanvasElement | ImageBitmap | null;
+  flatSurface: [number, number, number];
+  bump: HTMLCanvasElement | ImageBitmap | null;
+  holo: HTMLCanvasElement | ImageBitmap | null;
+  hasGloss: boolean;
+  hasClearcoat: boolean;
+}
+
+/** Sharper art for the front panel of the cover / jacket wrap: finished `maps` (from a raster
+ *  worker), or the art `canvas` and finish `masks` to composite on the main thread. */
 export interface PanelArt {
-  canvas: HTMLCanvasElement;
-  masks: Partial<Record<FinishKey, HTMLCanvasElement>>;
+  maps?: PanelMaps;
+  canvas?: HTMLCanvasElement;
+  masks?: Partial<Record<FinishKey, HTMLCanvasElement>>;
   /** Rectangle of the wrap the canvas covers, pt (cover / jacket canvas frame, origin at the trim). */
   box: { x: number; y: number; w: number; h: number };
 }

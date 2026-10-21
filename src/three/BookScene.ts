@@ -806,11 +806,12 @@ export class BookScene {
     const v = new Vector3();
     const toScreen = (a: number, y: number, z: number): [number, number] | null => {
       v.set(a, y, z).applyMatrix4(m).project(this.camera);
-      if (v.z < -1 || v.z > 1 || Math.abs(v.x) > 1.15 || Math.abs(v.y) > 1.15) return null;
+      // Off-screen points still count (a close-up spans few samples); behind the camera they don't.
+      if (v.z < -1 || v.z > 1 || Math.abs(v.x) > 10 || Math.abs(v.y) > 10) return null;
       return [((v.x + 1) / 2) * vw, ((1 - v.y) / 2) * vh];
     };
     const eye = model.group.worldToLocal(this.camera.position.clone());
-    const d = model.textureDemand(toScreen, [eye.x, eye.y, eye.z]);
+    const d = model.textureDemand(toScreen, [eye.x, eye.y, eye.z], [vw, vh]);
     return {
       pages: [...d.pages.entries()].map(([index, pxPerPt]) => ({ index, pxPerPt })).sort((p, q) => q.pxPerPt - p.pxPerPt),
       coverFront: d.coverFront,
@@ -869,8 +870,10 @@ export class BookScene {
   }
 
   /** Sharper art for page `index` (index 0 = page 1); null restores the base art. */
-  setPageArt(index: number, canvas: HTMLCanvasElement | null): void {
-    if (this.materials?.setPageArt(index, canvas)) this.dirty = true;
+  setPageArt(index: number, art: HTMLCanvasElement | ImageBitmap | null): void {
+    if (this.materials?.setPageArt(index, art)) this.dirty = true;
+    // The scene owns a bitmap it is given; one for a page it does not model is freed now.
+    else if (art && typeof ImageBitmap !== 'undefined' && art instanceof ImageBitmap) art.close();
   }
 
   /** Sharper art for the front panel of the cover or jacket (see PanelArt); null restores it. */

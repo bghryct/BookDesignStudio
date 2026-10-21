@@ -8,7 +8,7 @@ import { Section, Row, NumberField, Select, Toggle, TextInput, Segmented, Button
 import { CANONS, canonMargins, lockGridToBaseline, type CanonKind } from '../../engine/grid';
 import { cmykToHex, rgbToCmyk } from '../../lib/color';
 import { PanelGridEditor, JacketSettings, GuidesSection } from './SurfaceSettings';
-import { generateContents, generateIndex } from '../contents';
+import { generateContents, generateIndex, conditionNames } from '../contents';
 import { uid } from '../../lib/random';
 
 export const TRIM_PRESETS: { id: string; label: string; w: number; h: number; group: string }[] = [
@@ -75,7 +75,7 @@ export function DocumentPanel() {
           <TextInput label="Author" value={book.author} onChange={(v) => live((d) => { d.author = v; })} />
           <TextInput label="Publisher" value={book.publisher} onChange={(v) => live((d) => { d.publisher = v; })} />
         </Row>
-        <Hint>Use {'{title}'} {'{author}'} {'{chapter}'} {'{page}'} {'{page:roman}'} in any text frame — running heads and folios update everywhere.</Hint>
+        <Hint>Use {'{title}'} {'{author}'} {'{chapter}'} {'{page}'} {'{page:roman}'} {'{lastpage}'} {'{date}'} in any text frame — running heads and folios update everywhere. {'{xref:name}'} prints the page of {'{anchor:name}'}.</Hint>
         <Button className="w-full" onClick={() => {
           const r = generateContents();
           s().notify(r.entries ? `${r.updated ? 'Updated' : 'Created'} the contents: ${r.entries} entries with their page numbers.` : 'No chapter titles or # headings found yet.');
@@ -85,6 +85,8 @@ export function DocumentPanel() {
           s().notify(r.entries ? `${r.updated ? 'Updated' : 'Created'} the index: ${r.entries} terms with their page numbers.` : 'No index entries yet — mark words with {ix:term} in the story editor.');
         }}>Generate index</Button>
       </Section>
+
+      <ConditionsSection />
 
       <Section title="Format" id="doc-format">
         <Row>
@@ -168,6 +170,7 @@ export function DocumentPanel() {
           <Toggle label="Snap to grid" checked={book.grid.snap} onChange={(v) => set((d) => { d.grid.snap = v; })} />
           <Toggle label="Snap to baselines" checked={book.grid.snapToBaseline} onChange={(v) => set((d) => { d.grid.snapToBaseline = v; })} />
           <Toggle label="Spacing check" checked={!!book.grid.showSpacing} onChange={(v) => set((d) => { d.grid.showSpacing = v; })} hint="Hochuli: tint loose (red) and tight (blue) lines, tick hyphens, flag ladders of 3+" />
+          <Toggle label="Hidden characters" checked={!!book.grid.showInvisibles} onChange={(v) => set((d) => { d.grid.showInvisibles = v; })} hint="Spaces ·, non-breaking spaces °, paragraph returns ¶ and forced line breaks ¬ on the canvas (⌥⌘I)" />
         </div>
       </Section>
 
@@ -221,3 +224,23 @@ function SwatchRow({ sw, index }: { sw: Swatch; index: number }) {
 }
 
 export { fromPt };
+
+/** Conditional text: every {if:Name} condition in the book, each shown or hidden for the whole book. */
+function ConditionsSection() {
+  const project = useStore((s) => s.project);
+  const names = React.useMemo(() => conditionNames(project), [project]);
+  const hidden = new Set((project.hiddenConditions ?? []).map((h) => h.toLowerCase()));
+  const toggle = (name: string, show: boolean) => useStore.getState().update((d) => {
+    const list = (d.hiddenConditions ?? []).filter((h) => h.toLowerCase() !== name.toLowerCase());
+    if (!show) list.push(name);
+    d.hiddenConditions = list;
+  });
+  return (
+    <Section title={`Conditional text${names.length ? ` · ${names.length}` : ''}`} id="doc-conditions" defaultOpen={false}>
+      {names.length ? names.map((n) => (
+        <Toggle key={n} label={n} checked={!hidden.has(n.toLowerCase())} onChange={(v) => toggle(n, v)} hint={`Text inside {if:${n}}…{/if} prints only while this is on`} />
+      )) : null}
+      <Hint>Wrap text in {'{if:Print}'}…{'{/if}'} (any name; nests, may span paragraphs) to make editions from one story: hide a condition and its text drops out everywhere, re-flowing the book.</Hint>
+    </Section>
+  );
+}

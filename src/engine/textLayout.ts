@@ -22,7 +22,7 @@ import { toRoman } from '../model/units';
 import { parseStory, PLAIN, type Footnote, type Paragraph, type Piece, type StoryStyles } from './text/story';
 import {
   ItemBuilder, buildItems, paraStyle, breakParagraph, tabCompose, linesFromBreaks, placeLine, hyphenDictionary,
-  type Item, type Line, type ParaStyle, type TabResolution,
+  INF, type Item, type Line, type ParaStyle, type TabResolution,
 } from './text/compose';
 
 export { applyParagraphStyle } from './text/props';
@@ -41,6 +41,8 @@ export interface TokenContext {
   publisher: string;
   /** The current chapter (running heads on masters). */
   chapter?: string;
+  /** Cross-reference targets: anchor name → page and paragraph text. */
+  xrefs?: Record<string, { page: number; text: string }>;
 }
 
 /** An item the text wraps around, in frame-local pt (already grown by its wrap offset). */
@@ -66,6 +68,8 @@ export interface FrameSpec {
   balance?: boolean;
   columnRule?: TextElement['columnRule'];
   wraps?: WrapShape[];
+  /** Page number the frame is on (for paragraphs that start on an odd or even page). */
+  page?: number | null;
 }
 
 /** Per-line facts for the editor's micro-typography checks. */
@@ -79,6 +83,9 @@ export interface LineInfo {
   chars?: number;
   /** Last line of its paragraph (never stretched). */
   last?: boolean;
+  /** How the line ends — a paragraph return or a forced line break — and where its text ends. */
+  end?: 'para' | 'br';
+  xEnd?: number;
   /** Line was justified (spaces adjusted). */
   justified?: boolean;
   hyphenated?: boolean;
@@ -99,12 +106,33 @@ export interface FrameLayout {
   marks?: string[];
 }
 
+/** Underline rules: solid, double, dashed, dotted or wavy, from x0 to x1 centred on y. */
+function underlinePrims(x0: number, x1: number, y: number, u: { w: number; c: string; k?: 'double' | 'dashed' | 'dotted' | 'wavy' }): Prim[] {
+  const rect = (yy: number, w: number): Prim => ({ t: 'path', d: `M${x0} ${yy - w / 2}H${x1}V${yy + w / 2}H${x0}Z`, fill: u.c });
+  switch (u.k) {
+    case 'double': return [rect(y - u.w * 0.4, u.w * 0.7), rect(y + u.w * 1.4, u.w * 0.7)];
+    case 'dashed': return [{ t: 'path', d: `M${x0} ${y}H${x1}`, stroke: u.c, strokeWidth: u.w, dash: [u.w * 4, u.w * 2.5] }];
+    case 'dotted': return [{ t: 'path', d: `M${x0 + u.w / 2} ${y}H${x1}`, stroke: u.c, strokeWidth: u.w * 1.1, dash: [0, u.w * 2.4], cap: 'round' }];
+    case 'wavy': {
+      const a = u.w * 1.2, p = u.w * 4;
+      let d = `M${x0} ${y}`;
+      for (let x = x0, i = 0; x < x1; x += p, i++) d += `Q${Math.min(x1, x + p / 2)} ${y + (i % 2 ? a : -a) * 2} ${Math.min(x1, x + p)} ${y}`;
+      return [{ t: 'path', d, stroke: u.c, strokeWidth: u.w * 0.8 }];
+    }
+    default: return [rect(y, u.w)];
+  }
+}
+
 /* -------------------------------------------------------------------------- */
 /* Tokens                                                                      */
 /* -------------------------------------------------------------------------- */
 
 export function expandTokens(text: string, t: TokenContext): string {
-  return text.replace(/\{(page|pages|title|subtitle|author|publisher|year|chapter)(?::(roman|ROMAN))?\}/g, (_, k: string, fmt?: string) => {
+  text = text.replace(/\{(xref|xreftext):([^}]+)\}/g, (_, k: string, name: string) => {
+    const x = t.xrefs?.[name.trim()];
+    return x ? (k === 'xref' ? String(x.page) : x.text) : '??';
+  });
+  return text.replace(/\{(page|pages|title|subtitle|author|publisher|year|chapter|date|lastpage)(?::(roman|ROMAN))?\}/g, (_, k: string, fmt?: string) => {
     switch (k) {
       case 'page': return fmt === 'roman' ? toRoman(t.page) : fmt === 'ROMAN' ? toRoman(t.page, true) : String(t.page);
       case 'pages': return String(t.pages);
@@ -114,6 +142,8 @@ export function expandTokens(text: string, t: TokenContext): string {
       case 'publisher': return t.publisher;
       case 'year': return String(new Date().getFullYear());
       case 'chapter': return t.chapter ?? '';
+      case 'lastpage': return String(t.pages);
+      case 'date': return new Date().toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' });
       default: return '';
     }
   });
@@ -140,14 +170,47 @@ interface DropCapInfo {
 
 const storyCache = new Map<string, Prepared>();
 
+/*
+ * Per-paragraph caches, so an edit re-sets only the paragraphs it touched: the measured items of
+ * a paragraph (by its words, style and context) and its line breaks (by items and line widths).
+ */
+const itemCache = new Map<string, Item[]>();
+const ctxIds = new Map<string, number>();
+const styleJson = new WeakMap<object, string>();
+const jsonOf = (o: object) => { let j = styleJson.get(o); if (j == null) { j = JSON.stringify(o); styleJson.set(o, j); } return j; };
+const breakCache = new WeakMap<Item[], Map<string, { breaks: number[]; widths: number[] }>>();
+
+function cachedBreaks(items: Item[], widthAt: (ln: number) => number, style: TextStyle, ragged: boolean): number[] {
+  // Line widths over the lines the paragraph is likely to need form the key; a hit is checked
+  // against the widths of every line it actually set.
+  let natural = 0;
+  for (const it of items) if (it.t === 'box' || it.t === 'glue') natural += it.w;
+  const est = Math.min(3000, Math.ceil(natural / Math.max(1, widthAt(0))) + 3);
+  const ws: number[] = [];
+  for (let ln = 0; ln < est; ln++) ws.push(Math.round(widthAt(ln) * 100) / 100);
+  const key = `${ragged ? 1 : 0}|${ws.join(',')}`;
+  let m = breakCache.get(items);
+  const hit = m?.get(key);
+  if (hit && hit.widths.every((w, ln) => Math.abs(w - widthAt(ln)) < 0.01)) return hit.breaks;
+  const breaks = breakParagraph(items, widthAt, style, ragged);
+  if (!m) { m = new Map(); breakCache.set(items, m); }
+  if (m.size > 6) m.clear();
+  m.set(key, { breaks, widths: breaks.map((_, ln) => widthAt(ln)) });
+  return breaks;
+}
+
 function prepare(text: string, style: TextStyle, firstWidth: number, styles: StoryStyles | null): Prepared {
   // Images are keyed by id and size only: their data URLs are far too large to stringify.
-  const sk = styles ? JSON.stringify({ p: styles.para, c: styles.char, h: styles.hyphenation }) + Object.entries(styles.images ?? {}).map(([k, v]) => `${k}:${v.w}x${v.h}`).join(',') : '';
+  const sk = styles ? JSON.stringify({ p: styles.para, c: styles.char, h: styles.hyphenation, x: styles.hiddenConditions }) + Object.entries(styles.images ?? {}).map(([k, v]) => `${k}:${v.w}x${v.h}`).join(',') : '';
   const key = `${useFontStore.getState().version}|${JSON.stringify(style)}|${Math.round(firstWidth)}|${sk}|${text}`;
   const hit = storyCache.get(key);
   if (hit) return hit;
   const paras = parseStory(text, style, styles);
   const dict = hyphenDictionary(styles?.hyphenation);
+  // Context of the measured items: loaded fonts and the project's styles.
+  const ctxKey = `${useFontStore.getState().version}|${sk}`;
+  let ctxId = ctxIds.get(ctxKey);
+  if (ctxId == null) { ctxId = ctxIds.size + 1; ctxIds.set(ctxKey, ctxId); }
 
   // Drop cap: take the first letters (plus an opening quote) of the first body paragraph.
   let dropCap: DropCapInfo | null = null;
@@ -187,7 +250,13 @@ function prepare(text: string, style: TextStyle, firstWidth: number, styles: Sto
     const ps = paraStyle(para, pst);
     if (dropCap && i === 0) ps.indent = 0;
     const ragged = ps.align === 'left' || ps.align === 'right' || ps.align === 'center';
-    let items = buildItems(para, pst, ps, 0, ragged, dict, styles?.images);
+    const special = i === 0 && (!!dropCap || style.firstLineSmallCaps);
+    const ik = special ? '' : `${ctxId}|${jsonOf(pst)}|${para.kind}|${para.first}|${para.marker}|${para.level}|${JSON.stringify(para.words)}`;
+    let items = special ? undefined : itemCache.get(ik);
+    if (!items) {
+      items = buildItems(para, pst, ps, 0, ragged, dict, styles?.images);
+      if (!special) { itemCache.set(ik, items); if (itemCache.size > 30000) itemCache.delete(itemCache.keys().next().value!); }
+    }
     if (i === 0 && style.firstLineSmallCaps && para.kind === 'body') {
       // Iterate: set the words of line one in small caps until the line is stable.
       let scCount = 0;
@@ -337,7 +406,7 @@ function layoutFrame(prep: Prepared, style: TextStyle, frame: FrameSpec, cursor:
   const under: { g: GroupPrim; col: number; para: number }[] = [];
   const over: { g: GroupPrim; col: number; para: number }[] = [];
   const dcPrims: { g: GroupPrim; col: number; para: number }[] = [];
-  const lineRecs: { col: number; para: number; from: number; to: number; base: number; bottom: number; top: number }[] = [];
+  const lineRecs: { col: number; para: number; from: number; to: number; base: number; bottom: number; top: number; box: number }[] = [];
   const heads: { level: 1 | 2; text: string }[] = [];
   const marks: string[] = [];
   const images: { g: GroupPrim; col: number; para: number }[] = [];
@@ -417,15 +486,42 @@ function layoutFrame(prep: Prepared, style: TextStyle, frame: FrameSpec, cursor:
       if (hereW != null && ln > 0) left = Math.max(left, ps.left + hereW);
       return left;
     };
-    const widthAt = (ln: number) => Math.max(1, slot(ln).w - indentOf(ln) - ps.right);
+    // Split column: the paragraph set in n balanced sub-columns inside its column.
+    const nSplit = startsPara && !pp.para.hasTabs && !dc ? Math.max(1, Math.min(6, Math.round(pp.para.style.splitColumns ?? 1))) : 1;
+    const splitGap = pp.para.style.splitGap ?? Math.max(6, ps.size);
+    const subW = nSplit > 1 ? Math.max(1, (slot(0).w - splitGap * (nSplit - 1)) / nSplit) : 0;
+    const widthAt = nSplit > 1
+      ? (ln: number) => Math.max(1, subW - indentOf(ln) - ps.right)
+      : (ln: number) => Math.max(1, slot(ln).w - indentOf(ln) - ps.right);
     const colOf = (ln: number) => { const s = slot(ln); return s.col >= 0 ? s.col : 0; };
     const lineLeft = (ln: number) => slot(ln).x - colXAt(colOf(ln)) + indentOf(ln);
     let breaks: number[];
     let tabs: Map<number, TabResolution> | undefined;
     if (pp.para.hasTabs) { const r = tabCompose(items, widthAt, lineLeft, pp.para.style); breaks = r.breaks; tabs = r.tabs; }
-    else breaks = breakParagraph(items, widthAt, pp.para.style, pp.ragged);
-    const lines = linesFromBreaks(items, breaks, 0);
-    return { items, offsetBase, lines, slot, indentOf, widthAt, tabs, dc, startsPara };
+    else breaks = startsPara && !dc ? cachedBreaks(items, widthAt, pp.para.style, pp.ragged) : breakParagraph(items, widthAt, pp.para.style, pp.ragged);
+    let lines = linesFromBreaks(items, breaks, 0);
+    // Hyphenate across columns off: no hyphen on the last line of a column or frame.
+    if (pp.para.style.hyphenateAcrossColumns === false && !pp.para.hasTabs && nSplit === 1) {
+      for (let pass = 0; pass < 4; pass++) {
+        const bad = lines.findIndex((ln, li) => !!ln.hyphen && li + 1 < lines.length && slot(li + 1).col !== slot(li).col);
+        if (bad < 0) break;
+        if (pass === 0) items = items.slice();
+        const pen = items[breaks[bad]];
+        if (pen.t !== 'pen') break;
+        items[breaks[bad]] = { ...pen, p: INF };
+        breaks = breakParagraph(items, widthAt, pp.para.style, pp.ragged);
+        lines = linesFromBreaks(items, breaks, 0);
+      }
+    }
+    if (nSplit > 1) {
+      const rows = Math.ceil(lines.length / nSplit);
+      const sub = (ln: number): Slot => {
+        const k = Math.floor(ln / rows), s = slot(ln - k * rows);
+        return { ...s, x: s.x + k * (subW + splitGap), w: subW };
+      };
+      return { items, offsetBase, lines, slot: sub, base: slot, rows, indentOf, widthAt, tabs, dc, startsPara };
+    }
+    return { items, offsetBase, lines, slot, base: slot, rows: 0, indentOf, widthAt, tabs, dc, startsPara };
   };
   type Plan = ReturnType<typeof plan>;
 
@@ -463,7 +559,7 @@ function layoutFrame(prep: Prepared, style: TextStyle, frame: FrameSpec, cursor:
       if (occupied && s.baseline + descent > bottom - f.reserve[s.col] - need + 0.5) return { placed, flow: f, stop: li, reason: 'notes' as const };
       f.reserve[s.col] += need;
       f.notes[s.col].push(...refs);
-      f.y = s.baseline;
+      f.y = Math.max(f.y ?? -Infinity, s.baseline);
       f.used[s.col] = true;
       placed.push({ li, slot: s });
     }
@@ -517,7 +613,12 @@ function layoutFrame(prep: Prepared, style: TextStyle, frame: FrameSpec, cursor:
         const it = pl.items[i];
         if (it.t !== 'box' || it.word < 0) continue;
         const wd = pp.para.words[it.word];
-        if (wd?.ix && !seenIx.has(it.word)) { seenIx.add(it.word); marks.push(...wd.ix); }
+        if ((wd?.ix || wd?.anchors) && !seenIx.has(it.word)) {
+          seenIx.add(it.word);
+          if (wd.ix) marks.push(...wd.ix);
+          // Cross-reference anchors ride along as "\u0001name\u0001paragraph text".
+          if (wd.anchors) for (const a of wd.anchors) marks.push(`\u0001${a}\u0001${pp.para.words.map((w) => w.text).join(' ')}`);
+        }
       }
       if (pl.startsPara && li === 0 && (pp.para.kind === 'h1' || pp.para.kind === 'h2')) {
         heads.push({ level: pp.para.kind === 'h1' ? 1 : 2, text: pp.para.words.map((w) => w.text).join(' ') });
@@ -534,9 +635,13 @@ function layoutFrame(prep: Prepared, style: TextStyle, frame: FrameSpec, cursor:
         for (const g of segs) { if (g.text) runs.push({ x, y: slot.baseline - (g.dy ?? 0), text: g.text, font: g.font, size: g.size, color: g.color, letterSpacing: g.ls, width: g.width }); x += g.width; }
       }
       const to = runs.length;
+      const endIt = pl.items[line.end];
+      const end = endIt?.t === 'pen' && endIt.p === -INF ? (endIt.f ? 'para' as const : 'br' as const) : undefined;
+      let xEnd = xOff;
+      for (let r = from; r < to; r++) if (runs[r].text) xEnd = Math.max(xEnd, runs[r].x + runs[r].width - (runs[r].letterSpacing ?? 0) * (runs[r].scaleX ?? 1));
+      lineRecs.push({ col: slot.col, para: paraNo, from, to, base: slot.baseline, top: slot.baseline - body.capHeight * ps.size, bottom: slot.baseline + ps.size * 0.22, box: lineBoxes.length });
       baselines.push(slot.baseline);
-      lineBoxes.push({ x: slot.x, y: slot.baseline, w: slot.w, ratio: pl0.ratio, chars: pl0.chars, last: line.last, justified: pl0.justified, hyphenated: !!line.hyphen });
-      lineRecs.push({ col: slot.col, para: paraNo, from, to, base: slot.baseline, top: slot.baseline - body.capHeight * ps.size, bottom: slot.baseline + ps.size * 0.22 });
+      lineBoxes.push({ x: slot.x, y: slot.baseline, w: slot.w, ratio: pl0.ratio, chars: pl0.chars, last: line.last, justified: pl0.justified, hyphenated: !!line.hyphen, end, xEnd });
       lineCount++;
 
       // Underline, strike and highlight become rules around the runs.
@@ -553,7 +658,14 @@ function layoutFrame(prep: Prepared, style: TextStyle, frame: FrameSpec, cursor:
           const d = r0.deco!;
           const m = fontMetrics(r0.font);
           if (d.hl) u.push({ t: 'path', d: `M${r0.x - r0.size * 0.05} ${r0.y - m.ascender * r0.size}H${x1 + r0.size * 0.05}V${r0.y - m.descender * r0.size * 0.9}H${r0.x - r0.size * 0.05}Z`, fill: d.hl });
-          if (d.u) u.push({ t: 'path', d: `M${r0.x} ${r0.y + d.u.o - d.u.w / 2}H${x1}V${r0.y + d.u.o + d.u.w / 2}H${r0.x}Z`, fill: d.u.c });
+          if (d.u) u.push(...underlinePrims(r0.x, x1, r0.y + d.u.o, d.u));
+          if (d.ruby) {
+            // Ruby: centred over the base's glyphs, its baseline a little above the base's cap height.
+            const ls = r0.letterSpacing ?? 0;
+            const cx = (r0.x + x1 - ls) / 2;
+            const ry = r0.y - (m.capHeight || 0.7) * r0.size - d.ruby.s * 0.3;
+            o.push({ t: 'text', runs: [{ x: cx - d.ruby.w / 2, y: ry, text: d.ruby.t, font: r0.font, size: d.ruby.s, color: r0.color, width: d.ruby.w }] });
+          }
           if (d.s) { const sy = r0.y - (m.xHeight || 0.45) * r0.size * 0.55; o.push({ t: 'path', d: `M${r0.x} ${sy - d.s.w / 2}H${x1}V${sy + d.s.w / 2}H${r0.x}Z`, fill: d.s.c }); }
           k = j;
         }
@@ -588,8 +700,10 @@ function layoutFrame(prep: Prepared, style: TextStyle, frame: FrameSpec, cursor:
     // Paragraph rules and shading, per column the paragraph occupies.
     const lastLine = pl.lines.length - 1;
     for (const [col, part] of parts) {
-      const s0 = pl.slot(part.first), s1 = pl.slot(part.last);
-      const x0 = part.slot.x + ps.left, x1 = part.slot.x + part.slot.w - ps.right;
+      // A split paragraph's rules and shading cover all its sub-columns, down to its deepest row.
+      const s0 = pl.slot(part.first), s1 = pl.rows ? pl.base(pl.rows - 1) : pl.slot(part.last);
+      const ws = pl.rows ? pl.base(0) : part.slot;
+      const x0 = ws.x + ps.left, x1 = ws.x + ws.w - ps.right;
       const yTop = s0.baseline - body.capHeight * ps.size, yBot = s1.baseline + ps.size * 0.22;
       if (pst.shading && pst.shading.color) {
         const pad = pst.shading.padding ?? 3;
@@ -656,6 +770,8 @@ function layoutFrame(prep: Prepared, style: TextStyle, frame: FrameSpec, cursor:
       const startOn = pp.para.breakBefore ?? (pst.startOn && pst.startOn !== 'anywhere' ? pst.startOn : null);
       const frameEmpty = runs.length === 0 && flow.col === 0 && flow.y === null;
       if (startOn === 'frame' && !frameEmpty) break outer;
+      // Next odd / even page: leave this frame (and any on the wrong page) for the next one.
+      if ((startOn === 'odd' || startOn === 'even') && (!frameEmpty || (frame.page != null && frame.page % 2 !== (startOn === 'odd' ? 1 : 0)))) break outer;
       if (startOn === 'column' && flow.y !== null && !advance(flow)) break outer;
     }
     // Spanning heads: only while nothing but spanning paragraphs has been set in this frame.
@@ -735,8 +851,8 @@ function layoutFrame(prep: Prepared, style: TextStyle, frame: FrameSpec, cursor:
 
   const shiftLine = (rec: (typeof lineRecs)[number], dy: number) => {
     for (let r = rec.from; r < rec.to; r++) runs[r].y += dy;
-    const bi = baselines.indexOf(rec.base);
-    if (bi >= 0) { baselines[bi] += dy; lineBoxes[bi].y += dy; }
+    // The rec's own line box (split columns set several lines on one baseline).
+    if (lineBoxes[rec.box]) { baselines[rec.box] += dy; lineBoxes[rec.box].y += dy; }
     rec.base += dy; rec.top += dy; rec.bottom += dy;
   };
   const shiftGroups = (col: number, para: number, dy: number) => {
@@ -942,7 +1058,7 @@ export function layoutStory(text: string, style: TextStyle, frames: FrameSpec[],
   const f0 = frames[0];
   const in0 = f0?.insets ? f0.insets.left + f0.insets.right : (f0?.inset ?? 0) * 2;
   const firstColW = f0 ? (f0.w - in0 - f0.columnGap * (Math.max(1, f0.columns) - 1)) / Math.max(1, f0.columns) : 100;
-  const useStyles = styles && (styles.para.length || styles.char.length || styles.hyphenation?.length || /\{img:/.test(expanded)) ? styles : null;
+  const useStyles = styles && (styles.para.length || styles.char.length || styles.hyphenation?.length || styles.hiddenConditions?.length || /\{img:/.test(expanded)) ? styles : null;
   const prep = prepare(expanded, style, firstColW, useStyles);
   const out: FrameLayout[] = [];
   let cursor: Cursor | null = { para: 0, item: 0 };

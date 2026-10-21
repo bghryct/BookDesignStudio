@@ -1329,14 +1329,18 @@ export class BookModel {
   /**
    * On-screen density (px per pt) of every page face in view, of the front cover panel and of
    * the jacket's front panel, for the current pose: what their textures need to look sharp.
-   * `toScreen` maps an a-space point to pixels (null when behind the camera or well off screen);
-   * `eye` is the camera position in a-space. Pages hidden under other leaves are skipped.
+   * `toScreen` maps an a-space point to pixels (null when behind the camera), `view` is the
+   * viewport (px) and `eye` the camera position in a-space. Neighbouring sample points count when
+   * the segment between them crosses the view, so close-ups of a small part of a surface still
+   * measure it. Pages hidden under other leaves are skipped.
    */
-  textureDemand(toScreen: (a: number, y: number, z: number) => [number, number] | null, eye: [number, number, number]): TextureDensity {
+  textureDemand(toScreen: (a: number, y: number, z: number) => [number, number] | null, eye: [number, number, number], view: [number, number] = [1e9, 1e9]): TextureDensity {
     const L = this.L;
     const out: TextureDensity = { pages: new Map(), coverFront: 0, jacketFront: 0 };
     const bump = (page: number, d: number) => { if (d > (out.pages.get(page) ?? 0)) out.pages.set(page, d); };
     // Density of a grid of a-space points (rows × cols) with a facing test per point.
+    const [vw, vh] = view;
+    const mx = 0.075 * Math.min(vw, vh);
     const grid = (pts: { p: [number, number, number]; n: [number, number, number] }[][], take: (front: boolean, d: number) => void) => {
       const scr = pts.map((row) => row.map((q) => toScreen(q.p[0], q.p[1], q.p[2])));
       for (let j = 0; j < pts.length; j++) for (let i = 0; i < pts[j].length; i++) {
@@ -1346,6 +1350,7 @@ export class BookModel {
         for (const [jj, ii] of [[j, i + 1], [j + 1, i]] as const) {
           const r = pts[jj]?.[ii], sr = scr[jj]?.[ii];
           if (!r || !sr) continue;
+          if (Math.max(sq[0], sr[0]) < -mx || Math.min(sq[0], sr[0]) > vw + mx || Math.max(sq[1], sr[1]) < -mx || Math.min(sq[1], sr[1]) > vh + mx) continue;
           const dist = Math.hypot(r.p[0] - q.p[0], r.p[1] - q.p[1], r.p[2] - q.p[2]);
           if (dist > 1e-6) take(front, Math.hypot(sr[0] - sq[0], sr[1] - sq[1]) / dist);
         }
@@ -1358,6 +1363,18 @@ export class BookModel {
         const p: [number, number, number] = [sh.mid[q], sh.mid[q + 1], sh.z[j] + zOff];
         return { p, n: [pos[v] - p[0], pos[v + 1] - p[1], pos[v + 2] - sh.z[j]] as [number, number, number] };
       }));
+    };
+    /** A two-row (head / tail) sheet is ruled between its rows: sample `k` rows across it. */
+    const ruledGrid = (sh: SheetMesh, cols: number[], zOff = 0, k = 5) => {
+      const [a, b] = sheetGrid(sh, cols, [0, sh.nz - 1], zOff);
+      return Array.from({ length: k }, (_, r) => {
+        const f = r / (k - 1);
+        return a.map((qa, c) => {
+          const qb = b[c];
+          const mixv = (u: [number, number, number], v: [number, number, number]): [number, number, number] => [u[0] + (v[0] - u[0]) * f, u[1] + (v[1] - u[1]) * f, u[2] + (v[2] - u[2]) * f];
+          return { p: mixv(qa.p, qb.p), n: mixv(qa.n, qb.n) };
+        });
+      });
     };
     const spread = (n: number, k: number) => Array.from({ length: k }, (_, i) => Math.round((i * (n - 1)) / (k - 1)));
     // Leaves: resting ones show only the top of each stack; leaves in flight show both faces.
@@ -1372,13 +1389,14 @@ export class BookModel {
       if (r.x <= 1e-4 && r.k !== firstRight) continue;
       if (r.x >= 1 - 1e-4 && r.k !== lastLeft) continue;
       const sh = r.sheet;
-      const rows = [0, Math.floor(sh.nz / 2), sh.nz - 1];
-      grid(sheetGrid(sh, spread(sh.ns, 10), rows), (front, d) => bump(2 * r.k + (front ? 0 : 1), d));
+      const rows = sh.nz > 2 ? spread(sh.nz, Math.min(sh.nz, 7)) : [0, sh.nz - 1];
+      const pts = sh.nz > 2 ? sheetGrid(sh, spread(sh.ns, 12), rows) : ruledGrid(sh, spread(sh.ns, 12), 0, 7);
+      grid(pts, (front, d) => bump(2 * r.k + (front ? 0 : 1), d));
     }
     // The page on top of the static block, once every modelled leaf has moved off it.
     if (!coverShut && this.leaves.every((r) => r.x > 1e-4)) {
       const y1 = L.tbY1 - L.nTurn * L.c;
-      const pts = [-1, 0, 1].map((zn) => [0, 0.5, 1].map((f) => {
+      const pts = [-1, -0.5, 0, 0.5, 1].map((zn) => [0, 0.25, 0.5, 0.75, 1].map((f) => {
         const a = L.spineA(y1) + (L.foreA(y1) - L.spineA(y1)) * f;
         return { p: [a, y1, (zn * L.H) / 2] as [number, number, number], n: [0, 1, 0] as [number, number, number] };
       }));
@@ -1392,7 +1410,7 @@ export class BookModel {
         const cols: number[] = [];
         for (let i = 0; i < sh.ns; i++) if (sh.s[i] >= this.soft.frontEnd - L.W - 1e-6 && sh.s[i] <= this.soft.frontEnd + 1e-6) cols.push(i);
         const pick = cols.length > 12 ? spread(cols.length, 12).map((k) => cols[k]) : cols;
-        if (pick.length > 1) grid(sheetGrid(sh, pick, [0, 1]), (front, d) => { if (front) out.coverFront = Math.max(out.coverFront, d); });
+        if (pick.length > 1) grid(ruledGrid(sh, pick), (front, d) => { if (front) out.coverFront = Math.max(out.coverFront, d); });
       } else {
         const th = this.boardTheta, c = Math.cos(th), sn = Math.sin(th);
         const rot = (a: number, y: number): [number, number] => {
@@ -1413,7 +1431,7 @@ export class BookModel {
       const cols: number[] = [];
       for (let i = 0; i < sh.ns - 1; i++) if (this.jacket.isFront(i)) cols.push(i);
       const pick = cols.length > 12 ? spread(cols.length, 12).map((k) => cols[k]) : cols;
-      if (pick.length > 1) grid(sheetGrid(sh, pick, [0, 1], this.jacket.mesh.position.z), (front, d) => { if (front) out.jacketFront = Math.max(out.jacketFront, d); });
+      if (pick.length > 1) grid(ruledGrid(sh, pick, this.jacket.mesh.position.z), (front, d) => { if (front) out.jacketFront = Math.max(out.jacketFront, d); });
     }
     return out;
   }

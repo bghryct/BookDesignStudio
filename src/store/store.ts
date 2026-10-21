@@ -4,6 +4,7 @@ import type { BrushType, Element, ID, Project, SurfaceKey } from '../model/types
 import { createDefaultProject } from '../model/defaults';
 import { findElement, surfaceElementsDraft, spreadsOf } from '../model/surfaces';
 import { cloneElement } from '../model/factory';
+import { releaseTableFrames } from '../model/table';
 import { idbGet, idbSet } from '../lib/idb';
 
 export type View = 'spreads' | 'cover' | 'jacket' | '3d' | 'matrix';
@@ -200,6 +201,7 @@ export const useStore = create<State>((set, get) => ({
     const ids = new Set(get().selection);
     if (!ids.size) return;
     get().update((d) => {
+      releaseTableFrames(d as Project, ids);
       const strip = (els: Draft<Element>[]) => {
         for (let i = els.length - 1; i >= 0; i--) if (ids.has(els[i].id) && !els[i].locked) els.splice(i, 1);
         // Unthread links that pointed at removed frames.

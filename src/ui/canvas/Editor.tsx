@@ -18,7 +18,7 @@ import { SurfaceView } from './SurfaceView';
 import { SurfaceGuides, CanonGuides, CoverGuides, JacketGuides, SpreadGridGuides } from './Guides';
 import { Rulers, RULER } from './Rulers';
 import { TextStoryEditor } from './TextStoryEditor';
-import { SpacingOverlay } from './SpacingOverlay';
+import { SpacingOverlay, InvisiblesOverlay } from './SpacingOverlay';
 import { TableOverlay, makeTableFromDrag, tableDoubleClick, tableLinkClick } from './TableTools';
 import {
   type SurfaceDesc, type Pt, type PanelLayout, sceneMatrix, toLocal, corners, sceneBounds, hitElement, surfaceAt, snapTargets, snapAxis,
@@ -872,6 +872,7 @@ export function Editor({ mode }: { mode: 'spreads' | 'cover' | 'jacket' }) {
       if (mod && (e.key === '0')) { e.preventDefault(); fit(); return; }
       if (mod && (e.key === '=' || e.key === '+')) { e.preventDefault(); zoomAt(1.25, size.w / 2, size.h / 2); return; }
       if (mod && e.key === '-') { e.preventDefault(); zoomAt(0.8, size.w / 2, size.h / 2); return; }
+      if (mod && e.altKey && e.code === 'KeyI') { e.preventDefault(); s.update((d) => { d.book.grid.showInvisibles = !d.book.grid.showInvisibles; }, { history: false }); return; }
       if (mod && e.key === ';') { e.preventDefault(); s.update((d) => { if (e.altKey) d.guidesLocked = !d.guidesLocked; else d.guidesHidden = !d.guidesHidden; }, { history: false }); return; }
       if (mod && e.key === '1') { e.preventDefault(); const z = 1; zoomAt(z / s.zoom, size.w / 2, size.h / 2); return; }
       if (mod && e.key === ']') { e.preventDefault(); s.arrange(e.shiftKey ? 'front' : 'forward'); return; }
@@ -978,6 +979,7 @@ export function Editor({ mode }: { mode: 'spreads' | 'cover' | 'jacket' }) {
           {mode === 'spreads' && <CanonGuides project={project} x={0} y={0} />}
           {mode === 'spreads' && surfaces.length === 2 && <SpreadGridGuides project={project} x={0} y={0} />}
           {spec.grid.showSpacing && <SpacingOverlay project={project} items={allEls} calc={calc} />}
+          {spec.grid.showInvisibles && <InvisiblesOverlay project={project} items={allEls} calc={calc} />}
           {mode === 'cover' && bindingCalc && surfaces[0] && <CoverGuides calc={bindingCalc} spec={spec} surface={surfaces[0]} showBleed={spec.grid.showBleed} />}
           {mode === 'jacket' && jacketCalc && surfaces[0] && <JacketGuides jc={jacketCalc} spec={spec} surface={surfaces[0]} showBleed={spec.grid.showBleed} />}
           {!project.guidesHidden && surfaces.map((sf) => {

@@ -230,9 +230,13 @@ const PARA_PROPS: PropDef[] = [
   { key: 'keepWithNext', label: 'Keep with next', kind: 'number', unit: 'lines', min: 0, max: 5, step: 1, def: 2 },
   { key: 'keepTogether', label: 'Keep lines together', kind: 'bool', def: true },
   { key: 'spanColumns', label: 'Span all columns', kind: 'bool', def: true },
+  { key: 'splitColumns', label: 'Split column', kind: 'number', unit: 'cols', min: 1, max: 6, step: 1, def: 2 },
+  { key: 'splitGap', label: 'Split gap', kind: 'number', unit: 'pt', min: 0, max: 72, step: 1, def: 12 },
+  { key: 'hyphenateAcrossColumns', label: 'Hyphenate across columns', kind: 'bool', def: false },
   { key: 'widows', label: 'Widows', kind: 'number', unit: 'lines', min: 1, max: 5, step: 1, def: 2 },
   { key: 'orphans', label: 'Orphans', kind: 'number', unit: 'lines', min: 1, max: 5, step: 1, def: 2 },
-  { key: 'startOn', label: 'Start', kind: 'enum', def: 'column', opts: [['anywhere', 'Anywhere'], ['column', 'Next column'], ['frame', 'Next frame']] },
+  { key: 'startOn', label: 'Start', kind: 'enum', def: 'column', opts: [['anywhere', 'Anywhere'], ['column', 'Next column'], ['frame', 'Next frame'], ['odd', 'Next odd page'], ['even', 'Next even page']] },
+  { key: 'keepWithPrevious', label: 'Keep with previous', kind: 'bool', def: true },
   { key: 'list', label: 'List', kind: 'list', def: { type: 'bullet', bullet: '•' } },
 ];
 
@@ -249,6 +253,7 @@ const CHAR_PROPS: PropDef[] = [
   { key: 'features', label: 'Figures', kind: 'figures', def: { onum: true, lnum: false } },
   { key: 'size', label: 'Size (absolute)', kind: 'number', unit: 'pt', min: 2, max: 720, step: 0.5, def: 9 },
   { key: 'underline', label: 'Underline', kind: 'bool', def: true },
+  { key: 'underlineStyle', label: 'Underline style', kind: 'enum', def: 'double', opts: [['solid', 'Solid'], ['double', 'Double'], ['dashed', 'Dashed'], ['dotted', 'Dotted'], ['wavy', 'Wavy']] },
   { key: 'strike', label: 'Strikethrough', kind: 'bool', def: true },
   { key: 'highlight', label: 'Highlight', kind: 'color', def: '#ffe680' },
   { key: 'hScale', label: 'Horizontal scale', kind: 'number', unit: '%', min: 25, max: 400, step: 1, def: 90 },

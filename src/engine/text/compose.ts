@@ -21,7 +21,13 @@ import { PLAIN, type Paragraph, type SpanStyle, type Word, type StoryStyles } fr
 /* -------------------------------------------------------------------------- */
 
 /** Layout-only decoration of a run (underline, strike, highlight), turned into rules by the frame. */
-export interface RunDeco { u?: { w: number; o: number; c: string }; s?: { w: number; c: string }; hl?: string }
+export interface RunDeco {
+  u?: { w: number; o: number; c: string; k?: 'double' | 'dashed' | 'dotted' | 'wavy' };
+  s?: { w: number; c: string };
+  hl?: string;
+  /** Ruby annotation set above the run: text, size, measured width. */
+  ruby?: { t: string; s: number; w: number };
+}
 
 /** A measured piece of text in one font. `kern`: extra advance after each UTF-16 unit (pt). */
 export interface Seg {
@@ -46,6 +52,8 @@ export interface Seg {
   obj?: { href: string; w: number; h: number; assetId?: string; pct?: number };
   /** Character rotation, degrees. */
   rot?: number;
+  /** Lead-in before the first glyph (spaced-out ruby bases start half a space in). */
+  dx0?: number;
 }
 
 export interface Box {
@@ -215,10 +223,20 @@ export class ItemBuilder {
     if (cs?.stroke) look.stroke = { color: cs.stroke === 'currentColor' ? color : cs.stroke, width: cs.strokeWidth ?? size * 0.03 };
     if (cs?.underline || cs?.strike || cs?.highlight) {
       look.deco = {
-        u: cs.underline ? { w: cs.underlineWeight ?? Math.max(0.3, size * 0.055), o: cs.underlineOffset ?? size * 0.13, c: cs.underlineColor ?? color } : undefined,
+        u: cs.underline ? { w: cs.underlineWeight ?? Math.max(0.3, size * 0.055), o: cs.underlineOffset ?? size * 0.13, c: cs.underlineColor ?? color, k: cs.underlineStyle && cs.underlineStyle !== 'solid' ? cs.underlineStyle : undefined } : undefined,
         s: cs.strike ? { w: cs.strikeWeight ?? Math.max(0.3, size * 0.055), c: cs.strikeColor ?? color } : undefined,
         hl: cs.highlight,
       };
+    }
+    if (st.ruby) {
+      // Ruby: the annotation at half size; a base narrower than its annotation is spaced out to match.
+      const font = this.font(st, extra, size);
+      const rs = size * 0.5;
+      const rw = measure(st.ruby, font, rs);
+      const base = this.seg(text, font, size, ls, color, { ...look, deco: { ...look.deco, ruby: { t: st.ruby, s: rs, w: rw } } });
+      const n = [...text].length;
+      if (rw > base.width && n > 0) { const add = (rw - base.width) / n; base.ls += add; base.width += add * n; base.dx0 = add / 2; }
+      return [base];
     }
     sc = sc || cs?.textTransform === 'small-caps';
     // Character rotation: every character its own run, turned about its centre.
@@ -385,7 +403,7 @@ export function buildItems(p: Paragraph, style: TextStyle, ps: ParaStyle, scWord
     if (word.here) items.push({ t: 'here' });
     const sc = wi < scWords;
     const text = word.text;
-    const noBreak = word.pieces.some((x) => x.st.cs?.noBreak);
+    const noBreak = word.pieces.some((x) => x.st.cs?.noBreak || x.st.ruby != null);
     // Break opportunities: discretionary hyphens, else hyphenation points; after explicit hyphens/dashes.
     const breaks: { at: number; hyph: boolean }[] = [];
     if (!noBreak) {
@@ -735,7 +753,7 @@ function runOf(s: Seg, x: number, baseline: number, extraLs = 0, scale = 1): Tex
   const ls = s.ls + extraLs;
   const kernSum = s.kern ? s.kern.reduce((a, b) => a + b, 0) : 0;
   const width = s.glyphW * scale + ls * n + kernSum;
-  const r: TextRun = { x, y: baseline - (s.dy ?? 0), text: s.text, font: s.font, size: s.size, color: s.color, width };
+  const r: TextRun = { x: x + (s.dx0 ?? 0), y: baseline - (s.dy ?? 0), text: s.text, font: s.font, size: s.size, color: s.color, width };
   // Scaled runs carry pre-scale spacing so the renderers' transform lands them exactly.
   if (sx !== 1) { r.scaleX = sx; r.letterSpacing = ls / sx; r.kern = s.kern?.map((k) => k / sx); }
   else { r.letterSpacing = ls; r.kern = s.kern; }

@@ -73,12 +73,51 @@ function chapterAt(project: Project, pageIndex: number | null): string {
   return list[Math.min(pageIndex, list.length - 1)] ?? '';
 }
 
-function tokensFor(project: Project, pageIndex: number | null): TokenContext {
+function tokensFor(project: Project, pageIndex: number | null, text = ''): TokenContext {
   const b = project.book;
-  return { page: (pageIndex ?? 0) + 1, pages: project.pages.length, title: b.title, subtitle: b.subtitle, author: b.author, publisher: b.publisher, chapter: chapterAt(project, pageIndex) };
+  const t: TokenContext = { page: (pageIndex ?? 0) + 1, pages: project.pages.length, title: b.title, subtitle: b.subtitle, author: b.author, publisher: b.publisher, chapter: chapterAt(project, pageIndex) };
+  if (text.includes('{xref')) t.xrefs = xrefsFor(project);
+  return t;
+}
+
+/**
+ * Cross-references: where each {anchor:name} is set (page number and the text of its paragraph).
+ * Found by laying out the stories that hold anchors; recomputed when the pages change.
+ */
+const xrefCache = new WeakMap<object, Record<string, { page: number; text: string }>>();
+let computingXrefs = false;
+function xrefsFor(project: Project): Record<string, { page: number; text: string }> {
+  const cached = xrefCache.get(project.pages);
+  if (cached) return cached;
+  if (computingXrefs) return {};
+  const map: Record<string, { page: number; text: string }> = {};
+  computingXrefs = true;
+  try {
+    const idx = threadIndex(project);
+    project.pages.forEach((p, i) => {
+      for (const e of p.elements) {
+        if (e.type !== 'text') continue;
+        const chain = idx.byId.has(e.id) ? threadOf(project, e.id) : [e.id];
+        const head = idx.byId.get(chain[0])?.el ?? e;
+        if (!head.text.includes('{anchor:')) continue;
+        for (const m of layoutText(e, { project, surface: `page:${p.id}`, pageIndex: i, side: pageSide(project, i) }).marks ?? []) {
+          if (!m.startsWith('\u0001')) continue;
+          const [, name, text] = m.split('\u0001');
+          if (!(name in map)) map[name] = { page: i + 1, text: text.replace(/\s+/g, ' ').trim() };
+        }
+      }
+    });
+  } finally {
+    computingXrefs = false;
+  }
+  xrefCache.set(project.pages, map);
+  return map;
 }
 
 function gridFor(spec: BookSpec, side: PageSide, el: Element, surface: SurfaceKey) {
+  // A frame's own baseline grid: increment and offset from the frame's top.
+  const own = el.type === 'text' ? el.customGrid : null;
+  if (own && own.increment >= 1) return { origin: (((own.offset % own.increment) + own.increment) % own.increment), increment: own.increment };
   if (surface === 'cover' || spec.grid.baseline < 1) return null;
   const block = textBlock(spec, side);
   const line0 = block.y + spec.grid.baselineOffset;
@@ -93,6 +132,8 @@ function gridFor(spec: BookSpec, side: PageSide, el: Element, surface: SurfaceKe
 
 interface ChainCache { members: Element[]; book: BookSpec; styles: string; version: number; tokens: string; wraps: string; layouts: Map<string, FrameLayout> }
 const chainCache = new WeakMap<Element, ChainCache>();
+interface ChainInfo { chain: { el: TextElement; pageIndex: number | null; surface: SurfaceKey }[]; tokens: TokenContext; tokensKey: string; wraps: WrapShape[][]; wk: string }
+const chainMemo = new WeakMap<Project, Map<string, ChainInfo>>();
 const singleCache = new WeakMap<Element, Map<string, FrameLayout>>();
 
 interface ThreadIndex { prev: Map<string, string>; byId: Map<string, { el: TextElement; pageIndex: number | null; surface: SurfaceKey }> }
@@ -131,12 +172,17 @@ export function threadOf(project: Project, id: string): string[] {
 
 /** The project's paragraph / character styles for the text engine, with a cache identity. */
 const stylesIds = new WeakMap<object, number>();
+const NONE_PARA: NonNullable<Project['paragraphStyles']> = [];
+const NONE_CHAR: NonNullable<Project['characterStyles']> = [];
+const NONE_STR: string[] = [];
 let stylesCounter = 0;
 const imageMaps = new WeakMap<object, Record<string, { href: string; w: number; h: number }>>();
 function storyStyles(project: Project): { styles: StoryStyles | null; key: string } {
-  const para = project.paragraphStyles ?? [], char = project.characterStyles ?? [], hyph = project.hyphenDictionary ?? [];
+  // Shared empty lists: a fresh [] per call would give the cache a new identity every time.
+  const para = project.paragraphStyles ?? NONE_PARA, char = project.characterStyles ?? NONE_CHAR, hyph = project.hyphenDictionary ?? NONE_STR;
+  const hidden = project.hiddenConditions ?? NONE_STR;
   const hasAssets = Object.keys(project.assets).length > 0;
-  if (!para.length && !char.length && !hyph.length && !hasAssets) return { styles: null, key: '-' };
+  if (!para.length && !char.length && !hyph.length && !hasAssets && !hidden.length) return { styles: null, key: '-' };
   const id = (o: object) => { let v = stylesIds.get(o); if (v == null) { v = ++stylesCounter; stylesIds.set(o, v); } return v; };
   for (const d of [...para, ...char]) if (d.props.fontFamily) void ensureFamily(d.props.fontFamily);
   // Images for inline graphics ({img:id}): href and pixel size, keyed by asset id.
@@ -146,7 +192,7 @@ function storyStyles(project: Project): { styles: StoryStyles | null; key: strin
     for (const a of Object.values(project.assets)) images[a.id] = { href: a.src, w: a.width, h: a.height };
     imageMaps.set(project.assets, images);
   }
-  return { styles: { para, char, hyphenation: hyph, images }, key: `${id(para)}/${id(char)}/${id(hyph)}/${id(project.assets)}` };
+  return { styles: { para, char, hyphenation: hyph, images, hiddenConditions: hidden }, key: `${id(para)}/${id(char)}/${id(hyph)}/${id(project.assets)}/${hidden.join(',')}` };
 }
 
 /* Text wrap: items with a wrap setting push the text of frames on the same page aside. */
@@ -186,8 +232,8 @@ function wrapsFor(el: TextElement, ctx: CompileContext): WrapShape[] {
 const wrapKey = (w: WrapShape[]) => w.map((r) => `${r.x.toFixed(1)},${r.y.toFixed(1)},${r.w.toFixed(1)},${r.h.toFixed(1)},${r.shape[0]}${r.side[0]}${r.jump ? 'j' : ''}`).join(';');
 
 /** Auto-height frames are set in a tall frame; the editor then fits the frame to `usedHeight`. */
-function frameFor(el: TextElement, grid: FrameSpec['grid'], wraps: WrapShape[]): FrameSpec {
-  const f = frameSpecOf(el, grid, wraps);
+function frameFor(el: TextElement, grid: FrameSpec['grid'], wraps: WrapShape[], pageIndex: number | null = null): FrameSpec {
+  const f = { ...frameSpecOf(el, grid, wraps), page: pageIndex != null ? pageIndex + 1 : null };
   return el.autoHeight ? { ...f, h: Math.max(el.h, 20000), verticalAlign: 'top' } : f;
 }
 
@@ -200,26 +246,33 @@ export function layoutText(el: TextElement, ctx: CompileContext): FrameLayout {
   const idx = threadIndex(project);
   const threaded = idx.byId.has(el.id) && (idx.prev.has(el.id) || (el.flowNext && idx.byId.has(el.flowNext)));
   if (threaded) {
-    const chain = threadOf(project, el.id).map((id) => idx.byId.get(id)!);
+    // The chain, its tokens and wraps, worked out once per project state for all its frames.
+    let memo = chainMemo.get(project);
+    if (!memo) { memo = new Map(); chainMemo.set(project, memo); }
+    let info = memo.get(el.id);
+    if (!info) {
+      const chain = threadOf(project, el.id).map((id) => idx.byId.get(id)!);
+      const tokens = tokensFor(project, chain[0].pageIndex, chain[0].el.text);
+      const wraps = chain.map((c) => wrapsFor(c.el, { project, surface: c.surface, pageIndex: c.pageIndex, side: c.pageIndex != null ? pageSide(project, c.pageIndex) : 'right' }));
+      info = { chain, tokens, tokensKey: JSON.stringify(tokens), wraps, wk: wraps.map(wrapKey).join('|') };
+      for (const c of chain) memo.set(c.el.id, info);
+    }
+    const { chain, tokens, tokensKey, wraps, wk } = info;
     const head = chain[0].el;
-    const tokens = tokensFor(project, chain[0].pageIndex);
-    const tokensKey = JSON.stringify(tokens);
-    const wraps = chain.map((c) => wrapsFor(c.el, { project, surface: c.surface, pageIndex: c.pageIndex, side: c.pageIndex != null ? pageSide(project, c.pageIndex) : 'right' }));
-    const wk = wraps.map(wrapKey).join('|');
     const cached = chainCache.get(head);
     if (cached && cached.version === version && cached.book === project.book && cached.styles === ss.key && cached.tokens === tokensKey && cached.wraps === wk &&
       cached.members.length === chain.length && cached.members.every((m, i) => m === chain[i].el)) {
       const hit = cached.layouts.get(el.id);
       if (hit) return hit;
     }
-    const frames = chain.map((c, i) => frameFor(c.el, c.pageIndex != null ? gridFor(project.book, pageSide(project, c.pageIndex), c.el, c.surface) : null, wraps[i]));
+    const frames = chain.map((c, i) => frameFor(c.el, c.pageIndex != null ? gridFor(project.book, pageSide(project, c.pageIndex), c.el, c.surface) : null, wraps[i], c.surface.startsWith('page:') ? c.pageIndex : null));
     const results = layoutStory(head.text, head.style, frames, tokens, ss.styles);
     const layouts = new Map<string, FrameLayout>();
     chain.forEach((c, i) => layouts.set(c.el.id, results[i]));
     chainCache.set(head, { members: chain.map((c) => c.el), book: project.book, styles: ss.key, version, tokens: tokensKey, wraps: wk, layouts });
     return layouts.get(el.id)!;
   }
-  const tokens = tokensFor(project, ctx.pageIndex);
+  const tokens = tokensFor(project, ctx.pageIndex, el.text);
   const grid = gridFor(project.book, ctx.side, el, ctx.surface);
   const wraps = wrapsFor(el, ctx);
   const key = `${version}|${ss.key}|${JSON.stringify(tokens)}|${grid ? `${grid.origin.toFixed(3)}/${grid.increment}` : '-'}|${wrapKey(wraps)}`;

@@ -7,6 +7,7 @@ import { threadOf } from '../../render/compile';
 import type { TextElement, CharacterStyleProps } from '../../model/types';
 import { charPropsToString } from '../../engine/text/props';
 import { getFamilies } from '../../engine/fonts';
+import { anchorNames, conditionNames } from '../contents';
 
 /* -------------------------------------------------------------------------- */
 /* Markup highlighting                                                         */
@@ -68,6 +69,14 @@ const INSERTS: { group: string; items: { label: string; text: string; hint?: str
     { label: 'Footnote', text: '{fn:}', hint: 'Type the note inside the braces' }, { label: 'Endnote', text: '{en:}', hint: 'Collected at the end of the story' },
     { label: 'Index entry', text: '{ix:}', hint: 'Type the index term inside the braces; term!subterm for a sub-entry' }, { label: 'Page number', text: '{page}' }, { label: 'Roman page number', text: '{page:roman}' }, { label: 'Chapter (running head)', text: '{chapter}' }, { label: 'Book title', text: '{title}' },
   ] },
+  { group: 'References & editions', items: [
+    { label: 'Anchor', text: '{anchor:}', hint: 'Name a place for cross-references: {anchor:fig-3}' },
+    { label: 'Cross-ref page', text: '{xref:}', hint: 'The page an anchor is set on: {xref:fig-3}' },
+    { label: 'Cross-ref text', text: '{xreftext:}', hint: 'The text of the paragraph holding the anchor' },
+    { label: 'Conditional text', text: '{if:Condition}', hint: 'Wraps the selection in {if:Name}…{/if}; show or hide conditions under Document › Conditional text' },
+    { label: 'Ruby', text: '{ruby:|}', hint: '{ruby:base|annotation} — furigana or a gloss set small above the base' },
+    { label: 'Date', text: '{date}' }, { label: 'Last page', text: '{lastpage}' },
+  ] },
   { group: 'Characters', items: [
     { label: '— em dash', text: '—' }, { label: '– en dash', text: '–' }, { label: '… ellipsis', text: '…' }, { label: '‘ ’ single quotes', text: '‘’' },
     { label: '“ ” double quotes', text: '“”' }, { label: '« » guillemets', text: '« »' }, { label: '§ section', text: '§' }, { label: '¶ pilcrow', text: '¶' },
@@ -89,6 +98,8 @@ export function TextStoryEditor({ elementId, anchor, viewport }: { elementId: st
   const hlRef = useRef<HTMLPreElement>(null);
   const chain = threadOf(project, elementId);
   const paraStyles = project.paragraphStyles ?? [];
+  const anchors = useMemo(() => anchorNames(project), [project]);
+  const conditions = useMemo(() => conditionNames(project), [project]);
   const charStyles = project.characterStyles ?? [];
   const [caret, setCaret] = useState(0);
   const [pop, setPop] = useState<Pop>(null);
@@ -146,12 +157,22 @@ export function TextStoryEditor({ elementId, anchor, viewport }: { elementId: st
     if (!ta) return;
     const { selectionStart: a, selectionEnd: b, value } = ta;
     setText(value.slice(0, a) + str + value.slice(b));
-    // Leave the caret inside an empty footnote / pair of quotes.
-    const back = str === '{fn:}' || str === '{en:}' || str === '{ix:}' ? 1 : str === '‘’' || str === '“”' ? 1 : 0;
+    // Leave the caret inside an empty footnote / anchor / pair of quotes.
+    const back = str === '{ruby:|}' ? 2 : /^\{\w+:\}$/.test(str) ? 1 : str === '‘’' || str === '“”' ? 1 : 0;
     requestAnimationFrame(() => { ta.focus(); ta.setSelectionRange(a + str.length - back, a + str.length - back); });
   };
 
   insertRef.current = insert;
+
+  /** Conditional text around the selection, the condition name selected for typing over. */
+  const wrapCondition = () => {
+    const ta = ref.current;
+    if (!ta) return;
+    const { selectionStart: a, selectionEnd: b, value } = ta;
+    const name = conditions[0] ?? 'Condition';
+    setText(value.slice(0, a) + `{if:${name}}` + value.slice(a, b) + '{/if}' + value.slice(b));
+    requestAnimationFrame(() => { ta.focus(); ta.setSelectionRange(a + 4, a + 4 + name.length); });
+  };
 
   /** Rewrite the paragraph tags of every line the selection touches. */
   const editLines = (fn: (bareLine: string, tags: string[]) => string) => {
@@ -271,7 +292,10 @@ export function TextStoryEditor({ elementId, anchor, viewport }: { elementId: st
               <div className="mb-0.5 text-[9.5px] font-semibold uppercase tracking-[0.08em] text-ink-500">{g.group}</div>
               <div className="flex flex-wrap gap-1">
                 {g.items.map((it) => (
-                  <button key={it.label} type="button" title={it.hint ?? it.text} onClick={() => insert(it.text)} className="rounded border border-ink-700 px-1.5 py-0.5 text-[10.5px] text-ink-300 hover:border-ink-500 hover:text-ink-100">{it.label}</button>
+                  <button key={it.label} type="button" title={it.hint ?? it.text} onClick={() => (it.text === '{if:Condition}' ? wrapCondition() : insert(it.text))} className="rounded border border-ink-700 px-1.5 py-0.5 text-[10.5px] text-ink-300 hover:border-ink-500 hover:text-ink-100">{it.label}</button>
+                ))}
+                {g.group === 'References & editions' && anchors.map((a) => (
+                  <button key={a} type="button" title={`Insert {xref:${a}} — the page of this anchor`} onClick={() => insert(`{xref:${a}}`)} className="rounded border border-[#3a6f8f] px-1.5 py-0.5 text-[10.5px] text-[#8ec5e6] hover:border-[#5c9cc2]">→ {a}</button>
                 ))}
               </div>
             </div>
@@ -373,6 +397,11 @@ function CharFormat({ onApply }: { onApply: (props: string | null) => void }) {
       </div>
       <div className="flex flex-wrap gap-x-3 gap-y-1">
         {check('underline', 'Underline')}
+        {p.underline && (
+          <select className="h-5 rounded border border-ink-600 bg-ink-800 px-1 text-[10.5px] text-ink-100" value={p.underlineStyle ?? 'solid'} onChange={(e) => up('underlineStyle', e.target.value === 'solid' ? '' : e.target.value)}>
+            <option value="solid">Solid</option><option value="double">Double</option><option value="dashed">Dashed</option><option value="dotted">Dotted</option><option value="wavy">Wavy</option>
+          </select>
+        )}
         {check('strike', 'Strikethrough')}
         {check('noBreak', 'No break')}
       </div>
@@ -409,6 +438,8 @@ function ParaFormat({ onApply }: { onApply: (props: string | null) => void }) {
         {num('track', 'Tracking ‰')}
         {sel('keep', 'Keep with next', [['1', '1 line'], ['2', '2 lines'], ['3', '3 lines']])}
         {sel('start', 'Start', [['column', 'Next column'], ['frame', 'Next frame']])}
+        {sel('split', 'Split column', [['2', '2 columns'], ['3', '3 columns'], ['4', '4 columns']])}
+        {sel('hyphencolumns', 'Hyphen at column end', [['true', 'Allow'], ['false', 'Avoid']])}
       </div>
       <div className="flex items-center gap-1.5">
         <code className="min-w-0 flex-1 truncate rounded bg-ink-900 px-1.5 py-1 text-[10px] text-[#e0b062]">{preview ? `[{${preview}}]` : 'Local formatting for the lines in the selection'}</code>

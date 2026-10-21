@@ -83,6 +83,8 @@ function TypeControls({ el }: { el: TextElement }) {
           <NumberField label="Word space" unit="%" value={st.wordSpacing} step={1} decimals={0} onScrubStart={begin} onChange={(v) => set((d) => { d.wordSpacing = v; })} />
         </Row>
         <div className="flex flex-wrap gap-0.5" title="The classical typographic scale (Bringhurst §3.1.1)">
+          <button type="button" title="Auto leading: 120% of the size" onClick={() => set((d) => { d.leading = +(d.fontSize * 1.2).toFixed(2); })}
+            className="h-5 rounded border border-ink-700 px-1 text-[10px] text-ink-400 hover:text-ink-200">Auto ld</button>
           {[6, 7, 8, 9, 10, 11, 12, 14, 16, 18, 21, 24, 36, 48, 60, 72].map((pt) => (
             <button key={pt} type="button" onClick={() => set((d) => { const ratio = d.leading / d.fontSize; d.fontSize = pt; if (!d.baselineGrid) d.leading = +(pt * ratio).toFixed(2); })}
               className={clsx('h-5 min-w-[22px] rounded border px-1 text-[10px] tabular-nums', st.fontSize === pt ? 'border-rubric bg-rubric/20 text-ink-100' : 'border-ink-700 text-ink-400 hover:text-ink-200')}>{pt}</button>

@@ -46,7 +46,7 @@ const CHAR_KEYS: Record<string, keyof CharacterStyleProps> = {
   case: 'textTransform', transform: 'textTransform',
   pos: 'position', position: 'position',
   shift: 'baselineShift', baseline: 'baselineShift', bs: 'baselineShift',
-  u: 'underline', underline: 'underline', uweight: 'underlineWeight', uoffset: 'underlineOffset', ucolor: 'underlineColor',
+  u: 'underline', underline: 'underline', uweight: 'underlineWeight', uoffset: 'underlineOffset', ucolor: 'underlineColor', ustyle: 'underlineStyle',
   s: 'strike', strike: 'strike', strikethrough: 'strike', sweight: 'strikeWeight', scolor: 'strikeColor',
   highlight: 'highlight', bg: 'highlight', mark: 'highlight',
   hscale: 'hScale', h: 'hScale', vscale: 'vScale', v: 'vScale', skew: 'skew', slant: 'skew',
@@ -64,11 +64,14 @@ const PARA_KEYS: Record<string, keyof ParagraphStyleProps> = {
   before: 'spaceBefore', after: 'spaceAfter', spacebefore: 'spaceBefore', spaceafter: 'spaceAfter',
   hyphenate: 'hyphenate', hyph: 'hyphenate', kerning: 'kerning', kern: 'kerning',
   rag: 'rag', ragamount: 'ragAmount', amount: 'ragAmount', ragpattern: 'ragPattern', pattern: 'ragPattern',
-  keep: 'keepWithNext', keepwithnext: 'keepWithNext', together: 'keepTogether', widows: 'widows', orphans: 'orphans', start: 'startOn',
+  keep: 'keepWithNext', keepwithnext: 'keepWithNext', keepprev: 'keepWithPrevious', keepwithprevious: 'keepWithPrevious', together: 'keepTogether', widows: 'widows', orphans: 'orphans', start: 'startOn',
   last: 'lastLineAlign', lastline: 'lastLineAlign', single: 'singleWordJustify',
   wordmin: 'wordSpaceMin', wordmax: 'wordSpaceMax', lsmin: 'letterSpaceMin', lsmax: 'letterSpaceMax', gsmin: 'glyphScaleMin', gsmax: 'glyphScaleMax',
   optical: 'opticalMargin', composer: 'composer', grid: 'baselineGrid', span: 'spanColumns',
+  split: 'splitColumns', splitcolumns: 'splitColumns', splitgap: 'splitGap', hyphencolumns: 'hyphenateAcrossColumns', acrosscolumns: 'hyphenateAcrossColumns',
 };
+
+const ULINES = new Set(['solid', 'double', 'dashed', 'dotted', 'wavy']);
 
 const CASES: Record<string, TextStyle['textTransform']> = { upper: 'uppercase', uppercase: 'uppercase', caps: 'uppercase', lower: 'lowercase', lowercase: 'lowercase', sc: 'small-caps', smallcaps: 'small-caps', 'small-caps': 'small-caps', none: 'none' };
 const ALIGNS: Record<string, string> = { left: 'left', l: 'left', center: 'center', centre: 'center', c: 'center', right: 'right', r: 'right', justify: 'justify', j: 'justify', full: 'justify-all', 'justify-all': 'justify-all' };
@@ -108,6 +111,7 @@ export function parseCharProps(src: string): CharacterStyleProps {
     if (k === 'textTransform') out[k] = CASES[String(v).toLowerCase()] ?? 'none';
     else if (k === 'position') out[k] = /^sup/i.test(String(v)) ? 'superscript' : /^sub/i.test(String(v)) ? 'subscript' : 'normal';
     else if (k === 'features') out[k] = features(v);
+    else if (k === 'underline' && typeof v === 'string' && ULINES.has(v.toLowerCase())) { out.underline = true; out.underlineStyle = v.toLowerCase(); }
     else if (k === 'underline' || k === 'strike') {
       if (typeof v === 'string') { out[k] = true; out[k === 'underline' ? 'underlineColor' : 'strikeColor'] = v; } else out[k] = !!v;
     } else if (k === 'stroke' && v === true) out[k] = 'currentColor';
@@ -130,7 +134,8 @@ export function parseParaProps(src: string): ParagraphStyleProps {
     if (!k) continue;
     if (k === 'align' || k === 'lastLineAlign' || k === 'singleWordJustify') out[k] = ALIGNS[String(v).toLowerCase()] === 'justify-all' && k !== 'align' ? 'justify' : ALIGNS[String(v).toLowerCase()] ?? v;
     else if (k === 'textTransform') out[k] = CASES[String(v).toLowerCase()] ?? 'none';
-    else if (k === 'keepTogether' || k === 'hyphenate' || k === 'opticalMargin' || k === 'baselineGrid' || k === 'spanColumns') out[k] = !!v;
+    else if (k === 'keepWithPrevious' || k === 'keepTogether' || k === 'hyphenate' || k === 'opticalMargin' || k === 'baselineGrid' || k === 'spanColumns' || k === 'hyphenateAcrossColumns') out[k] = !!v;
+    else if (k === 'splitColumns') out[k] = v === true ? 2 : Number(v) || 1;
     else if (k === 'keepWithNext' && v === true) out[k] = 2;
     else out[k] = v;
   }
@@ -152,7 +157,7 @@ export function charPropsToString(p: CharacterStyleProps): string {
   if (p.position === 'superscript') parts.push('super');
   if (p.position === 'subscript') parts.push('sub');
   add('shift', p.baselineShift);
-  if (p.underline) parts.push('underline');
+  if (p.underline) parts.push(p.underlineStyle && p.underlineStyle !== 'solid' ? `underline:${p.underlineStyle}` : 'underline');
   if (p.strike) parts.push('strike');
   add('highlight', p.highlight);
   add('hscale', p.hScale);
