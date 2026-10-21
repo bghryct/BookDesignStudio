@@ -83,7 +83,7 @@ export function despike(p: Float64Array, n: number, passes = 3): void {
 
 const FOLD_N = 12;
 // Enough samples for a flap to follow a soft cover curled open (a coarse chord cuts through the pages on it).
-const FLAP_N = 16;
+const FLAP_N = 32;
 export const JACKET_THICKNESS = mm(0.12);
 /** Air between the covering and the jacket. */
 export const JACKET_GAP = mm(0.15);

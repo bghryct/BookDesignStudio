@@ -946,6 +946,9 @@ export class BookMaterials {
       mat.alphaMap = alphaTex;
       mat.transparent = vellum;
       mat.alphaTest = alphaTex ? (vellum ? 0.02 : 0.5) : 0;
+      // Die-cut windows: alpha-to-coverage (with MSAA) smooths the cut edge an alpha test would
+      // leave stair-stepped and crawling. Vellum blends, so it doesn't need it.
+      mat.alphaToCoverage = !!alphaTex && !vellum;
       mat.depthWrite = true;
       mat.needsUpdate = true;
       return vellum;

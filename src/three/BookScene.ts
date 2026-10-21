@@ -961,13 +961,23 @@ export class BookScene {
     const liveAspect = this.live.w / this.live.h;
     // The current pose, even if the render loop hasn't applied the latest setOpen / setLeaf yet.
     if (this.manual || this.mode === 'none') this.applySample(this.staticSample());
-    this.prepareOffline(w, h);
+    // Supersampled (on top of MSAA) where the GPU allows: page edges a fraction of a pixel thick,
+    // deckles, die-cut windows and fine type stay clean instead of stair-stepping.
+    const caps = this.renderer.capabilities;
+    const limit = Math.min(caps.maxTextureSize, 8192);
+    const ss = Math.max(1, Math.min(2, Math.sqrt(16.8e6 / (w * h)), limit / Math.max(w, h)));
+    const sw = Math.round(w * ss), sh = Math.round(h * ss);
+    this.prepareOffline(sw, sh);
     if (this.userCamera) this.refitUserCamera(liveAspect, w / h);
     else this.frameCamera(this.sample);
     this.renderNow();
     const out = createCanvas(w, h);
     const ctx = out.getContext('2d');
-    if (ctx) ctx.drawImage(this.canvas, 0, 0, w, h);
+    if (ctx) {
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'high';
+      ctx.drawImage(this.canvas, 0, 0, sw, sh, 0, 0, w, h);
+    }
     // Restore the live view.
     this.renderer.setPixelRatio(this.live.pr);
     this.renderer.setSize(this.live.w, this.live.h, false);

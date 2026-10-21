@@ -11,7 +11,9 @@ import {
   CatmullRomCurve3,
   Group,
   Mesh,
+  ShapeUtils,
   TubeGeometry,
+  Vector2,
   Vector3,
   type Material,
 } from 'three';
@@ -280,6 +282,17 @@ function buildCaseSpine(L: BookLayout, bandsFromHead: number[]): BufferGeometry 
     const q = lin(arc[i]);
     return { p: [q[0], q[1], j === 0 ? Z0 : Z1], uv: [0, 0] };
   }, (_p, i) => [-arc[i].n[0], -arc[i].n[1], 0]);
+  // Its long edges at the joints, closed from the cloth to the lining: under the joint cloth,
+  // but open they let a grazing view at the head or tail into the hollow and out the other side.
+  for (const [i, sgn] of [[0, -1], [arc.length - 1, 1]] as const) {
+    const a = arc[i];
+    const q = lin(a);
+    const out: [number, number] = [a.p[0], a.p[1]];
+    // Facing along the arc, away from the spine (toward the joint).
+    const ta = sgn * (arc[Math.min(arc.length - 1, i + 1)].p[0] - arc[Math.max(0, i - 1)].p[0]);
+    const ty = sgn * (arc[Math.min(arc.length - 1, i + 1)].p[1] - arc[Math.max(0, i - 1)].p[1]);
+    mb.grid(1, 2, zs.length, (k, j) => ({ p: k === 0 ? [out[0], out[1], zs[j]] : [q[0], q[1], zs[j]], uv: [0, 0] }), () => [ta, ty, 0]);
+  }
   // Head and tail: the covering turned in over the spine stiffener.
   for (const [z, sign] of [[Z0, -1], [Z1, 1]] as const) {
     mb.grid(0, arc.length, 2, (i, j) => {
@@ -512,6 +525,9 @@ export class BookModel {
   private frontPivot: Group | null = null;
   private hinge: SheetMesh | null = null;
   private gutter: SheetMesh | null = null;
+  private backJoint: SheetMesh | null = null;
+  /** Head and tail caps of the spine region (see buildSpineCaps). */
+  private caps: { geo: BufferGeometry; pos: Float32Array; max: number } | null = null;
   private soft: SoftCoverRig | null = null;
   /** Case spine's outer surface (back → front) with outward normals, for the jacket. */
   private spineOutline: { p: Float64Array; n: Float64Array } | null = null;
@@ -525,7 +541,7 @@ export class BookModel {
    * Gap between the support (opened board's inner face / opened cover's top) and the bottom of
    * the first turned leaf: pastedown and endpaper hinge, plus the flaps tucked in there, pt.
    */
-  private readonly e0: number;
+  private e0: number;
   /** Lift (pt) that sets the lowest closed part (jacket, threads, joint cloth) on the ground. */
   readonly groundLift: number;
   /** Head-most / tail-most z of the closed book (jacket, threads included), pt. */
@@ -597,8 +613,15 @@ export class BookModel {
   private boardJacketBase(jc: JacketCalc): JacketBase {
     const L = this.L;
     const A0 = L.boardA0, A1 = A0 + L.boardW, thick = L.thick;
-    const Nb = 8, Nj = 8, Ns = 24;
+    const Nj = 8, Ns = 24;
     const hdJ = L.family === 'case' ? L.hingeDepth * 0.3 : 0;
+    // Coptic: the link stitches run over both boards' outer faces up to 4 mm in from the spine
+    // edge. The jacket rides over them, and comes down onto the board after the next sample.
+    const stitchEnd = L.family === 'coptic' ? Math.min(mm(4) + 2 * L.threadR, 0.5 * L.boardW) : 0;
+    const lift = stitchEnd > 0 ? 2 * L.threadR + mm(0.05) : 0;
+    const bs = mergeSamples(linspace(A0, A1, 8), stitchEnd > 0 ? [A0 + stitchEnd] : []);
+    const lb = bs.map((a) => (a - A0 <= stitchEnd + 1e-6 ? lift : 0));
+    const Nb = bs.length;
     const count = Nb + Nj + Ns + Nj + Nb - 1;
     // An uncovered (coptic) spine: the jacket runs up its back to where the front board's outer
     // face starts. Opened past upright, that corner sinks below the closed book's top, and a
@@ -606,7 +629,7 @@ export class BookModel {
     let spineTop = thick;
     const spinePt = (f: number): [number, number] => {
       if (L.family === 'case') return spineOuter(L, f).p;
-      return [L.a0, spineTop * f];
+      return [L.a0, -lift + (spineTop + lift) * f];
     };
     const bez = (p: number[][], t: number): [number, number] => {
       const u = 1 - t;
@@ -617,27 +640,32 @@ export class BookModel {
     };
     const fillAt = (theta: number, out: Float64Array) => {
       const rot = (a: number, y: number) => this.rotateAboutPivot(a, y, theta);
+      // (The board's own corner: opened, a lifted one would run the spine up past the board's end.)
       if (L.family !== 'case') spineTop = Math.max(L.tbY1, Math.min(thick, rot(A0, thick)[1]));
       let i = 0;
       const put = (p: [number, number]) => { out[2 * i] = p[0]; out[2 * i + 1] = p[1]; i++; };
-      for (let k = 0; k < Nb; k++) put([A1 - ((A1 - A0) * k) / (Nb - 1), 0]);
+      for (let k = Nb - 1; k >= 0; k--) put([bs[k], -lb[k]]);
       const S0 = spinePt(0), S1 = spinePt(1);
-      const back = [[A0, 0], [A0 + (S0[0] - A0) * 0.3, hdJ], [A0 + (S0[0] - A0) * 0.7, hdJ], S0];
+      const back = [[A0, -lift], [A0 + (S0[0] - A0) * 0.3, hdJ - lift], [A0 + (S0[0] - A0) * 0.7, hdJ - lift], S0];
       for (let k = 1; k <= Nj; k++) put(bez(back, k / Nj));
       for (let k = 1; k <= Ns; k++) put(spinePt(k / Ns));
-      const front = this.frontJoint(S1, hdJ, theta, 0);
+      // Over the joint only while the board is near closed: opened, the board's spine end swings
+      // out past the spine, and the jacket wraps that corner as before.
+      const lj = lift * (1 - smoothstep(0.08 * Math.PI, 0.2 * Math.PI, theta));
+      const front = this.frontJoint(S1, hdJ - lj, theta, -lj);
       for (let k = 1; k <= Nj; k++) {
         const q = bez(front, k / Nj);
         // Over the joint cloth: its cover face, bridged across the groove (never inside it). In a
         // tight crease at the top of the spine the offsets of this and of the spine then meet in a
-        // clean corner, which the jacket rig trims.
+        // clean corner, which the jacket rig trims. (Outside the cloth, the smooth curve itself:
+        // stepping out along the cloth's normals would ripple it over the groove's slopes.)
         const c = this.clothFaceAt(k / Nj);
         if (c) {
           const d = (q[0] - c[0]) * c[2] + (q[1] - c[1]) * c[3];
-          put([c[0] + c[2] * Math.max(0, d), c[1] + c[3] * Math.max(0, d)]);
+          put(d >= 0 ? q : [q[0] - c[2] * d, q[1] - c[3] * d]);
         } else put(q);
       }
-      for (let k = 1; k < Nb; k++) put(rot(A0 + ((A1 - A0) * k) / (Nb - 1), thick));
+      for (let k = 1; k < Nb; k++) put(rot(bs[k], thick + lb[k]));
     };
     // X from the closed pose: board panels by distance, the spine panel by arc length.
     const closed = new Float64Array(count * 2);
@@ -886,12 +914,149 @@ export class BookModel {
       }
     });
     this.addSheet(back, [m.cover, m.lining, m.lining]);
+    this.backJoint = back;
     this.hinge = new SheetMesh(ts, zs, JOINT_T, { top: hingeUV('front'), bottom: zero, edge: zero }, (mid) => this.poseJointCloth(mid, n, 0));
     this.addSheet(this.hinge, [m.cover, m.lining, m.lining]);
     // Endpaper hinge bridging the pastedown and the first leaf when the book is open.
     const gz = [-L.H / 2, L.H / 2];
     this.gutter = new SheetMesh(linspace(0, 1, GUTTER_N), gz, GUTTER_T, { top: zero, bottom: zero, edge: zero }, (mid) => this.poseGutter(mid, 0));
     this.addSheet(this.gutter, [m.endpaper, m.endpaper, m.endpaper], false);
+    this.buildSpineCaps(m.lining);
+    // Lying open, the first turned leaf crosses the spine's top edge over the joint cloth's arch
+    // and the endpaper hinge on it: room for both above the board's line (thin boards sit low).
+    const open = Math.PI + L.tilt;
+    const ridge = this.gutterRidge(open) + GUTTER_T / 2 + 0.03;
+    const p0 = this.rotateAboutPivot(L.boardA0, L.thick - L.bt, open), p1 = this.rotateAboutPivot(L.boardA0 + L.boardW, L.thick - L.bt, open);
+    const ux = p1[0] - p0[0], uy = p1[1] - p0[1], ul = Math.hypot(ux, uy) || 1;
+    // Height of the ridge above the board's inner face, across the board, from where the hinge
+    // steps up (before the cloth's arch) to the spine's edge.
+    const up = ux / ul >= 0 ? 1 : -1;
+    const above = (a: number) => (((a - p0[0]) * -uy + (ridge - p0[1]) * ux) / ul) * up;
+    const d = Math.max(above(0), above(this.ridgeStep(open)));
+    this.e0 = Math.max(this.e0, d + mm(0.02));
+  }
+
+  /**
+   * Height (mid-plane) at which the endpaper hinge crosses the spine's top edge once the board
+   * lies open: over the covering's edge and over the joint cloth arching up there.
+   */
+  /**
+   * Where the endpaper hinge leaves the board's line to step up to its ridge, lying open: short
+   * of the spine's edge, and before the joint cloth arches above that line.
+   */
+  private ridgeStep(theta: number): number {
+    const L = this.L;
+    const hg = GUTTER_T / 2 + 0.03;
+    let aStep = -(L.bandH + mm(0.4));
+    const h = this.hinge;
+    if (!h) return aStep;
+    const B = this.rotateAboutPivot(L.boardA0, L.thick - L.bt - hg, theta);
+    const da = -Math.cos(theta), dy = -Math.sin(theta), slope = dy / Math.max(1e-6, da);
+    const ka = L.off - hg - 0.05;
+    const tmp = new Float64Array(2 * 2 * h.ns);
+    this.poseJointCloth(tmp, h.ns, theta);
+    for (let k = 0; k < h.ns; k++) {
+      const ca = tmp[2 * k], cy = tmp[2 * k + 1];
+      if (ca >= ka || ca < B[0]) continue;
+      if (cy + h.half + hg + mm(0.03) > B[1] + slope * (ca - B[0])) aStep = Math.min(aStep, ca - mm(0.3));
+    }
+    return aStep;
+  }
+
+  private gutterRidge(theta: number): number {
+    const L = this.L;
+    const hg = GUTTER_T / 2 + 0.03;
+    let Y = L.thick + hg + 0.1;
+    const h = this.hinge;
+    if (!h) return Y;
+    const tmp = new Float64Array(2 * 2 * h.ns);
+    this.poseJointCloth(tmp, h.ns, theta);
+    const ka = L.off - hg - 0.05;
+    for (let k = 0; k < h.ns; k++) {
+      const a = tmp[2 * k], y = tmp[2 * k + 1];
+      if (a > -(L.bandH + mm(1.5)) && a < ka) Y = Math.max(Y, y + h.half + hg + mm(0.03));
+    }
+    return Y;
+  }
+
+  /**
+   * Head and tail of the spine region: the hollow behind the block, both joints and the endpaper
+   * hinge, closed flush with the block's head and tail (as linings, headbands and glue close a
+   * real book). Open, a grazing view along the spine looked right through the book. Re-posed with
+   * the front joint.
+   */
+  private buildSpineCaps(mat: Material): void {
+    const max = 160;
+    const pos = new Float32Array(2 * max * 3);
+    const nrm = new Float32Array(2 * max * 3);
+    for (let i = 0; i < max; i++) {
+      nrm[3 * i + 2] = 1;
+      nrm[3 * (max + i) + 2] = -1;
+    }
+    const geo = new BufferGeometry();
+    geo.setAttribute('position', new BufferAttribute(pos, 3));
+    geo.setAttribute('normal', new BufferAttribute(nrm, 3));
+    geo.setAttribute('uv', new BufferAttribute(new Float32Array(2 * max * 2), 2));
+    const mesh = this.addMesh(geo, mat, this.group, false);
+    mesh.frustumCulled = false;
+    this.caps = { geo, pos, max };
+    this.poseSpineCaps(0);
+  }
+
+  private poseSpineCaps(theta: number): void {
+    const caps = this.caps, L = this.L;
+    if (!caps || !this.hinge || !this.gutter || !this.backJoint) return;
+    const pts: [number, number][] = [];
+    // Inner (lining) side of a cloth, i0 → i1.
+    const inner = (sh: SheetMesh, i0: number, i1: number) => {
+      const o = sheetOutline(sh);
+      const step = i1 >= i0 ? 1 : -1;
+      for (let i = i0; step > 0 ? i <= i1 : i >= i1; i += step) pts.push([o.p[2 * i] - o.n[2 * i] * sh.half * 1.5, o.p[2 * i + 1] - o.n[2 * i + 1] * sh.half * 1.5]);
+    };
+    const thick = L.thick, A0 = L.boardA0;
+    // Back board's spine edge, back joint (board → spine), the lining (back → front).
+    pts.push([A0, L.bt]);
+    inner(this.backJoint, 0, this.backJoint.ns - 1);
+    const N = 24;
+    for (let k = 0; k <= N; k++) {
+      const o = spineOuter(L, k / N, 0);
+      pts.push([o.p[0] - o.n[0] * L.spTh, Math.min(thick - L.liningClip, Math.max(L.liningClip, o.p[1] - o.n[1] * L.spTh))]);
+    }
+    // Front joint (spine → board), the board's spine edge, the endpaper hinge (board → block).
+    inner(this.hinge, 0, this.hinge.ns - 1);
+    pts.push(this.rotateAboutPivot(A0, thick - L.bt, theta));
+    const g = this.gutter;
+    for (let i = 0; i < g.ns; i++) pts.push([g.mid[2 * i], g.mid[2 * i + 1]]);
+    // Down the block's spine (and the turning leaves' roots), just outside it.
+    const e = mm(0.05);
+    for (let k = 0; k <= 12; k++) {
+      const y = L.tbY1 + ((L.tbY0 - L.tbY1) * k) / 12;
+      pts.push([L.spineA(y) - e, y]);
+    }
+    // Drop repeats, then triangulate (consistent winding for each face).
+    const contour: Vector2[] = [];
+    for (const p of pts) {
+      const q = contour[contour.length - 1];
+      if (!q || Math.hypot(q.x - p[0], q.y - p[1]) > 1e-4) contour.push(new Vector2(p[0], p[1]));
+    }
+    const n = Math.min(contour.length, caps.max);
+    contour.length = n;
+    const tris = ShapeUtils.triangulateShape(contour, []);
+    const z = L.H / 2 - e;
+    const P = caps.pos, M = caps.max;
+    for (let i = 0; i < n; i++) {
+      P[3 * i] = contour[i].x; P[3 * i + 1] = contour[i].y; P[3 * i + 2] = z;
+      P[3 * (M + i)] = contour[i].x; P[3 * (M + i) + 1] = contour[i].y; P[3 * (M + i) + 2] = -z;
+    }
+    const index: number[] = [];
+    for (const [a, b, c] of tris) {
+      const area = (contour[b].x - contour[a].x) * (contour[c].y - contour[a].y) - (contour[c].x - contour[a].x) * (contour[b].y - contour[a].y);
+      // Head cap faces +z (counter-clockwise seen from +z), tail cap −z.
+      if (area >= 0) index.push(a, b, c, M + a, M + c, M + b);
+      else index.push(a, c, b, M + a, M + b, M + c);
+    }
+    caps.geo.setIndex(index);
+    (caps.geo.getAttribute('position') as BufferAttribute).needsUpdate = true;
   }
 
   private rotateAboutPivot(a: number, y: number, theta: number): [number, number] {
@@ -937,6 +1102,22 @@ export class BookModel {
         const d = (q[0] - c.a) * c.na + (q[1] - c.y) * c.ny;
         if (c.inside && near(q[0], q[1], c, d) && d < need && d > -mm(1.5)) { q[0] += k * c.na * (need - d); q[1] += k * c.ny * (need - d); }
       }
+      // Clear of the board itself up to its attachment at the board's spine edge: past ~150°
+      // the curve meets that corner from inside the board's outline.
+      if (i > 0 && i < n - 1) {
+        const L = this.L;
+        const cs = Math.cos(theta), sn = Math.sin(theta);
+        const da = q[0] - L.pivotA, dy = q[1] - L.pivotY;
+        const u = cs * da + sn * dy, v = -sn * da + cs * dy;
+        const u0 = L.boardA0 - L.pivotA, hb = L.bt / 2, vc = L.thick - L.bt / 2 - L.pivotY, h = JOINT_T / 2 + mm(0.01);
+        if (u > u0 - h && v > vc - hb - h && v < vc + hb + h) {
+          // Out across the board's spine edge (toward the spine), or over its outer face.
+          const outU = u - (u0 - h), outV = vc + hb + h - v;
+          const uu = outU < outV ? u0 - h : u, vv = outU < outV ? v : vc + hb + h;
+          q[0] = L.pivotA + cs * uu - sn * vv;
+          q[1] = L.pivotY + sn * uu + cs * vv;
+        }
+      }
       for (let j = 0; j < 2; j++) {
         mid[2 * (j * n + i)] = q[0];
         mid[2 * (j * n + i) + 1] = q[1];
@@ -958,8 +1139,9 @@ export class BookModel {
     if (B[0] < ka) {
       // Past the spine: keep to the pastedown's line toward the spine, but never below the top
       // of the spine's covering until past it (the turned leaves lie above this line).
-      const Y = L.thick + hg + 0.1;
       const da = -Math.cos(theta), dy = -Math.sin(theta);
+      // Over the cloth's arch too, once the board lies (nearly) open.
+      const Y = theta > 0.9 * Math.PI ? this.gutterRidge(theta) : L.thick + hg + 0.1;
       if (dy <= 0) {
         // Board still rising from the spine: its line descends toward the spine.
         const y1 = B[1] + ((ka - B[0]) * dy) / Math.max(1e-6, da);
@@ -983,7 +1165,7 @@ export class BookModel {
       } else {
         // Tilted past 180° (lying open): the line climbs toward the spine; follow it to just
         // short of the spine, then step up over the covering's top edge.
-        const aq = Math.max(B[0], Math.min(ka - mm(0.5), -(L.bandH + mm(0.4))));
+        const aq = Math.max(B[0], Math.min(ka - mm(0.5), this.ridgeStep(theta)));
         const yq = Math.min(Math.max(Y, B[1]), B[1] + (dy / Math.max(1e-6, da)) * (aq - B[0]));
         if (aq > B[0] + 1e-6) pts.push([aq, yq]);
         const Y2 = Math.max(Y, yq);
@@ -1050,6 +1232,7 @@ export class BookModel {
       this.poseGutter(this.gutter.mid, theta);
       this.gutter.update();
     }
+    this.poseSpineCaps(theta);
   }
 
   /* ----------------------------- coptic ----------------------------- */
@@ -1087,7 +1270,7 @@ export class BookModel {
     };
     const PI = Math.PI;
     if (F > 0) {
-      add('flapB', Math.max(1, F - Lf / 2), TAU, TAU, bf.x, bk.x - Lf / 2, 6);
+      add('flapB', Math.max(1, F - Lf / 2), TAU, TAU, bf.x, bk.x - Lf / 2, 16);
       add('foldB', Lf, TAU, PI, bk.x - Lf / 2, bk.x + Lf / 2, 8);
     }
     add('back', W, PI, PI, F > 0 ? bk.x + Lf / 2 : bk.x, sp.x - Lc / 2, 4);
@@ -1096,13 +1279,17 @@ export class BookModel {
     add('spine', L.thick - 2 * cc, PI / 2, PI / 2, sp.x + Lc / 2, fr.x - Lc / 2, 3);
     add('cornerF', Lc, PI / 2, 0, fr.x - Lc / 2, fr.x + Lc / 2, 8);
     // Dense samples over the crease (stab) and over the droop onto the ground when lying open.
-    const creaseExtra = stab ? linspace(L.creaseM, L.creaseM + PI * L.creaseR, 16) : [];
+    const creaseExtra = stab ? linspace(L.creaseM, L.creaseM + PI * L.creaseR, 32) : [];
     const droop0 = stab ? 2 * L.creaseM + PI * L.creaseR + cc : 0;
-    creaseExtra.push(...linspace(droop0, droop0 + L.droop.D, 20));
+    // (Fine enough that the leaves landing on it, sampled on their own, don't cut its chords.)
+    creaseExtra.push(...linspace(droop0, droop0 + L.droop.D, Math.max(48, Math.min(160, Math.ceil(L.droop.D / mm(0.8))))));
     add('front', W, 0, 0, fr.x + Lc / 2, F > 0 ? ff.x - Lf / 2 : fr.x + fr.w, 44, creaseExtra);
     if (F > 0) {
       add('foldF', Lf, 0, -PI, ff.x - Lf / 2, ff.x + Lf / 2, 8);
-      add('flapF', Math.max(1, F - Lf / 2), -PI, -PI, ff.x + Lf / 2, ff.x + ff.w, 8);
+      // The flap lies on the front panel (mirrored from the fore-edge): sampled as finely where the
+      // panel droops to the ground, so it bends with it (a coarse chord stands proud into the
+      // pages landing on it).
+      add('flapF', Math.max(1, F - Lf / 2), -PI, -PI, ff.x + Lf / 2, ff.x + ff.w, 24, creaseExtra.map((v) => W - v));
     }
     const s: number[] = [], phi: number[] = [], X: number[] = [];
     const start: Record<string, number> = {};
@@ -1200,10 +1387,15 @@ export class BookModel {
       // Dense samples over the gutter bend (its length varies a little with the board's tilt).
       const lying = this.leafBend(k, yRight, 1);
       const len = Math.max(this.leafBend(k, yRight, 0).len, lying.len) * 1.04;
-      const extra = linspace(sc, Math.min(W, sc + len), 16);
+      // (Fine: a chord across a tight bend, such as a stab crease, cuts into the cover round it.)
+      const extra = linspace(sc, Math.min(W, sc + len), 40);
       // Soft covers: follow the cover's droop to the ground closely (its arc length on the leaf
-      // stretches a little over the convex part, hence the 1.15).
-      if (L.family === 'soft') extra.push(...linspace(lying.sd, lying.sd + L.droop.D * 1.15, 22).filter((v) => v < W));
+      // stretches a little over the convex part, hence the 1.15). About every 0.8 mm: over the
+      // convex part a longer chord sags into the cover or the leaf below.
+      if (L.family === 'soft') {
+        const dl = L.droop.D * 1.15;
+        extra.push(...linspace(lying.sd, lying.sd + dl, Math.max(48, Math.min(160, Math.ceil(dl / mm(0.8))))).filter((v) => v < W));
+      }
       const s = mergeSamples(linspace(0, W, 34), extra);
       const vHi = (yRight + L.c / 2 - L.tbY0) / L.T;
       const vLo = (yRight - L.c / 2 - L.tbY0) / L.T;
