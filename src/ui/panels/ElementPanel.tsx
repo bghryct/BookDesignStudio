@@ -135,6 +135,7 @@ function PathTextControls({ e, set, live, begin }: { e: PathElement; set: (p: Pa
           <div className="grid grid-cols-2 gap-y-1">
             <Toggle label="Italic" checked={pt.italic} onChange={(v) => up({ italic: v })} />
             <Toggle label="Reverse direction" checked={!!pt.reverse} onChange={(v) => up({ reverse: v })} />
+            <Select label="Effect" value={pt.effect ?? 'rainbow'} options={[{ value: 'rainbow', label: 'Rainbow (follow the curve)' }, { value: 'skew', label: 'Skew (verticals stay upright)' }, { value: 'ribbon', label: '3D ribbon (horizontals stay level)' }, { value: 'stair', label: 'Stair step (upright glyphs)' }, { value: 'gravity', label: 'Gravity (from the centre)' }]} onChange={(v) => up({ effect: v as 'rainbow' })} />
           </div>
           <ColorField label="Colour" value={pt.color} onChange={(v) => v && up({ color: v })} />
           <Hint>Set the stroke to none to show only the type. Draw any path with the pen (P) or the ellipse and convert it.</Hint>
@@ -153,6 +154,7 @@ function FrameExtras({ e, set }: { e: TextElement; set: (p: Partial<Element>) =>
       <div className="grid grid-cols-2 gap-y-1.5">
         <Toggle label="Balance columns" checked={!!e.balanceColumns} onChange={(v) => set({ balanceColumns: v } as Partial<Element>)} hint="End every column at the same depth" />
         <Toggle label="Fit height to text" checked={!!e.autoHeight} onChange={(v) => set({ autoHeight: v } as Partial<Element>)} hint="The frame grows and shrinks with its story" />
+        <Toggle label="Fit width to text" checked={!!e.autoWidth} onChange={(v) => set({ autoWidth: v } as Partial<Element>)} hint="The frame is as wide as its longest line (labels, heads); the aligned edge stays put" />
         <Toggle label="Column rule" checked={!!rule} onChange={(v) => set({ columnRule: v ? { weight: 0.5, color: '#2a2118' } : null } as Partial<Element>)} />
         <Toggle label="Ignore text wrap" checked={!!e.wrapIgnore} onChange={(v) => set({ wrapIgnore: v } as Partial<Element>)} />
         <Toggle label="Inset per side" checked={!!sides} onChange={(v) => set({ insetSides: v ? { top: e.inset, right: e.inset, bottom: e.inset, left: e.inset } : null } as Partial<Element>)} />
@@ -350,8 +352,15 @@ function TypeSpecific({ el, project }: { el: Element; project: Project }) {
       return (
         <Section title="Frame" id="el-text">
           <Button className="w-full" onClick={() => s().setTextEditing(e.id)}>Edit story…</Button>
+          <Segmented value={e.columnMode ?? 'count'} onChange={(v) => set({ columnMode: v, columnWidth: e.columnWidth ?? Math.round(((e.w - e.inset * 2 - e.columnGap * (e.columns - 1)) / Math.max(1, e.columns)) * 10) / 10 } as Partial<Element>)} options={[
+            { value: 'count', label: 'Fixed number', title: 'This many columns share the frame width' },
+            { value: 'fixed', label: 'Fixed width', title: 'Columns of exactly this width — as many as fit' },
+            { value: 'flexible', label: 'Flexible', title: 'As few columns as keep each within the maximum width' },
+          ]} />
           <Row>
-            <NumberField label="Columns" value={e.columns} min={1} max={12} decimals={0} onChange={(v) => set({ columns: Math.round(v) } as Partial<Element>)} />
+            {(e.columnMode ?? 'count') === 'count'
+              ? <NumberField label="Columns" value={e.columns} min={1} max={12} decimals={0} onChange={(v) => set({ columns: Math.round(v) } as Partial<Element>)} />
+              : <NumberField label={e.columnMode === 'fixed' ? 'Column width' : 'Max column width'} length value={e.columnWidth ?? 120} min={12} onChange={(v) => set({ columnWidth: v } as Partial<Element>)} />}
             <NumberField label="Gutter" length value={e.columnGap} min={0} onChange={(v) => set({ columnGap: v } as Partial<Element>)} />
             <NumberField label="Inset" length value={e.inset} min={0} onChange={(v) => set({ inset: v } as Partial<Element>)} />
             <Select label="Vertical align" value={e.verticalAlign} options={[{ value: 'top', label: 'Top' }, { value: 'middle', label: 'Middle' }, { value: 'bottom', label: 'Bottom' }, { value: 'justify', label: 'Justify' }]} onChange={(v) => set({ verticalAlign: v } as Partial<Element>)} />

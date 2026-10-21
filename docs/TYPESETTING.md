@@ -37,7 +37,7 @@ Markup is written in the story itself; see [STORY_FORMAT.md](STORY_FORMAT.md).
 | All caps, small caps | ✅ | ✅ | `^small caps^`, `case:`. Synthetic small caps get added tracking |
 | Underline: weight, offset, colour | ✅ | ✅ | `uweight:` `uoffset:` `ucolor:` |
 | Underline styles: double, dashed, dotted, wavy | ✅ | ✅ | `underline:double` etc.; Character popover; Styles |
-| Underline gap colour | ✅ | ✗ | |
+| Underline gap colour | ✅ | ✅ | Character popover › Gap; `ugap:` |
 | Strikethrough with options | ✅ | ✅ | `strike`, `sweight:` `scolor:` |
 | Character highlight (shading) | ✅ | ✅ | `highlight:` |
 | Outline (stroke) text | ✅ | ✅ | `stroke:` `strokewidth:`; vector stroke in PDF |
@@ -48,7 +48,8 @@ Markup is written in the story itself; see [STORY_FORMAT.md](STORY_FORMAT.md).
 | Variable fonts: axes, automatic optical size | ✅ | ✅ | Type › axes; `opsz` follows the point size |
 | Glyphs panel | ✅ | ✅ | Fonts › Glyphs (click a glyph to insert it in the open story) |
 | Ruby (furigana) | ✅ (CJK) | ✅ | `{ruby:base|annotation}`; Inserts › Ruby |
-| Kenten, warichu | ✅ (CJK) | ✗ | |
+| Kenten (emphasis marks) | ✅ (CJK) | ✅ | `kenten:dot` / `sesame` / `circle` / `triangle` (or any character); Character popover; Styles |
+| Warichu (split inline notes) | ✅ (CJK) | ✅ | `{wari:top\|bottom}`, or `{wari:text}` split evenly |
 | Vertical text, tate-chū-yoko | ✅ (CJK) | ✅ | Type › Writing mode |
 
 ## Paragraph formatting
@@ -107,18 +108,18 @@ Markup is written in the story itself; see [STORY_FORMAT.md](STORY_FORMAT.md).
 | Feature | InDesign | Here | Where |
 |---|---|---|---|
 | Columns, gutter, column rules | ✅ | ✅ | Frame |
-| Fixed-width / flexible-width columns | ✅ | ✗ | |
+| Fixed-width / flexible-width columns | ✅ | ✅ | Frame › Fixed number / Fixed width / Flexible |
 | Balance columns | ✅ | ✅ | Frame |
 | Inset per side | ✅ | ✅ | Frame |
 | Vertical justification: top / centre / bottom / justify | ✅ | ✅ | Frame |
 | First-baseline offset (ascent, cap, x-height, leading, fixed; minimum) | ✅ | ✅ | Frame |
-| Auto-size frame | ✅ (height and width) | ◐ | Height only (Frame › Fit height to text) |
+| Auto-size frame (height, width) | ✅ | ✅ | Frame › Fit height to text, Fit width to text (the aligned edge stays put) |
 | Threading, overset indicator | ✅ | ✅ | The + port; it turns red when text is overset |
 | Autoflow into new pages | ✅ | ✅ | Pages › Flow text, or File › Import of a long manuscript. A 1.2-million-character novel flows into ~800 pages in about a second |
 | Text wrap: bounding box, shape, jump object; wrap side | ✅ | ✅ | Frame › Text wrap (both, largest, left, right) |
 | Wrap around an image's alpha contour | ✅ | ✗ | Box and ellipse shapes only |
 | Ignore text wrap | ✅ | ✅ | Frame |
-| Text on a path | ✅ | ◐ | Path › Text on path (offset, alignment, over / under, reverse). No rainbow, skew or stair-step effects |
+| Text on a path, with effects | ✅ | ✅ | Path › Text on path: offset, alignment, over / under, reverse; Rainbow, Skew, 3D ribbon, Stair step and Gravity |
 | Inline and anchored graphics | ✅ | ◐ | `{img:id}` inline, `{img:id; w:100%}` column-wide figure. No custom anchored positioning |
 
 ## Long documents
@@ -132,12 +133,15 @@ Markup is written in the story itself; see [STORY_FORMAT.md](STORY_FORMAT.md).
 | Cross-references: page number, paragraph text | ✅ | ✅ | `{anchor:name}`, `{xref:name}`, `{xreftext:name}`; Inserts lists the book's anchors |
 | Conditional text | ✅ | ✅ | `{if:Name}…{/if}` (nests, spans paragraphs); Document › Conditional text shows or hides each condition |
 | Text variables: page, page count, chapter, title, author, date | ✅ | ✅ | `{page}` `{page:roman}` `{lastpage}` `{chapter}` `{title}` `{author}` `{date}` |
-| Running head from a character style; file name; modification date | ✅ | ✗ | |
-| "Continued on / from page" jump lines | ✅ | ◐ | Tables only (blue "continues on p. N" labels) |
+| Running head from a paragraph style (first / last on the page) | ✅ | ✅ | `{running:Style}`, `{running:Style:last}`; carries over pages without one |
+| File name variable | ✅ | ✅ | `{filename}` |
+| Running head from a character style; modification date | ✅ | ✗ | |
+| "Continued on / from page" jump lines | ✅ | ✅ | `{nextpage}` / `{prevpage}` in a frame touching a threaded frame; tables show "continues on p. N" labels |
 | Master (parent) pages | ✅ | ✅ | Pages › Masters |
-| Sections and restarted page numbering | ✅ | ✗ | |
+| Sections and restarted page numbering | ✅ | ✅ | Pages › page menu › Start a section: start number, 1 / i / I / a / A, prefix, `{section}` marker. Used by folios, contents, index, cross-references and the PDF's page labels |
 | Book files (several documents) | ✅ | ✗ | One document per book |
-| PDF hyperlinks and bookmarks | ✅ | ✗ | |
+| PDF bookmarks | ✅ | ✅ | Interior PDFs get an outline from chapter titles and `#` / `##` headings (nested) |
+| PDF hyperlinks | ✅ | ✅ | `<{link:https://…}>…</>` for URLs; cross-references jump to their page |
 
 ## Styles
 
@@ -146,7 +150,7 @@ Markup is written in the story itself; see [STORY_FORMAT.md](STORY_FORMAT.md).
 | Paragraph and character styles | ✅ | ✅ | Styles; `[Style]` and `<Style>…</Style>` in the story |
 | Local overrides, clear overrides | ✅ | ✅ | Paragraph and Character popovers, `[{…}]` and `<{…}>`; Styles shows overrides |
 | Table and cell styles | ✅ | ✅ | Tables panel |
-| Based on / next style | ✅ | ✗ | |
+| Based on / next style | ✅ | ✅ | Styles › Based on (paragraph and character; changes cascade to children and to frames); Next style (applied on Return in the story editor) |
 
 ## Tables
 
@@ -168,13 +172,15 @@ Markup is written in the story itself; see [STORY_FORMAT.md](STORY_FORMAT.md).
 | Find glyph / object | ✅ | ✗ | |
 | Show hidden characters | ✅ | ✅ | Document › Hidden characters, ⌥⌘I: spaces ·, no-break °, ¶, ¬, # |
 | Story editor | ✅ | ✅ | Double-click a frame; syntax-highlighted markup |
-| Spell check, autocorrect | ✅ | ✗ | |
-| Track changes, notes | ✅ | ✗ | |
+| Spell check | ✅ | ◐ | The story editor uses the browser's spell checker in the story's language; no autocorrect |
+| Notes | ✅ | ✅ | `{note:…}` stays in the story, never prints |
+| Track changes | ✅ | ✗ | |
 | Place Word (.docx) | ✅ | ✅ | Drop, File › Import, or Pages › Flow text › Load. Keeps headings, italic, bold, small caps, super- and subscript, underline, strikethrough, footnotes, endnotes, lists, tabs, breaks and alignment; maps Word style names onto the book's paragraph styles. Tables come in as tab-separated lines. |
 | Place plain text / Markdown | ✅ | ✅ ★ | Hard-wrapped text is unwrapped. Project Gutenberg books are cleaned up: the licence text is removed, chapters become headings, `_italics_` become italics, straight quotes become typographer's quotes and `--` becomes an em dash |
 | Place PDF as a graphic (any page) | ✅ | ✅ | Drop or File › Import; the Image panel picks the page. The page stays vector in the exported PDF |
 | Get the text out of a PDF | ◐ | ✅ | Pages › Flow text › Load, or the Image panel. Rebuilds paragraphs, drops running heads and folios, rejoins hyphens, keeps italic and bold |
-| Place RTF / IDML | ✅ | ✗ | |
+| Place RTF | ✅ | ✅ | Headings from the stylesheet, emphasis, footnotes, tabs, breaks, alignment, Unicode |
+| Open IDML (InDesign Markup) text | ✅ | ✅ | The main text flow (short stories such as folios are left out): headings from style names, emphasis, footnotes, small caps, alignment |
 
 ---
 
@@ -182,22 +188,16 @@ Markup is written in the story itself; see [STORY_FORMAT.md](STORY_FORMAT.md).
 
 These InDesign typesetting features are not here yet:
 
-- Kenten and warichu.
-- Underline gap colour.
-- Fixed-width and flexible-width columns.
-- Auto-size by width.
+- Running heads from a character style, and a modification-date variable.
 - Wrap around an image's alpha contour.
-- Path-text effects (rainbow, skew, stair step).
 - Custom anchored-object positions.
-- Running heads from a character style.
-- Sections and restarted page numbering.
-- Book files.
-- PDF hyperlinks and bookmarks.
-- Based-on and next styles.
+- Numbering a list across several stories.
 - Glyph and object search.
-- Spell check.
+- Autocorrect.
 - Track changes.
-- RTF and IDML import.
+- Book files (several documents in one book).
+- A drop cap character style with scaling for descenders.
+- Line styles beyond small caps on the first line.
 
 ## Performance
 

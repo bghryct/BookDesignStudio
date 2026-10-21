@@ -8,6 +8,8 @@ import type {
 } from '../model/types';
 import type { GroupPrim, Matrix, PathPrim, Prim } from './primitives';
 import { ellipsePath, multiply, rectPath, rotate, translate, polylinePath, IDENTITY, applyMatrix, invert } from './primitives';
+import { resolveParaStyles, resolveCharStyles } from '../engine/text/props';
+import { pageNumbers, pageLabel } from '../model/sections';
 import { layoutStory, frameSpecOf, type FrameLayout, type FrameSpec, type TokenContext, type StoryStyles, type WrapShape } from '../engine/textLayout';
 import { ensureFamily, resolveFont, measure, fontMetrics, useFontStore } from '../engine/fonts';
 import { textBlock, type PageSide } from '../engine/grid';
@@ -76,21 +78,71 @@ function chapterAt(project: Project, pageIndex: number | null): string {
 function tokensFor(project: Project, pageIndex: number | null, text = ''): TokenContext {
   const b = project.book;
   const t: TokenContext = { page: (pageIndex ?? 0) + 1, pages: project.pages.length, title: b.title, subtitle: b.subtitle, author: b.author, publisher: b.publisher, chapter: chapterAt(project, pageIndex) };
+  if (pageIndex != null && project.sections?.length) {
+    const pn = pageNumbers(project)[pageIndex];
+    if (pn) { t.page = pn.n; t.pageLabel = pn.label; t.section = pn.marker; }
+  }
+  if (text.includes('{filename}')) t.filename = project.name;
   if (text.includes('{xref')) t.xrefs = xrefsFor(project);
+  if (text.includes('{running:') && pageIndex != null) t.running = runningFor(project)[pageIndex];
   return t;
+}
+
+/**
+ * Running heads by paragraph style: for each page, the first and last paragraph set on it in each
+ * style; a page with none carries on the last one before it (InDesign's running header variable).
+ */
+const runningCache = new WeakMap<object, Record<string, { first: string; last: string }>[]>();
+let computingRunning = false;
+function runningFor(project: Project): Record<string, { first: string; last: string }>[] {
+  const cached = runningCache.get(project.pages);
+  if (cached) return cached;
+  if (computingRunning) return [];
+  computingRunning = true;
+  const out: Record<string, { first: string; last: string }>[] = [];
+  try {
+    const idx = threadIndex(project);
+    let carry: Record<string, { first: string; last: string }> = {};
+    project.pages.forEach((p, i) => {
+      const here: Record<string, { first: string; last: string }> = {};
+      for (const e of p.elements) {
+        if (e.type !== 'text') continue;
+        const chain = idx.byId.has(e.id) ? threadOf(project, e.id) : [e.id];
+        const head = idx.byId.get(chain[0])?.el ?? e;
+        if (!head.text.includes('[')) continue;
+        for (const m of layoutText(e, { project, surface: `page:${p.id}`, pageIndex: i, side: pageSide(project, i) }).marks ?? []) {
+          if (!m.startsWith('\u0002')) continue;
+          const [, name, text] = m.split('\u0002');
+          const k = name.trim().toLowerCase();
+          const t = plainText(text);
+          if (here[k]) here[k].last = t; else here[k] = { first: t, last: t };
+        }
+      }
+      const page: Record<string, { first: string; last: string }> = {};
+      for (const [k, v] of Object.entries(carry)) page[k] = { first: v.last, last: v.last };
+      Object.assign(page, here);
+      out.push(page);
+      carry = page;
+    });
+  } finally {
+    computingRunning = false;
+  }
+  runningCache.set(project.pages, out);
+  return out;
 }
 
 /**
  * Cross-references: where each {anchor:name} is set (page number and the text of its paragraph).
  * Found by laying out the stories that hold anchors; recomputed when the pages change.
  */
-const xrefCache = new WeakMap<object, Record<string, { page: number; text: string }>>();
+const xrefCache = new WeakMap<object, Record<string, { page: number | string; text: string; index?: number }>>();
 let computingXrefs = false;
-function xrefsFor(project: Project): Record<string, { page: number; text: string }> {
+const xrefSections = new WeakMap<object, unknown>();
+function xrefsFor(project: Project): Record<string, { page: number | string; text: string; index?: number }> {
   const cached = xrefCache.get(project.pages);
-  if (cached) return cached;
+  if (cached && xrefSections.get(project.pages) === project.sections) return cached;
   if (computingXrefs) return {};
-  const map: Record<string, { page: number; text: string }> = {};
+  const map: Record<string, { page: number | string; text: string; index?: number }> = {};
   computingXrefs = true;
   try {
     const idx = threadIndex(project);
@@ -103,7 +155,7 @@ function xrefsFor(project: Project): Record<string, { page: number; text: string
         for (const m of layoutText(e, { project, surface: `page:${p.id}`, pageIndex: i, side: pageSide(project, i) }).marks ?? []) {
           if (!m.startsWith('\u0001')) continue;
           const [, name, text] = m.split('\u0001');
-          if (!(name in map)) map[name] = { page: i + 1, text: text.replace(/\s+/g, ' ').trim() };
+          if (!(name in map)) map[name] = { page: pageLabel(project, i), text: text.replace(/\s+/g, ' ').trim(), index: i };
         }
       }
     });
@@ -111,6 +163,7 @@ function xrefsFor(project: Project): Record<string, { page: number; text: string
     computingXrefs = false;
   }
   xrefCache.set(project.pages, map);
+  xrefSections.set(project.pages, project.sections);
   return map;
 }
 
@@ -192,7 +245,7 @@ function storyStyles(project: Project): { styles: StoryStyles | null; key: strin
     for (const a of Object.values(project.assets)) images[a.id] = { href: a.src, w: a.width, h: a.height };
     imageMaps.set(project.assets, images);
   }
-  return { styles: { para, char, hyphenation: hyph, images, hiddenConditions: hidden }, key: `${id(para)}/${id(char)}/${id(hyph)}/${id(project.assets)}/${hidden.join(',')}` };
+  return { styles: { para: resolveParaStyles(para), char: resolveCharStyles(char), hyphenation: hyph, images, hiddenConditions: hidden }, key: `${id(para)}/${id(char)}/${id(hyph)}/${id(project.assets)}/${hidden.join(',')}` };
 }
 
 /* Text wrap: items with a wrap setting push the text of frames on the same page aside. */
@@ -237,6 +290,33 @@ function frameFor(el: TextElement, grid: FrameSpec['grid'], wraps: WrapShape[], 
   return el.autoHeight ? { ...f, h: Math.max(el.h, 20000), verticalAlign: 'top' } : f;
 }
 
+/**
+ * Jump lines ("continued on page {nextpage}"): the threaded frame this frame touches (InDesign's
+ * rule), and the pages of the frames before and after it in its thread.
+ */
+function jumpPages(el: TextElement, ctx: CompileContext): { nextPage?: string; prevPage?: string } {
+  const { project } = ctx;
+  const idx = threadIndex(project);
+  const pad = 6;
+  const hit = surfaceElements(project, ctx.surface).find((o) => o.id !== el.id && o.type === 'text' && idx.byId.has(o.id)
+    && (idx.prev.has(o.id) || (o as TextElement).flowNext) && o.x - pad <= el.x + el.w && el.x - pad <= o.x + o.w && o.y - pad <= el.y + el.h && el.y - pad <= o.y + o.h);
+  if (!hit) return {};
+  const chain = threadOf(project, hit.id);
+  const k = chain.indexOf(hit.id);
+  const pageOf = (id: string | undefined) => { const pi = id ? idx.byId.get(id)?.pageIndex : null; return pi != null ? pageLabel(project, pi) : undefined; };
+  return { nextPage: pageOf(chain[k + 1]), prevPage: pageOf(chain[k - 1]) };
+}
+
+/** The width a frame needs for its longest line (frames that fit their width to the text). */
+export function naturalWidth(el: TextElement, ctx: CompileContext): number {
+  const ss = storyStyles(ctx.project);
+  const f = frameFor(el, null, []);
+  const ins = f.insets ?? { top: f.inset, right: f.inset, bottom: f.inset, left: f.inset };
+  const [lay] = layoutStory(el.text, { ...el.style, align: 'left', lastLineAlign: undefined }, [{ ...f, w: 20000, h: 20000, columns: 1, colWidth: undefined, verticalAlign: 'top' }], tokensFor(ctx.project, ctx.pageIndex, el.text), ss.styles);
+  const right = lay.lines.reduce((m, l) => Math.max(m, l.xEnd ?? l.x), ins.left);
+  return Math.ceil(right + ins.right + 1);
+}
+
 export function layoutText(el: TextElement, ctx: CompileContext): FrameLayout {
   void ensureFamily(el.style.fontFamily);
   if (el.style.dropCap.enabled && el.style.dropCap.fontFamily) void ensureFamily(el.style.dropCap.fontFamily);
@@ -273,6 +353,7 @@ export function layoutText(el: TextElement, ctx: CompileContext): FrameLayout {
     return layouts.get(el.id)!;
   }
   const tokens = tokensFor(project, ctx.pageIndex, el.text);
+  if (/\{(next|prev)page\}/.test(el.text)) Object.assign(tokens, jumpPages(el, ctx));
   const grid = gridFor(project.book, ctx.side, el, ctx.surface);
   const wraps = wrapsFor(el, ctx);
   const key = `${version}|${ss.key}|${JSON.stringify(tokens)}|${grid ? `${grid.origin.toFixed(3)}/${grid.increment}` : '-'}|${wrapKey(wraps)}`;

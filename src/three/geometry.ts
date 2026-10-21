@@ -600,9 +600,13 @@ export class BookModel {
     const Nb = 8, Nj = 8, Ns = 24;
     const hdJ = L.family === 'case' ? L.hingeDepth * 0.3 : 0;
     const count = Nb + Nj + Ns + Nj + Nb - 1;
+    // An uncovered (coptic) spine: the jacket runs up its back to where the front board's outer
+    // face starts. Opened past upright, that corner sinks below the closed book's top, and a
+    // jacket run up to the top would fold back down through the pages' roots.
+    let spineTop = thick;
     const spinePt = (f: number): [number, number] => {
       if (L.family === 'case') return spineOuter(L, f).p;
-      return [L.a0, thick * f];
+      return [L.a0, spineTop * f];
     };
     const bez = (p: number[][], t: number): [number, number] => {
       const u = 1 - t;
@@ -613,6 +617,7 @@ export class BookModel {
     };
     const fillAt = (theta: number, out: Float64Array) => {
       const rot = (a: number, y: number) => this.rotateAboutPivot(a, y, theta);
+      if (L.family !== 'case') spineTop = Math.max(L.tbY1, Math.min(thick, rot(A0, thick)[1]));
       let i = 0;
       const put = (p: [number, number]) => { out[2 * i] = p[0]; out[2 * i + 1] = p[1]; i++; };
       for (let k = 0; k < Nb; k++) put([A1 - ((A1 - A0) * k) / (Nb - 1), 0]);
@@ -648,7 +653,13 @@ export class BookModel {
       else if (i <= s1) x[i] = S.x + (cum[i - s0] / total) * S.w;
       else x[i] = F.x + ((closed[2 * i] - A0) / L.boardW) * F.w;
     }
-    return { count, x, wrapT: L.bt, fill: (out) => fillAt(this.boardTheta, out), constrain: (mid, n, half) => this.constrainJacket(mid, n, half) };
+    // The cloth only bears on the samples from the spine's top edge on, the spine on the joints
+    // and the spine (a thin book's spine samples are close to the cloth too, and must not jump onto it).
+    const spine0 = Nb, clothFrom = Nb + Nj + Ns - 1, spine1 = Nb + 2 * Nj + Ns - 1;
+    return {
+      count, x, wrapT: L.bt, fill: (out) => fillAt(this.boardTheta, out),
+      constrain: (mid, n, half, first) => this.constrainJacket(mid, n, half, { clothFrom: first + clothFrom, spine: [first + spine0, first + spine1] }),
+    };
   }
 
   /** Point on the front joint cloth's cover face at parameter t (0 spine … 1 board) and its normal. */
@@ -671,7 +682,7 @@ export class BookModel {
    * joint cloth's cover face, and outside the spine's covering near its top edge. Points are
    * pushed straight out to the required distance (a no-op away from the joint).
    */
-  private constrainJacket(mid: Float64Array, n: number, half: number): void {
+  private constrainJacket(mid: Float64Array, n: number, half: number, at?: { clothFrom: number; spine: [number, number] }): void {
     const L = this.L;
     const gap = JACKET_GAP + half;
     const th = this.boardTheta, c = Math.cos(th), s = Math.sin(th);
@@ -698,14 +709,14 @@ export class BookModel {
         }
       }
       // Joint cloth: stay on its cover side, its half thickness plus the gap away.
-      if (cloth) {
+      if (cloth && (!at || i >= at.clothFrom)) {
         const q = closestOnPolyline(cloth, a, y);
         const need = clothHalf + gap;
         const d = (a - q.a) * q.na + (y - q.y) * q.ny;
         if (q.inside && near(a, y, q, d) && d < need && d > -need - mm(1)) { a += q.na * (need - d); y += q.ny * (need - d); }
       }
       // Spine covering: outside it.
-      if (spine) {
+      if (spine && (!at || (i >= at.spine[0] && i <= at.spine[1]))) {
         const q = closestOnPolyline(spine, a, y);
         const d = (a - q.a) * q.na + (y - q.y) * q.ny;
         if (q.inside && near(a, y, q, d) && d < gap && d > -mm(1.5)) { a += q.na * (gap - d); y += q.ny * (gap - d); }
@@ -743,6 +754,7 @@ export class BookModel {
       return F.x + F.w;
     });
     const tmp = new Float64Array(count * 2);
+    const stitches = L.type === 'stab' ? 2 * L.threadR + mm(0.05) : 0;
     const fill = (out: Float64Array) => {
       const mid = rig.sheet.mid;
       for (let i = 0; i < count; i++) {
@@ -751,8 +763,9 @@ export class BookModel {
         tmp[2 * i] = mid[2 * k] + (mid[2 * k + 2] - mid[2 * k]) * t;
         tmp[2 * i + 1] = mid[2 * k + 1] + (mid[2 * k + 3] - mid[2 * k + 1]) * t;
       }
-      // Outer surface of the cover: half its caliper along the left normal.
-      const h = L.cc / 2;
+      // Outer surface of the cover: half its caliper along the left normal (and over a stab
+      // binding's stitches, which run round the spine onto both covers).
+      const h = L.cc / 2 + stitches;
       for (let i = 0; i < count; i++) {
         const i0 = Math.max(0, i - 1), i1 = Math.min(count - 1, i + 1);
         let ta = tmp[2 * i1] - tmp[2 * i0], ty = tmp[2 * i1 + 1] - tmp[2 * i0 + 1];
@@ -763,7 +776,7 @@ export class BookModel {
       }
     };
     // With French flaps the jacket folds round the cover and its flap together.
-    return { count, x, wrapT: L.flap > 0 ? 2 * L.cc : L.cc, fill };
+    return { count, x, wrapT: (L.flap > 0 ? 2 * L.cc : L.cc) + stitches, fill };
   }
 
   /** Closed (open = 0) or fully open (open = 1) extents, used for camera framing. */
@@ -952,8 +965,19 @@ export class BookModel {
         const y1 = B[1] + ((ka - B[0]) * dy) / Math.max(1e-6, da);
         if (y1 >= Y) pts.push([ka, y1]);
         else {
+          // Down to the spine's height where the board's line meets it, but no further out than
+          // just past the spine's top edge: under the joint cloth, which bows out from that edge
+          // to the board (an upright board's line runs outside the cloth).
           const t0 = Math.max(0, (Y - B[1]) / Math.min(-1e-9, dy));
-          if (t0 > 1e-6) pts.push([B[0] + t0 * da, B[1] + t0 * dy]);
+          // ... and clear of the cloth's groove, which dips in past the spine's edge.
+          let groove = 0;
+          if (this.hinge) {
+            const hm = this.hinge.mid;
+            for (let k = 0; k < this.hinge.ns; k++) if (hm[2 * k + 1] < Y + mm(0.5)) groove = Math.max(groove, hm[2 * k] + this.hinge.half);
+          }
+          const aMin = Math.min(ka, Math.max(hg + mm(0.1), groove + hg + mm(0.08)));
+          const a1 = Math.max(B[0] + t0 * da, aMin);
+          if (a1 < ka - 1e-6 && Math.hypot(a1 - B[0], Y - B[1]) > 1e-6) pts.push([a1, Y]);
           pts.push([ka, Y]);
         }
       } else {
@@ -995,6 +1019,25 @@ export class BookModel {
       for (let c = 0; c < counts[g]; c++) put(P[0] + ((Q[0] - P[0]) * c) / counts[g], P[1] + ((Q[1] - P[1]) * c) / counts[g]);
     }
     put(pts[m][0], pts[m][1]);
+    // Under the joint cloth all the way: on its lining side, clear of its thickness (where the
+    // cloth bulges toward the block, or rises over the spine's top edge, the path above can graze it).
+    const h = this.hinge;
+    if (h) {
+      const cloth = sheetOutline(h);
+      const need = h.half + hg + mm(0.03);
+      for (let it = 0; it < 3; it++) for (let k = 1; k < n; k++) {
+        const a = mid[2 * k], y = mid[2 * k + 1];
+        const q = closestOnPolyline(cloth, a, y);
+        const d = (a - q.a) * q.na + (y - q.y) * q.ny;
+        if (q.inside && near(a, y, q, d) && d > -need && d < need + mm(1)) {
+          const sh = -need - d;
+          for (let j = 0; j < 2; j++) {
+            mid[2 * (j * n + k)] = a + q.na * sh;
+            mid[2 * (j * n + k) + 1] = y + q.ny * sh;
+          }
+        }
+      }
+    }
   }
 
   private poseCaseBoard(theta: number): void {

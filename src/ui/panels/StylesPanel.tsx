@@ -1,12 +1,13 @@
 import React, { useState } from 'react';
 import clsx from 'clsx';
-import type { Draft } from 'immer';
+import { current, isDraft, type Draft } from 'immer';
 import { Plus, Trash, ChevronRight } from 'lucide-react';
 import { useStore } from '../../store/store';
 import type {
   Project, TextElement, TextStyle, Element, ParagraphStyleProps, CharacterStyleProps, ParagraphStyleDef, CharacterStyleDef,
 } from '../../model/types';
 import { applyParagraphStyle } from '../../engine/textLayout';
+import { resolveParaStyles } from '../../engine/text/props';
 import { getFamilies, getFamily } from '../../engine/fonts';
 import { VERMILION } from '../../model/factory';
 import { uid } from '../../lib/random';
@@ -92,8 +93,15 @@ function eachText(d: Draft<Project>, fn: (el: Draft<TextElement>) => void) {
 }
 
 /** Re-apply a redefined paragraph style to every frame that follows it. */
-function propagate(d: Draft<Project>, def: ParagraphStyleDef) {
-  eachText(d, (el) => { if (el.paraStyle === def.id) el.style = frameStyleWith(el.style as TextStyle, def.props) as Draft<TextStyle>; });
+/** Frames that follow a style (or a style based on it) take its new effective properties. */
+function propagate(d: Draft<Project>, _def: ParagraphStyleDef) {
+  const raw = d.paragraphStyles ?? [];
+  const defs = resolveParaStyles(structuredClone(isDraft(raw) ? current(raw) : raw) as ParagraphStyleDef[]);
+  const byId = new Map(defs.map((x) => [x.id, x]));
+  eachText(d, (el) => {
+    const r = el.paraStyle ? byId.get(el.paraStyle) : undefined;
+    if (r) el.style = frameStyleWith(el.style as TextStyle, r.props) as Draft<TextStyle>;
+  });
 }
 
 const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -128,6 +136,8 @@ function uniqueName(base: string, taken: string[]) {
 /* Type panel: the frame's paragraph style                                      */
 /* -------------------------------------------------------------------------- */
 
+const NO_DEFS: ParagraphStyleDef[] = [];
+
 const PROP_LABEL: Record<string, string> = {
   fontFamily: 'typeface', fontSize: 'size', leading: 'leading', weight: 'weight', italic: 'italic', tracking: 'tracking', color: 'colour', align: 'alignment',
   firstLineIndent: 'first-line indent', leftIndent: 'left indent', rightIndent: 'right indent', spaceBefore: 'space before', spaceAfter: 'space after',
@@ -135,7 +145,7 @@ const PROP_LABEL: Record<string, string> = {
 };
 
 export function FrameStyleSection({ el }: { el: TextElement }) {
-  const defs = useStore((s) => s.project.paragraphStyles) ?? [];
+  const defs = resolveParaStyles(useStore((s) => s.project.paragraphStyles) ?? NO_DEFS);
   const s = useStore.getState;
   const def = defs.find((d) => d.id === el.paraStyle) ?? null;
   const over = def ? overriddenKeys(el.style, def.props) : [];
@@ -263,6 +273,7 @@ const CHAR_PROPS: PropDef[] = [
   { key: 'strokeWidth', label: 'Outline weight', kind: 'number', unit: 'pt', min: 0.05, max: 8, step: 0.05, def: 0.4 },
   { key: 'noBreak', label: 'No break', kind: 'bool', def: true },
   { key: 'rotate', label: 'Character rotation', kind: 'number', unit: '°', min: -180, max: 180, step: 1, def: 90 },
+  { key: 'emphasis', label: 'Kenten (emphasis marks)', kind: 'enum', def: 'dot', opts: [['dot', 'Dot'], ['sesame', 'Sesame'], ['circle', 'Circle'], ['triangle', 'Triangle']] },
 ];
 
 const FIGURES: { value: string; label: string; f: Record<string, boolean> }[] = [
@@ -369,6 +380,7 @@ function StyleRow({ kind, def, open, onToggle }: { kind: 'para' | 'char'; def: P
       </button>
       {open && (
         <div className="space-y-2 px-2 pb-2 pt-1">
+          <BasedOnControls kind={kind} def={def} edit={edit} />
           <TextInput label="Name" value={def.name} onChange={(v) => {
             const name = v.replace(/[[\]<>/]/g, '');
             if (!name.trim()) return;
@@ -417,5 +429,26 @@ export function StylesManager() {
       <Button variant="ghost" className="w-full" onClick={() => add('char')}><Plus size={12} className="mr-1 inline" />New character style</Button>
       <Hint>In a story, start a line with <code>[Caption]</code> to style that paragraph; wrap words in <code>&lt;Rubric&gt;…&lt;/Rubric&gt;</code> for a character style. The story editor's ¶ and a menus insert these for you. Unset properties inherit from the frame.</Hint>
     </Section>
+  );
+}
+
+/** Based on (inherit unset properties from another style) and, for paragraph styles, the next style. */
+function BasedOnControls({ kind, def, edit }: { kind: 'para' | 'char'; def: ParagraphStyleDef | CharacterStyleDef; edit: (fn: (d: Draft<ParagraphStyleDef | CharacterStyleDef>, project: Draft<Project>) => void) => void }) {
+  const list = (useStore((s) => (kind === 'para' ? s.project.paragraphStyles : s.project.characterStyles)) ?? []) as (ParagraphStyleDef | CharacterStyleDef)[];
+  // A style can't be based on itself or on any style that (eventually) is based on it.
+  const descends = (id: string): boolean => {
+    for (let cur = list.find((x) => x.id === id), k = 0; cur && k < 50; cur = list.find((x) => x.id === cur!.basedOn), k++) if (cur.id === def.id) return true;
+    return false;
+  };
+  const parents = list.filter((x) => x.id !== def.id && !descends(x.id));
+  return (
+    <Row>
+      <Select label="Based on" value={def.basedOn ?? ''} options={[{ value: '', label: 'No style' }, ...parents.map((x) => ({ value: x.id, label: x.name }))]}
+        onChange={(v) => edit((t) => { t.basedOn = v || null; })} hint="Properties this style doesn't set come from the parent; change the parent and every child follows" />
+      {kind === 'para' && (
+        <Select label="Next style" value={(def as ParagraphStyleDef).nextStyle ?? ''} options={[{ value: '', label: 'Frame style' }, ...list.map((x) => ({ value: x.id, label: x.id === def.id ? `${x.name} (same)` : x.name }))]}
+          onChange={(v) => edit((t) => { (t as Draft<ParagraphStyleDef>).nextStyle = v || null; })} hint="After a return in the story editor, the new paragraph is tagged with this style" />
+      )}
+    </Row>
   );
 }

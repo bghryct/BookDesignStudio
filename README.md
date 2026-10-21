@@ -92,13 +92,15 @@ One shaping engine (fontkit) measures with the same font files the browser rende
   - A starter set, or your own.
   - A paragraph style can carry any paragraph property, including rag, keeps, lists and justification.
   - A frame can follow a style, with overrides flagged so you can clear them or redefine the style; editing a style reflows everything that uses it.
+  - **Based on**: a style inherits what it doesn't set from its parent, so changing the parent changes every child. **Next style**: Return in the story editor tags the new paragraph with it.
   - **Nested styles** (run-in heads: the first N words, letters or sentences, or up to a character) and **GREP styles** (a character style on every match of a pattern) apply character styles automatically.
 - **Local formatting**: change anything about any run of text inside a frame with `<{size:14; color:#b0331f; track:40; underline}>…</>`, or about a paragraph with `[{align:center; before:12; rag:swiss}]`. The story editor's formatting popovers write these for you. Character properties include:
   - typeface, absolute or relative size, weight, italic
   - tracking and colour
   - case, superscript and subscript (true `sups`/`subs` when the font has them), baseline shift
   - underline (solid, double, dashed, dotted or wavy, with weight, offset and colour), strikethrough and highlight
-  - ruby / furigana above a base: `{ruby:東京|とうきょう}`
+  - ruby / furigana above a base: `{ruby:東京|とうきょう}`; kenten (emphasis dots, sesame, circles, triangles); warichu, a note in two half-size lines inside the line: `{wari:top|bottom}`
+  - an underline gap colour for double, dashed and dotted underlines
   - horizontal and vertical scale, skew, character rotation, outline stroke
   - no-break, hyphenation language and OpenType features
 
@@ -106,10 +108,12 @@ One shaping engine (fontkit) measures with the same font files the browser rende
 - Columns with a column rule, **balanced columns**, heads that **span all columns** anywhere in the story (the columns above balance, a new band of columns starts below).
 - **Vertical justification** (top, middle, bottom, justify).
 - First-baseline options (cap height, ascent, x-height, leading, fixed) and insets per side.
-- **Fit the frame to its text**.
+- **Fit the frame to its text**: its height, its width (labels and heads; the aligned edge stays put), or both.
+- **Columns**: a fixed number, a fixed width (as many as fit), or flexible up to a maximum width.
 - **Text wrap** around any item: its box, its shape, or jumping it, on both sides, the larger side, left or right, with an offset.
 - Threads across pages. Running heads with `{chapter}`, `{title}` and `{page:roman}`; also `{lastpage}` and `{date}`.
-- **Type on a path**: any path can carry a line of type that follows its curves, positioned along the path, on or below it.
+- **Type on a path**: any path can carry a line of type that follows its curves, positioned along the path, on or below it, with InDesign's effects: rainbow, skew, 3D ribbon, stair step and gravity.
+- **Notes**: `{note:…}` keeps an editorial note in the story without setting it.
 
 **Tables** (`src/model/table.ts`, `src/render/table.ts`)
 - **Columns and rows**: fixed, proportional (fr) or auto-width columns; auto, at-least and exact row heights; tables that fill the frame width or set their own.
@@ -127,10 +131,15 @@ One shaping engine (fontkit) measures with the same font files the browser rende
 - **Editing**: the table tool, CSV/TSV drop and paste, Tab / ⇧Tab between cells (a new row at the end), cell ranges, copy and paste as tab-separated data, and dragging column and row borders.
 
 **Long documents**
+- **Sections**: a section can start on any page, with its own start number, numbering style (1, i, I, a, A), prefix and `{section}` marker. Folios, contents, index, cross-references and the PDF's page labels follow it.
+- **Running heads by style**: `{running:Chapter Title}` prints the first (or `:last`) paragraph in that style on the page, carried over pages that have none.
+- **Jump lines**: in a frame touching a threaded frame, `{nextpage}` and `{prevpage}` give the pages where the story continues and came from.
+- **PDF bookmarks and links**: interior PDFs get a nested outline of chapter titles and headings. `<{link:https://…}>…</>` makes a web link, and cross-references are clickable jumps to their page.
 - **Cross-references**: name a place with `{anchor:fig-3}`, then `{xref:fig-3}` prints the page it lands on and `{xreftext:fig-3}` the text of its paragraph. They update as the book reflows; the story editor lists the book's anchors to insert.
 - **Conditional text**: `{if:Print}…{/if}` (any name; nests, may span paragraphs). Document › Conditional text shows or hides each condition for the whole book, so one story can make several editions.
 
-**Manuscripts** (`src/lib/docx.ts`, `src/lib/plainText.ts`)
+**Manuscripts** (`src/lib/docx.ts`, `rtf.ts`, `idml.ts`, `plainText.ts`, `pdfImport.ts`)
+- **RTF** and **InDesign IDML**: headings, emphasis, footnotes, breaks and alignment. From an IDML package, the main text flow comes in; short stories such as folios are left out.
 - **Word (.docx)**:
   - Brings in headings, italic, bold, small caps, super- and subscript, underline and strikethrough.
   - Footnotes and endnotes become `{fn:…}` / `{en:…}`.

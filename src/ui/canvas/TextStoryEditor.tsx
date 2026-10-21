@@ -75,6 +75,8 @@ const INSERTS: { group: string; items: { label: string; text: string; hint?: str
     { label: 'Cross-ref text', text: '{xreftext:}', hint: 'The text of the paragraph holding the anchor' },
     { label: 'Conditional text', text: '{if:Condition}', hint: 'Wraps the selection in {if:Name}…{/if}; show or hide conditions under Document › Conditional text' },
     { label: 'Ruby', text: '{ruby:|}', hint: '{ruby:base|annotation} — furigana or a gloss set small above the base' },
+    { label: 'Warichu', text: '{wari:}', hint: '{wari:top|bottom} — a note set in two half-size lines inside the line' },
+    { label: 'Note (non-printing)', text: '{note:}', hint: 'An editorial note kept in the story but never set' },
     { label: 'Date', text: '{date}' }, { label: 'Last page', text: '{lastpage}' },
   ] },
   { group: 'Characters', items: [
@@ -320,6 +322,15 @@ export function TextStoryEditor({ elementId, anchor, viewport }: { elementId: st
             if (e.key === 'Tab' && !e.metaKey && !e.ctrlKey) { e.preventDefault(); insert(e.shiftKey ? '{rtab}' : '\t'); }
             // Shift-Return: forced line break inside the paragraph.
             if (e.key === 'Enter' && e.shiftKey) { e.preventDefault(); insert('{br}'); }
+            else if (e.key === 'Enter' && !e.metaKey && !e.ctrlKey && !e.altKey && ref.current) {
+              // Next style: a return after a styled paragraph tags the new one.
+              const ta = ref.current;
+              const start = ta.value.lastIndexOf('\n', ta.selectionStart - 1) + 1;
+              const m = /^\[([^\]{}\n]{1,80})\]/.exec(ta.value.slice(start));
+              const cur = m ? paraStyles.find((p) => p.name.toLowerCase() === m[1].trim().toLowerCase()) : undefined;
+              const next = cur?.nextStyle ? paraStyles.find((p) => p.id === cur.nextStyle) : undefined;
+              if (next) { e.preventDefault(); insert(`\n[${next.name}] `); }
+            }
             // InDesign's pair kerning keys: ⌥← / ⌥→ by 10/1000 em, with ⇧ by 50.
             if (e.altKey && !e.metaKey && !e.ctrlKey && (e.key === 'ArrowLeft' || e.key === 'ArrowRight') && ref.current && ref.current.selectionStart === ref.current.selectionEnd) {
               e.preventDefault();
@@ -402,8 +413,16 @@ function CharFormat({ onApply }: { onApply: (props: string | null) => void }) {
             <option value="solid">Solid</option><option value="double">Double</option><option value="dashed">Dashed</option><option value="dotted">Dotted</option><option value="wavy">Wavy</option>
           </select>
         )}
+        {p.underline && p.underlineStyle && p.underlineStyle !== 'wavy' && (
+          <label className="flex items-center gap-1 text-[10.5px] text-ink-300" title="Colour filling the gaps of the underline">Gap
+            <input type="color" className="h-5 w-6 cursor-pointer rounded border border-ink-600 bg-ink-800" value={p.underlineGap ?? '#ffffff'} onChange={(e) => up('underlineGap', e.target.value)} />
+          </label>
+        )}
         {check('strike', 'Strikethrough')}
         {check('noBreak', 'No break')}
+        <select className="h-5 rounded border border-ink-600 bg-ink-800 px-1 text-[10.5px] text-ink-100" value={p.emphasis ?? ''} onChange={(e) => up('emphasis', e.target.value)} title="Kenten: an emphasis mark over every character">
+          <option value="">No kenten</option><option value="dot">Kenten •</option><option value="sesame">Kenten ﹅</option><option value="circle">Kenten ◦</option><option value="triangle">Kenten ▴</option>
+        </select>
       </div>
       <div className="flex items-center gap-1.5">
         <code className="min-w-0 flex-1 truncate rounded bg-ink-900 px-1.5 py-1 text-[10px] text-[#5ec4b6]">{preview ? `<{${preview}}>…</>` : 'Choose properties to apply to the selection'}</code>

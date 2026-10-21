@@ -8,6 +8,8 @@ popovers write it for you.
 
 | You have | Load it as | What happens |
 |---|---|---|
+| An RTF file | `.rtf` | Headings (from the stylesheet), italic, bold, small caps, super- and subscript, footnotes, tabs, breaks and alignment. |
+| An InDesign document | `.idml` (File › Save As › InDesign Markup) | The main text flow, with headings from style names, emphasis, footnotes and alignment. Short stories such as folios are left out. |
 | A Word manuscript | `.docx` | Headings, italic, bold, small caps, super- and subscript, underline, footnotes, endnotes, lists, tabs, breaks and alignment are kept. Word styles named like the book's paragraph styles are applied. |
 | A Project Gutenberg book, or any hard-wrapped text | `.txt` | The licence header and footer are removed. Wrapped lines are joined into paragraphs, and verse keeps its line breaks. CHAPTER lines become headings, `_italics_` become italics, quotes become curly and `--` becomes an em dash. |
 | Markdown | `.md` | `#` and `##` headings, `*italic*`, `**bold**`, lists and `>` quotes come through. |
@@ -19,7 +21,7 @@ popovers write it for you.
 - Choose **File › Import**.
 - Open **Pages › Flow text › Load**. You can review the text before it flows.
 
-A long text flows into as many new pages as it needs. A PDF dropped on a page is placed as a graphic, not as text (see the README). RTF and IDML can't be loaded yet.
+A long text flows into as many new pages as it needs. A PDF dropped on a page is placed as a graphic, not as text (see the README).
 
 To set *Moby-Dick*, download the Plain Text UTF-8 file from Project Gutenberg and load it.
 
@@ -64,14 +66,18 @@ Inside a paragraph:
 |---|---|
 | `*italic*` · `**bold**` · `^small caps^` | emphasis |
 | `<Style>…</Style>` | a character style |
-| `<{size:14; color:#b0331f; track:40}>…</>` | local character formatting (also `weight` `italic` `case` `super` `sub` `shift` `underline` `underline:double` `strike` `highlight` `hscale` `vscale` `skew` `rotate` `stroke` `nobreak` `lang` `features`) |
+| `<{size:14; color:#b0331f; track:40}>…</>` | local character formatting (also `weight` `italic` `case` `super` `sub` `shift` `underline` `underline:double` `ugap` `kenten:dot` `link:https://…` `strike` `highlight` `hscale` `vscale` `skew` `rotate` `stroke` `nobreak` `lang` `features`) |
 | `{fn:The note.}` · `{en:The note.}` | footnote · endnote |
 | `{ix:whale}` · `{ix:whale!sperm}` | index entry · sub-entry |
 | `{anchor:name}` · `{xref:name}` · `{xreftext:name}` | cross-reference target · its page · its paragraph's text |
 | `{if:Print}…{/if}` | conditional text |
 | `{ruby:東京\|とうきょう}` | ruby above a base |
+| `{wari:top\|bottom}` | warichu: two half-size lines inside the line |
+| `{note:…}` | an editorial note, kept in the story, never printed |
 | `{img:asset-id}` · `{img:asset-id; w:100%}` | inline graphic · column-wide figure |
-| `{page}` `{page:roman}` `{lastpage}` `{chapter}` `{title}` `{author}` `{date}` | tokens |
+| `{page}` `{page:roman}` `{lastpage}` `{section}` `{filename}` `{chapter}` `{title}` `{author}` `{date}` | tokens (`{page}` follows the page's section numbering) |
+| `{running:Style}` · `{running:Style:last}` | the first / last paragraph in that style on the page (running heads) |
+| `{nextpage}` · `{prevpage}` | in a frame touching a threaded frame: where its story continues / came from |
 | `{shy}` `{nbhy}` | discretionary · non-breaking hyphen |
 | `{nbsp}` `{nnbsp}` `{em}` `{en}` `{thin}` `{hair}` `{figure}` `{punct}` | special spaces |
 | `{k:-20}` | manual kerning, thousandths of an em |

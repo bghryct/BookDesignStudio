@@ -16,6 +16,7 @@ import type {
 import { BASE_CELL, coverMap, anchorsOf, findCellStyle, mergeCellProps, resolveTableStyle, rowRegion, figureFeatures, ruleStyleOf, ruleExtent, gapOf } from '../model/table';
 import type { GroupPrim, Matrix, Prim, TextRun } from './primitives';
 import { rectPath } from './primitives';
+import { resolveParaStyles, resolveCharStyles } from '../engine/text/props';
 import { layoutStory, applyParagraphStyle, type FrameLayout, type FrameSpec, type StoryStyles, type TokenContext } from '../engine/textLayout';
 import { ensureFamily, fontMetrics, measure, resolveFont, useFontStore } from '../engine/fonts';
 
@@ -240,7 +241,7 @@ function cellBase(el: TableElement, project: Project): TextStyle {
     writingMode: 'horizontal',
     firstLineSmallCaps: false,
   };
-  const ps = el.paraStyle ? project.paragraphStyles?.find((d) => d.id === el.paraStyle)?.props : null;
+  const ps = el.paraStyle ? resolveParaStyles(project.paragraphStyles ?? []).find((d) => d.id === el.paraStyle)?.props : null;
   if (ps) s = applyParagraphStyle(s, ps);
   s.firstLineIndent = 0;
   return s;
@@ -248,7 +249,7 @@ function cellBase(el: TableElement, project: Project): TextStyle {
 
 function applyCellText(base: TextStyle, P: CellStyleProps, project: Project): TextStyle {
   let s: TextStyle = { ...base, features: { ...base.features } };
-  const ps = P.paraStyle ? project.paragraphStyles?.find((d) => d.id === P.paraStyle)?.props : null;
+  const ps = P.paraStyle ? resolveParaStyles(project.paragraphStyles ?? []).find((d) => d.id === P.paraStyle)?.props : null;
   if (ps) { s = applyParagraphStyle(s, ps); s.firstLineIndent = 0; }
   if (P.fontFamily != null && P.fontFamily !== s.fontFamily) { s.fontFamily = P.fontFamily; s.axes = {}; }
   if (P.fontSize != null && P.fontSize > 0) {
@@ -315,7 +316,7 @@ function resolveCell(el: TableElement, T: TableStyleProps, project: Project, bas
   const P = cellProps(el, project, a.r, a.c, T);
   const style = applyCellText(base, P, project);
   requestFamily(style.fontFamily);
-  const cs = P.charStyle ? project.characterStyles?.find((d) => d.id === P.charStyle) : null;
+  const cs = P.charStyle ? resolveCharStyles(project.characterStyles ?? []).find((d) => d.id === P.charStyle) : null;
   requestFamily(cs?.props.fontFamily);
   const raw = el.cells[a.r]?.[a.c]?.text ?? '';
   const text = cs && raw.trim() ? wrapCharStyle(raw, cs.name) : raw;
@@ -506,7 +507,7 @@ function measureTable(el: TableElement, ctx: TableContext, fill: boolean): Measu
   if (!R || !C || el.cells.length < R) return null;
   requestFamily(el.style.fontFamily);
   const T = resolveTableStyle(project, el);
-  const para = project.paragraphStyles ?? [], char = project.characterStyles ?? [];
+  const para = resolveParaStyles(project.paragraphStyles ?? []), char = resolveCharStyles(project.characterStyles ?? []);
   for (const d of para) requestFamily(d.props.fontFamily);
   const tokens = tokensFor(project, ctx.pageIndex);
   const env: Env = {

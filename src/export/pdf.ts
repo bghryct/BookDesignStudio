@@ -11,7 +11,7 @@
  *  • Die-cuts as a “CutContour” spot colour; foil / deboss / spot-gloss artwork on named spots.
  */
 import {
-  PDFDocument, PDFPage, PDFOperator, type PDFEmbeddedPage, PDFOperatorNames as Op, PDFName, PDFNumber, PDFArray, PDFDict, PDFRef, PDFFont, StandardFonts,
+  PDFDocument, PDFPage, PDFOperator, type PDFEmbeddedPage, PDFHexString, PDFNull, PDFString, type PDFObject, PDFOperatorNames as Op, PDFName, PDFNumber, PDFArray, PDFDict, PDFRef, PDFFont, StandardFonts,
   pushGraphicsState, popGraphicsState, concatTransformationMatrix, moveTo, lineTo, appendBezierCurve, closePath, fill, stroke,
   fillAndStroke, endPath, setFillingRgbColor, setFillingCmykColor, setStrokingRgbColor, setStrokingCmykColor, setLineWidth,
   setDashPattern, setLineCap, setLineJoin, setGraphicsState, drawObject, setCharacterSpacing, LineCapStyle, LineJoinStyle, cmyk, rgb,
@@ -28,6 +28,8 @@ import { parsePath } from '../lib/pathData';
 import { parseColor, rgbToCmyk, findSwatchCmyk } from '../lib/color';
 import { shape, glyphPath, canOutline, faceBytes, getFace, glyphKerns } from '../engine/fonts';
 import { computeBinding, computeJacket } from '../engine/binding';
+import { contentsEntries } from '../ui/contents';
+import { pageNumbers } from '../model/sections';
 import { pageSide, spreadsOf } from '../model/surfaces';
 import { coverBaseColor, crossovers } from '../render/compile';
 
@@ -92,6 +94,20 @@ class PageWriter {
   private glyphNames = new Map<PDFRef, PDFName>();
 
   constructor(public doc: PDFDocument, public page: PDFPage, public project: Project, public opts: PdfOptions, public images: Map<string, PDFImage>, public fonts: Map<string, PDFFont | null>, public glyphs: Map<string, PDFRef>) {}
+
+  /** Where content space sits on the sheet (y-down, from the sheet's top-left), for annotations. */
+  base: Matrix = [1, 0, 0, 1, 0, 0];
+  /** Hyperlinks to add once the document's pages exist: rectangles in PDF space. */
+  links: { rect: [number, number, number, number]; target: string }[] = [];
+
+  /** A link over a box in the current element's space. */
+  addLink(x: number, y: number, wd: number, h: number, ctm: Matrix, target: string) {
+    const m = multiply(this.base, ctm);
+    const H = this.page.getHeight();
+    const pts = [[x, y], [x + wd, y], [x, y + h], [x + wd, y + h]].map(([px, py]) => [m[0] * px + m[2] * py + m[4], H - (m[1] * px + m[3] * py + m[5])]);
+    const xs = pts.map((p) => p[0]), ys = pts.map((p) => p[1]);
+    this.links.push({ rect: [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)], target });
+  }
 
   /**
    * Each outlined glyph is written once per document as a Form XObject (in font units, y up)
@@ -264,6 +280,7 @@ async function emitPrim(w: PageWriter, p: Prim, st: EmitState) {
       for (const r of p.runs) {
         if (canOutline(r.text, r.font)) await emitRun(w, r, alpha, blend, st);
         else raster.push(r);
+        if (r.deco?.link && r.text) w.addLink(r.x, r.y - r.size * 0.8, r.width, r.size, st.ctm, r.deco.link);
       }
       if (raster.length) {
         let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
@@ -781,6 +798,7 @@ export async function exportPdf(project: Project, opts: PdfOptions): Promise<Uin
     for (let i = from - 1; i < to; i++) sheets.push({ pages: [i] });
   }
 
+  const allLinks: { page: PDFPage; links: PageWriter['links'] }[] = [];
   for (let si = 0; si < sheets.length; si++) {
     const sheet = sheets[si];
     const n = sheet.pages.length;
@@ -800,6 +818,7 @@ export async function exportPdf(project: Project, opts: PdfOptions): Promise<Uin
       const x0 = k * b.trimW;
       opts.onProgress?.((si + k / n) / sheets.length, `Page ${pi + 1}`);
       w.push(pushGraphicsState(), concatTransformationMatrix(1, 0, 0, 1, x0, 0));
+      w.base = [1, 0, 0, 1, ox + x0, oy];
       // Clip to this page's bleed so neighbours in a spread don't overprint each other.
       const cl = n > 1 ? { x: k === 0 ? -bleed : 0, w: b.trimW + bleed } : { x: -bleed, w: b.trimW + 2 * bleed };
       w.push(moveTo(cl.x, -bleed), lineTo(cl.x + cl.w, -bleed), lineTo(cl.x + cl.w, b.trimH + bleed), lineTo(cl.x, b.trimH + bleed), closePath(), PDFOperator.of(Op.ClipNonZero), endPath());
@@ -821,6 +840,7 @@ export async function exportPdf(project: Project, opts: PdfOptions): Promise<Uin
       for (const c of xs) if (c.above) await emitElement(w, c.el, c.ctx, c.dx);
       w.push(popGraphicsState());
     }
+    allLinks.push({ page, links: w.links });
     drawMarks(w, 0, 0, contentW, b.trimH, bleed, '', '');
     w.flush();
     const nums = sheet.pages.filter((x): x is number => x != null).map((x) => x + 1).join('-');
@@ -828,8 +848,113 @@ export async function exportPdf(project: Project, opts: PdfOptions): Promise<Uin
     await pageInfo(w, `${b.title} - p. ${nums}${mats.length ? ` - stock: ${mats.join(', ')}` : ''} - ${stamp}`, opts.colorBars ? 8 + 12 * 9 + 10 : 0, b.trimH + bleed + slug * 0.55);
     w.flush();
   }
+  // Hyperlinks: URLs, and cross-references to pages (when the target page is in this file).
+  const sheetOf = new Map<number, number>();
+  sheets.forEach((sh, k) => sh.pages.forEach((pi) => { if (pi != null) sheetOf.set(pi, k); }));
+  for (const { page, links } of allLinks) writeLinks(doc, page, links, (pi) => { const k = sheetOf.get(pi); return k != null ? doc.getPages()[k] : null; }, b.trimH + bleed + slug);
+  // Single pages: bookmarks from the chapter titles and headings, and page labels that follow the
+  // book's sections (i, ii … then 1, 2 …), as a reader's page box shows them.
+  if (opts.scope === 'interior' && !(opts.spreads && b.facing)) {
+    const docIndex = new Map<number, number>();
+    sheets.forEach((sh, k) => { const pi = sh.pages[0]; if (pi != null) docIndex.set(pi, k); });
+    writeOutline(doc, contentsEntries(project).filter((e) => docIndex.has(e.index)).map((e) => ({ level: e.level, title: e.text, page: docIndex.get(e.index)! })), b.trimH + bleed + slug);
+    if (project.sections?.length) writePageLabels(doc, project, sheets.map((sh) => sh.pages[0] ?? 0));
+  }
   opts.onProgress?.(1, 'Writing file');
   return doc.save();
+}
+
+function writeLinks(doc: PDFDocument, page: PDFPage, links: PageWriter['links'], pageFor: (pageIndex: number) => PDFPage | null, top: number) {
+  if (!links.length) return;
+  const ctx = doc.context;
+  const annots: PDFRef[] = [];
+  for (const l of links) {
+    const d = ctx.obj({}) as PDFDict;
+    d.set(PDFName.of('Type'), PDFName.of('Annot'));
+    d.set(PDFName.of('Subtype'), PDFName.of('Link'));
+    d.set(PDFName.of('Rect'), ctx.obj(l.rect.map((v) => PDFNumber.of(+v.toFixed(2)))));
+    d.set(PDFName.of('Border'), ctx.obj([PDFNumber.of(0), PDFNumber.of(0), PDFNumber.of(0)]));
+    const m = /^#p:(\d+)$/.exec(l.target);
+    if (m) {
+      const target = pageFor(parseInt(m[1], 10));
+      if (!target) continue;
+      d.set(PDFName.of('Dest'), ctx.obj([target.ref, PDFName.of('XYZ'), PDFNull, PDFNumber.of(top), PDFNull]));
+    } else {
+      const a = ctx.obj({}) as PDFDict;
+      a.set(PDFName.of('S'), PDFName.of('URI'));
+      a.set(PDFName.of('URI'), PDFString.of(l.target));
+      d.set(PDFName.of('A'), a);
+    }
+    annots.push(ctx.register(d));
+  }
+  if (!annots.length) return;
+  const existing = page.node.lookup(PDFName.of('Annots'));
+  if (existing instanceof PDFArray) for (const r of annots) existing.push(r);
+  else page.node.set(PDFName.of('Annots'), ctx.obj(annots));
+}
+
+/** The document outline (bookmarks): level-2 entries nest under the level-1 entry before them. */
+function writeOutline(doc: PDFDocument, items: { level: 1 | 2; title: string; page: number }[], top: number) {
+  if (!items.length) return;
+  const ctx = doc.context;
+  const pages = doc.getPages();
+  const root = ctx.nextRef();
+  type Node = { ref: PDFRef; title: string; page: number; kids: Node[] };
+  const tops: Node[] = [];
+  for (const it of items) {
+    const node: Node = { ref: ctx.nextRef(), title: it.title, page: it.page, kids: [] };
+    if (it.level === 2 && tops.length) tops[tops.length - 1].kids.push(node); else tops.push(node);
+  }
+  const write = (list: Node[], parent: PDFRef) => {
+    list.forEach((n, i) => {
+      const d = ctx.obj({}) as PDFDict;
+      d.set(PDFName.of('Title'), PDFHexString.fromText(n.title || '—'));
+      d.set(PDFName.of('Parent'), parent);
+      d.set(PDFName.of('Dest'), ctx.obj([pages[n.page].ref, PDFName.of('XYZ'), PDFNull, PDFNumber.of(top), PDFNull]));
+      if (i > 0) d.set(PDFName.of('Prev'), list[i - 1].ref);
+      if (i < list.length - 1) d.set(PDFName.of('Next'), list[i + 1].ref);
+      if (n.kids.length) {
+        d.set(PDFName.of('First'), n.kids[0].ref);
+        d.set(PDFName.of('Last'), n.kids[n.kids.length - 1].ref);
+        d.set(PDFName.of('Count'), PDFNumber.of(-n.kids.length));
+        write(n.kids, n.ref);
+      }
+      ctx.assign(n.ref, d);
+    });
+  };
+  write(tops, root);
+  const outlines = ctx.obj({}) as PDFDict;
+  outlines.set(PDFName.of('Type'), PDFName.of('Outlines'));
+  outlines.set(PDFName.of('First'), tops[0].ref);
+  outlines.set(PDFName.of('Last'), tops[tops.length - 1].ref);
+  outlines.set(PDFName.of('Count'), PDFNumber.of(tops.length));
+  ctx.assign(root, outlines);
+  doc.catalog.set(PDFName.of('Outlines'), root);
+  doc.catalog.set(PDFName.of('PageMode'), PDFName.of('UseOutlines'));
+}
+
+/** /PageLabels: a new range wherever the numbering's style, prefix or sequence changes. */
+function writePageLabels(doc: PDFDocument, project: Project, pageIndexes: number[]) {
+  const nums = pageNumbers(project);
+  const secOf = (pi: number) => { let s: NonNullable<Project['sections']>[number] | null = null; for (let k = 0; k <= pi; k++) { const f = project.sections?.find((x) => x.pageId === project.pages[k]?.id); if (f) s = f; } return s; };
+  const code: Record<string, string> = { arabic: 'D', roman: 'r', ROMAN: 'R', alpha: 'a', ALPHA: 'A' };
+  const arr: PDFObject[] = [];
+  let prev: { style: string; prefix: string; n: number } | null = null;
+  pageIndexes.forEach((pi, k) => {
+    const sec = secOf(pi);
+    const cur = { style: sec?.style ?? 'arabic', prefix: sec?.prefix ?? '', n: nums[pi]?.n ?? pi + 1 };
+    if (!prev || prev.style !== cur.style || prev.prefix !== cur.prefix || cur.n !== prev.n + 1) {
+      const d = doc.context.obj({}) as PDFDict;
+      d.set(PDFName.of('S'), PDFName.of(code[cur.style] ?? 'D'));
+      if (cur.n !== 1) d.set(PDFName.of('St'), PDFNumber.of(cur.n));
+      if (cur.prefix) d.set(PDFName.of('P'), PDFHexString.fromText(cur.prefix));
+      arr.push(PDFNumber.of(k), d);
+    }
+    prev = cur;
+  });
+  const labels = doc.context.obj({}) as PDFDict;
+  labels.set(PDFName.of('Nums'), doc.context.obj(arr));
+  doc.catalog.set(PDFName.of('PageLabels'), labels);
 }
 
 export { PDFArray, PDFRef };

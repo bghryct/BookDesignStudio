@@ -6,7 +6,8 @@ import { spreadsOf, pageKey, masterKey, surfaceElements } from '../../model/surf
 import { compilePage, placedElement } from '../../render/compile';
 import { primsToSvg } from '../../render/svgString';
 import { useFontStore } from '../../engine/fonts';
-import type { Element, PaperMaterial, Project } from '../../model/types';
+import type { Element, PaperMaterial, Project, PageSection } from '../../model/types';
+import { pageLabel } from '../../model/sections';
 import { insertPages, deletePage, duplicatePage, movePage, addMaster, deleteMaster, autoFlow } from '../../model/pageOps';
 import { Button, Select, TextInput, Toggle, Hint } from '../controls';
 import { PresetsPanel } from './PresetsPanel';
@@ -176,6 +177,7 @@ function PageMenu({ index, onClose }: { index: number; onClose: () => void }) {
   return (
     <div className="absolute left-1/2 top-full z-40 mt-1 w-56 -translate-x-1/2 space-y-2 rounded-md border border-ink-600 bg-ink-800 p-2 text-left shadow-2xl" onPointerDown={(e) => e.stopPropagation()}>
       <TextInput label="Label" value={page.label ?? ''} onChange={(v) => set((p) => { p.label = v; })} />
+      <SectionControls pageId={page.id} index={index} />
       <Select label="Master" value={page.masterId ?? ''} options={[{ value: '', label: 'None' }, ...project.masters.map((m) => ({ value: m.id, label: m.name }))]} onChange={(v) => set((p) => { p.masterId = v || null; })} />
       <Select<PaperMaterial> label="Material (Munari)" value={page.material} options={[{ value: 'paper', label: 'Paper' }, { value: 'vellum', label: 'Vellum / tracing paper' }, { value: 'colored', label: 'Coloured stock' }, { value: 'kraft', label: 'Kraft' }]} onChange={(v) => set((p) => {
         p.material = v;
@@ -228,7 +230,7 @@ function FlowText({ onDone }: { onDone: () => void }) {
           setLoaded(`${f.name}: ${r.summary}.`);
         } catch (err) { useStore.getState().notify(`${f.name}: ${(err as Error).message}`); }
       }} />
-      <Button className="w-full" onClick={() => fileRef.current?.click()}><Upload size={12} /> Load .txt / .md / .docx / .pdf…</Button>
+      <Button className="w-full" onClick={() => fileRef.current?.click()}><Upload size={12} /> Load .txt / .md / .docx / .rtf / .idml / .pdf…</Button>
       {loaded && <Hint>{loaded}</Hint>}
       <TextInput multiline rows={6} value={text.length > 200000 ? text.slice(0, 200000) : text} onChange={setText} placeholder="Paste text — one paragraph per line, # for chapter headings" />
       {text.length > 200000 && <Hint>{text.length.toLocaleString()} characters loaded (the box shows the first 200,000; editing it keeps only those).</Hint>}
@@ -365,7 +367,7 @@ function AssetsPanel() {
   return (
     <div className="p-2">
       <Button className="mb-2 w-full" onClick={() => input.current?.click()}><Upload size={13} /> Upload images, SVG or fonts</Button>
-      <input ref={input} type="file" multiple accept="image/*,.svg,.pdf,.ttf,.otf,.woff,.woff2,.docx,.txt,.md,.csv,.tsv" className="hidden" onChange={async (e) => {
+      <input ref={input} type="file" multiple accept="image/*,.svg,.pdf,.ttf,.otf,.woff,.woff2,.docx,.rtf,.idml,.txt,.md,.csv,.tsv" className="hidden" onChange={async (e) => {
         const res = await importFiles(e.target.files ? [...e.target.files] : []);
         if (res.errors.length) s().notify(res.errors[0], 'error');
         else if (res.messages.length) s().notify(res.messages.join(' '));
@@ -386,6 +388,34 @@ function AssetsPanel() {
           </div>
         ))}
       </div>
+    </div>
+  );
+}
+
+/** Start a section on this page: restart and restyle the page numbers, set a {section} marker. */
+function SectionControls({ pageId, index }: { pageId: string; index: number }) {
+  const project = useStore((st) => st.project);
+  const sec = project.sections?.find((x) => x.pageId === pageId);
+  const edit = (fn: (x: PageSection) => void) => useStore.getState().update((d) => { const x = d.sections?.find((y) => y.pageId === pageId); if (x) fn(x as PageSection); });
+  return (
+    <div className="space-y-1.5 rounded border border-ink-700 p-1.5">
+      <Toggle label={`Start a section here (p. ${pageLabel(project, index)})`} checked={!!sec} onChange={(v) => useStore.getState().update((d) => {
+        const list = (d.sections ?? []).filter((x) => x.pageId !== pageId);
+        if (v) list.push({ pageId, start: 1, style: 'arabic' });
+        d.sections = list;
+      })} />
+      {sec && (
+        <>
+          <div className="grid grid-cols-2 gap-1.5">
+            <TextInput label="Start at" value={String(sec.start)} onChange={(v) => { const n = parseInt(v, 10); if (n > 0) edit((x) => { x.start = n; }); }} />
+            <Select label="Numbers" value={sec.style} options={[{ value: 'arabic', label: '1 2 3' }, { value: 'roman', label: 'i ii iii' }, { value: 'ROMAN', label: 'I II III' }, { value: 'alpha', label: 'a b c' }, { value: 'ALPHA', label: 'A B C' }]} onChange={(v) => edit((x) => { x.style = v as PageSection['style']; })} />
+          </div>
+          <div className="grid grid-cols-2 gap-1.5">
+            <TextInput label="Prefix" value={sec.prefix ?? ''} onChange={(v) => edit((x) => { x.prefix = v; })} />
+            <TextInput label="Marker {section}" value={sec.marker ?? ''} onChange={(v) => edit((x) => { x.marker = v; })} />
+          </div>
+        </>
+      )}
     </div>
   );
 }

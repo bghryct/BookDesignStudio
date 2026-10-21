@@ -42,7 +42,17 @@ export interface TokenContext {
   /** The current chapter (running heads on masters). */
   chapter?: string;
   /** Cross-reference targets: anchor name → page and paragraph text. */
-  xrefs?: Record<string, { page: number; text: string }>;
+  xrefs?: Record<string, { page: number | string; text: string; index?: number }>;
+  /** The page's label in its section (prefix and numbering style), and the section's marker. */
+  pageLabel?: string;
+  section?: string;
+  /** Running heads by paragraph style (lower-case name): first and last such paragraph on the page. */
+  running?: Record<string, { first: string; last: string }>;
+  /** The project's name ({filename}). */
+  filename?: string;
+  /** Jump lines: where the threaded story this frame touches continues, and where it came from. */
+  nextPage?: string;
+  prevPage?: string;
 }
 
 /** An item the text wraps around, in frame-local pt (already grown by its wrap offset). */
@@ -68,6 +78,8 @@ export interface FrameSpec {
   balance?: boolean;
   columnRule?: TextElement['columnRule'];
   wraps?: WrapShape[];
+  /** Fixed column width (fixed-width columns), pt. */
+  colWidth?: number;
   /** Page number the frame is on (for paragraphs that start on an odd or even page). */
   page?: number | null;
 }
@@ -106,9 +118,46 @@ export interface FrameLayout {
   marks?: string[];
 }
 
+/** Kenten: a mark centred over every character of the run (dot, sesame, circle, triangle or a glyph). */
+function emphasisMarks(r: TextRun, em: { m: string; s: number }, capHeight: number): Prim[] {
+  const out: Prim[] = [];
+  const sx = r.scaleX ?? 1, ls = r.letterSpacing ?? 0;
+  // Above the cap height for Latin, above the em box for CJK (whose glyphs rise higher).
+  const cjk = /[\u3000-\u9fff\uf900-\ufaff\uff00-\uffef]/.test(r.text);
+  const y = r.y - (cjk ? 0.9 : capHeight) * r.size - em.s * 0.55;
+  const rr = em.s * 0.2;
+  let prefix = 0;
+  const chars = [...r.text];
+  let u = 0;
+  for (let i = 0; i < chars.length; i++) {
+    const ch = chars[i];
+    const w = measure(ch, r.font, r.size);
+    const kern = r.kern ? r.kern[u] ?? 0 : 0;
+    const cx = r.x + sx * (prefix + w / 2);
+    prefix += w + ls + kern;
+    u += ch.length;
+    if (!ch.trim()) continue;
+    switch (em.m) {
+      case 'dot': out.push({ t: 'path', d: circlePath(cx, y, rr), fill: r.color }); break;
+      case 'circle': out.push({ t: 'path', d: circlePath(cx, y, rr * 1.15), stroke: r.color, strokeWidth: rr * 0.45 }); break;
+      case 'triangle': out.push({ t: 'path', d: `M${cx} ${y - rr * 1.3}L${cx + rr * 1.2} ${y + rr * 0.8}L${cx - rr * 1.2} ${y + rr * 0.8}Z`, fill: r.color }); break;
+      case 'sesame': out.push({ t: 'path', d: `M${cx - rr * 0.6} ${y - rr * 1.3}Q${cx + rr * 1.3} ${y - rr * 0.6} ${cx + rr * 0.5} ${y + rr * 1.2}Q${cx - rr * 0.2} ${y} ${cx - rr * 0.6} ${y - rr * 1.3}Z`, fill: r.color }); break;
+      default: { const mw = measure(em.m, r.font, em.s); out.push({ t: 'text', runs: [{ x: cx - mw / 2, y: y + em.s * 0.35, text: em.m, font: r.font, size: em.s, color: r.color, width: mw }] }); }
+    }
+  }
+  return out;
+}
+
+const circlePath = (cx: number, cy: number, r: number) => {
+  const k = r * 0.5523;
+  return `M${cx - r} ${cy}C${cx - r} ${cy - k} ${cx - k} ${cy - r} ${cx} ${cy - r}C${cx + k} ${cy - r} ${cx + r} ${cy - k} ${cx + r} ${cy}C${cx + r} ${cy + k} ${cx + k} ${cy + r} ${cx} ${cy + r}C${cx - k} ${cy + r} ${cx - r} ${cy + k} ${cx - r} ${cy}Z`;
+};
+
 /** Underline rules: solid, double, dashed, dotted or wavy, from x0 to x1 centred on y. */
-function underlinePrims(x0: number, x1: number, y: number, u: { w: number; c: string; k?: 'double' | 'dashed' | 'dotted' | 'wavy' }): Prim[] {
-  const rect = (yy: number, w: number): Prim => ({ t: 'path', d: `M${x0} ${yy - w / 2}H${x1}V${yy + w / 2}H${x0}Z`, fill: u.c });
+function underlinePrims(x0: number, x1: number, y: number, u: { w: number; c: string; k?: 'double' | 'dashed' | 'dotted' | 'wavy'; g?: string }): Prim[] {
+  const rect = (yy: number, w: number, fill = u.c): Prim => ({ t: 'path', d: `M${x0} ${yy - w / 2}H${x1}V${yy + w / 2}H${x0}Z`, fill });
+  // Gap colour: a band behind the rule, filling between its strokes, dashes or dots.
+  if (u.g && u.k && u.k !== 'wavy') return [u.k === 'double' ? rect(y + u.w * 0.5, u.w * 2.6, u.g) : rect(y, u.w * 1.1, u.g), ...underlinePrims(x0, x1, y, { ...u, g: undefined })];
   switch (u.k) {
     case 'double': return [rect(y - u.w * 0.4, u.w * 0.7), rect(y + u.w * 1.4, u.w * 0.7)];
     case 'dashed': return [{ t: 'path', d: `M${x0} ${y}H${x1}`, stroke: u.c, strokeWidth: u.w, dash: [u.w * 4, u.w * 2.5] }];
@@ -130,11 +179,22 @@ function underlinePrims(x0: number, x1: number, y: number, u: { w: number; c: st
 export function expandTokens(text: string, t: TokenContext): string {
   text = text.replace(/\{(xref|xreftext):([^}]+)\}/g, (_, k: string, name: string) => {
     const x = t.xrefs?.[name.trim()];
-    return x ? (k === 'xref' ? String(x.page) : x.text) : '??';
+    if (!x) return '??';
+    const shown = k === 'xref' ? String(x.page) : x.text.replace(/([\\*^{}<>])/g, '\\$1');
+    // Clickable in exported PDFs: a link to the anchor's page.
+    return x.index != null ? `<{link:#p:${x.index}}>${shown}</>` : shown;
   });
-  return text.replace(/\{(page|pages|title|subtitle|author|publisher|year|chapter|date|lastpage)(?::(roman|ROMAN))?\}/g, (_, k: string, fmt?: string) => {
+  text = text.replace(/\{running:([^}:]+)(?::(first|last))?\}/g, (_, name: string, which?: string) => {
+    const r = t.running?.[name.trim().toLowerCase()];
+    return r ? (which === 'last' ? r.last : r.first) : '';
+  });
+  return text.replace(/\{(page|pages|title|subtitle|author|publisher|year|chapter|date|lastpage|section|nextpage|prevpage|filename)(?::(roman|ROMAN))?\}/g, (_, k: string, fmt?: string) => {
     switch (k) {
-      case 'page': return fmt === 'roman' ? toRoman(t.page) : fmt === 'ROMAN' ? toRoman(t.page, true) : String(t.page);
+      case 'filename': return t.filename ?? '';
+      case 'nextpage': return t.nextPage ?? '';
+      case 'prevpage': return t.prevPage ?? '';
+      case 'page': return fmt === 'roman' ? toRoman(t.page) : fmt === 'ROMAN' ? toRoman(t.page, true) : t.pageLabel ?? String(t.page);
+      case 'section': return t.section ?? '';
       case 'pages': return String(t.pages);
       case 'title': return t.title;
       case 'subtitle': return t.subtitle;
@@ -347,7 +407,7 @@ const fnTokens: TokenContext = { page: 0, pages: 0, title: '', subtitle: '', aut
 function layoutFrame(prep: Prepared, style: TextStyle, frame: FrameSpec, cursor: Cursor, isFirstFrame: boolean, bottomOverride?: number, opts: { stopBefore?: number } = {}): { layout: FrameLayout; cursor: Cursor | null } {
   const ins = frame.insets ?? { top: frame.inset, right: frame.inset, bottom: frame.inset, left: frame.inset };
   const cols = Math.max(1, Math.round(frame.columns));
-  const colW = Math.max(1, (frame.w - ins.left - ins.right - frame.columnGap * (cols - 1)) / cols);
+  const colW = frame.colWidth ?? Math.max(1, (frame.w - ins.left - ins.right - frame.columnGap * (cols - 1)) / cols);
   const top = ins.top;
   // Spanning heads at the top of a multi-column frame push the columns' tops down.
   let colTop = top;
@@ -620,6 +680,8 @@ function layoutFrame(prep: Prepared, style: TextStyle, frame: FrameSpec, cursor:
           if (wd.anchors) for (const a of wd.anchors) marks.push(`\u0001${a}\u0001${pp.para.words.map((w) => w.text).join(' ')}`);
         }
       }
+      // Paragraph styles in use, for running heads by style ("\u0002name\u0002text").
+      if (pl.startsPara && li === 0 && pp.para.styleNames) for (const n of pp.para.styleNames) marks.push(`\u0002${n}\u0002${pp.para.words.map((w) => w.text).join(' ')}`);
       if (pl.startsPara && li === 0 && (pp.para.kind === 'h1' || pp.para.kind === 'h2')) {
         heads.push({ level: pp.para.kind === 'h1' ? 1 : 2, text: pp.para.words.map((w) => w.text).join(' ') });
       }
@@ -659,6 +721,16 @@ function layoutFrame(prep: Prepared, style: TextStyle, frame: FrameSpec, cursor:
           const m = fontMetrics(r0.font);
           if (d.hl) u.push({ t: 'path', d: `M${r0.x - r0.size * 0.05} ${r0.y - m.ascender * r0.size}H${x1 + r0.size * 0.05}V${r0.y - m.descender * r0.size * 0.9}H${r0.x - r0.size * 0.05}Z`, fill: d.hl });
           if (d.u) u.push(...underlinePrims(r0.x, x1, r0.y + d.u.o, d.u));
+          if (d.wari) {
+            // Warichu: two half-size lines centred in the run's width, around the x-height.
+            const w = d.wari, cxw = r0.x + r0.width / 2;
+            const t0 = r0.y - r0.size * 0.36, t1 = r0.y + r0.size * 0.08;
+            o.push({ t: 'text', runs: [
+              { x: cxw - w.wa / 2, y: t0, text: w.a, font: r0.font, size: w.s, color: r0.color, width: w.wa },
+              { x: cxw - w.wb / 2, y: t1, text: w.b, font: r0.font, size: w.s, color: r0.color, width: w.wb },
+            ] });
+          }
+          if (d.em) for (let q = k; q < j; q++) o.push(...emphasisMarks(decoRuns[q], d.em, m.capHeight || 0.7));
           if (d.ruby) {
             // Ruby: centred over the base's glyphs, its baseline a little above the base's cap height.
             const ls = r0.letterSpacing ?? 0;
@@ -1041,8 +1113,16 @@ function layoutVertical(text: string, style: TextStyle, frame: FrameSpec): Frame
 /* -------------------------------------------------------------------------- */
 
 export function frameSpecOf(el: TextElement, grid?: FrameSpec['grid'], wraps?: WrapShape[]): FrameSpec {
+  // Fixed-width columns: as many as fit (the rest of the measure stays empty); flexible: as few
+  // as keep every column within the maximum width.
+  let columns = el.columns, colWidth: number | undefined;
+  if ((el.columnMode === 'fixed' || el.columnMode === 'flexible') && el.columnWidth && el.columnWidth > 0) {
+    const avail = el.w - (el.insetSides ? el.insetSides.left + el.insetSides.right : el.inset * 2);
+    if (el.columnMode === 'fixed') { columns = Math.max(1, Math.floor((avail + el.columnGap) / (el.columnWidth + el.columnGap) + 1e-6)); colWidth = el.columnWidth; }
+    else columns = Math.max(1, Math.ceil((avail + el.columnGap) / (el.columnWidth + el.columnGap) - 1e-6));
+  }
   return {
-    w: el.w, h: el.h, columns: el.columns, columnGap: el.columnGap, inset: el.inset, insets: el.insetSides ?? null,
+    w: el.w, h: el.h, columns, colWidth, columnGap: el.columnGap, inset: el.inset, insets: el.insetSides ?? null,
     verticalAlign: el.verticalAlign, grid, firstBaseline: el.firstBaseline, firstBaselineMin: el.firstBaselineMin,
     balance: el.balanceColumns, columnRule: el.columnRule ?? null, wraps: el.wrapIgnore ? undefined : wraps,
   };
@@ -1057,7 +1137,7 @@ export function layoutStory(text: string, style: TextStyle, frames: FrameSpec[],
   }
   const f0 = frames[0];
   const in0 = f0?.insets ? f0.insets.left + f0.insets.right : (f0?.inset ?? 0) * 2;
-  const firstColW = f0 ? (f0.w - in0 - f0.columnGap * (Math.max(1, f0.columns) - 1)) / Math.max(1, f0.columns) : 100;
+  const firstColW = f0 ? f0.colWidth ?? (f0.w - in0 - f0.columnGap * (Math.max(1, f0.columns) - 1)) / Math.max(1, f0.columns) : 100;
   const useStyles = styles && (styles.para.length || styles.char.length || styles.hyphenation?.length || styles.hiddenConditions?.length || /\{img:/.test(expanded)) ? styles : null;
   const prep = prepare(expanded, style, firstColW, useStyles);
   const out: FrameLayout[] = [];

@@ -270,10 +270,34 @@ export interface CharacterStyleProps {
   /** Character rotation, degrees (each character turns about its own centre). */
   rotate?: number;
   underlineStyle?: 'solid' | 'double' | 'dashed' | 'dotted' | 'wavy';
+  /** Kenten: an emphasis mark over every character ('dot', 'sesame', 'circle', 'triangle' or any character). */
+  emphasis?: string;
+  /** Colour filling the gaps of a double, dashed or dotted underline. */
+  underlineGap?: string;
+  /** A hyperlink in exported PDFs: a URL, or "#p:N" for page index N of the book. */
+  link?: string;
 }
 
-export interface ParagraphStyleDef { id: ID; name: string; props: ParagraphStyleProps }
-export interface CharacterStyleDef { id: ID; name: string; props: CharacterStyleProps }
+/** A section starting on a page: its numbering and its marker. */
+export interface PageSection {
+  pageId: ID;
+  start: number;
+  style: 'arabic' | 'roman' | 'ROMAN' | 'alpha' | 'ALPHA';
+  prefix?: string;
+  /** Text for {section} (e.g. "Part Two"). */
+  marker?: string;
+}
+
+export interface ParagraphStyleDef {
+  id: ID;
+  name: string;
+  props: ParagraphStyleProps;
+  /** Inherit every property this style does not set from another style. */
+  basedOn?: ID | null;
+  /** The style a new paragraph takes after a return in the story editor (null = the same style). */
+  nextStyle?: ID | null;
+}
+export interface CharacterStyleDef { id: ID; name: string; props: CharacterStyleProps; basedOn?: ID | null }
 
 /* ------------------------------------------------------------------------- */
 /* Elements                                                                   */
@@ -338,8 +362,13 @@ export interface TextElement extends ElementBase {
   wrapIgnore?: boolean;
   /** Grow or shrink the frame's height to fit its text. */
   autoHeight?: boolean;
+  /** Grow or shrink the frame's width to its longest line (labels, heads); the aligned edge stays put. */
+  autoWidth?: boolean;
   /** A baseline grid of the frame's own (overrides the document grid for this frame). */
   customGrid?: { increment: number; offset: number } | null;
+  /** Columns: a fixed number (default), a fixed width (as many as fit), or flexible up to a maximum width. */
+  columnMode?: 'count' | 'fixed' | 'flexible';
+  columnWidth?: number;
   /** Thread: overflow continues in this text element (any page). */
   flowNext: ID | null;
   fill: string | null;
@@ -418,6 +447,8 @@ export interface PathText {
   baselineShift: number;
   reverse?: boolean;
   features?: Record<string, boolean>;
+  /** How each glyph sits on the path (InDesign's type-on-a-path effects). */
+  effect?: 'rainbow' | 'skew' | 'ribbon' | 'stair' | 'gravity';
 }
 
 export interface SvgElement extends ElementBase {
@@ -805,6 +836,8 @@ export interface Project {
   hyphenDictionary?: string[];
   /** Conditional text ({if:Name}…{/if}) whose condition is hidden. */
   hiddenConditions?: string[];
+  /** Sections: page numbering restarts and changes style where a section starts (src/model/sections.ts). */
+  sections?: PageSection[];
   /** Named paragraph and character styles (`[Name]` / `<Name>…</Name>` in stories). */
   paragraphStyles?: ParagraphStyleDef[];
   characterStyles?: CharacterStyleDef[];

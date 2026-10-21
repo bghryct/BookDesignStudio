@@ -22,11 +22,17 @@ import { PLAIN, type Paragraph, type SpanStyle, type Word, type StoryStyles } fr
 
 /** Layout-only decoration of a run (underline, strike, highlight), turned into rules by the frame. */
 export interface RunDeco {
-  u?: { w: number; o: number; c: string; k?: 'double' | 'dashed' | 'dotted' | 'wavy' };
+  u?: { w: number; o: number; c: string; k?: 'double' | 'dashed' | 'dotted' | 'wavy'; g?: string };
   s?: { w: number; c: string };
   hl?: string;
   /** Ruby annotation set above the run: text, size, measured width. */
   ruby?: { t: string; s: number; w: number };
+  /** Kenten: a mark over each character. */
+  em?: { m: string; s: number };
+  /** A PDF hyperlink over the run. */
+  link?: string;
+  /** Warichu: two half-size lines set inside the line (the run itself is blank). */
+  wari?: { a: string; b: string; s: number; wa: number; wb: number };
 }
 
 /** A measured piece of text in one font. `kern`: extra advance after each UTF-16 unit (pt). */
@@ -223,11 +229,22 @@ export class ItemBuilder {
     if (cs?.stroke) look.stroke = { color: cs.stroke === 'currentColor' ? color : cs.stroke, width: cs.strokeWidth ?? size * 0.03 };
     if (cs?.underline || cs?.strike || cs?.highlight) {
       look.deco = {
-        u: cs.underline ? { w: cs.underlineWeight ?? Math.max(0.3, size * 0.055), o: cs.underlineOffset ?? size * 0.13, c: cs.underlineColor ?? color, k: cs.underlineStyle && cs.underlineStyle !== 'solid' ? cs.underlineStyle : undefined } : undefined,
+        u: cs.underline ? { w: cs.underlineWeight ?? Math.max(0.3, size * 0.055), o: cs.underlineOffset ?? size * 0.13, c: cs.underlineColor ?? color, k: cs.underlineStyle && cs.underlineStyle !== 'solid' ? cs.underlineStyle : undefined, g: cs.underlineGap || undefined } : undefined,
         s: cs.strike ? { w: cs.strikeWeight ?? Math.max(0.3, size * 0.055), c: cs.strikeColor ?? color } : undefined,
         hl: cs.highlight,
       };
     }
+    if (st.wari) {
+      // Warichu: the note split over two half-size lines, as wide as the longer one.
+      const font = this.font(st, extra, size);
+      const ws = size * 0.5;
+      const [a, b] = st.wari;
+      const wa = measure(a, font, ws), wb = measure(b, font, ws);
+      const w = Math.max(wa, wb) + size * 0.12;
+      return [{ text: '', font, size, ls: 0, width: w, glyphW: w, color, deco: { ...look.deco, wari: { a, b, s: ws, wa, wb } } }];
+    }
+    if (cs?.emphasis) look.deco = { ...look.deco, em: { m: cs.emphasis, s: size * 0.42 } };
+    if (cs?.link) look.deco = { ...look.deco, link: cs.link };
     if (st.ruby) {
       // Ruby: the annotation at half size; a base narrower than its annotation is spaced out to match.
       const font = this.font(st, extra, size);
@@ -403,7 +420,7 @@ export function buildItems(p: Paragraph, style: TextStyle, ps: ParaStyle, scWord
     if (word.here) items.push({ t: 'here' });
     const sc = wi < scWords;
     const text = word.text;
-    const noBreak = word.pieces.some((x) => x.st.cs?.noBreak || x.st.ruby != null);
+    const noBreak = word.pieces.some((x) => x.st.cs?.noBreak || x.st.ruby != null || x.st.wari != null);
     // Break opportunities: discretionary hyphens, else hyphenation points; after explicit hyphens/dashes.
     const breaks: { at: number; hyph: boolean }[] = [];
     if (!noBreak) {
@@ -826,7 +843,11 @@ export function placeLine(items: Item[], line: Line, lineW: number, o: PlaceOpti
           x += s.width;
           continue;
         }
-        if (!s.text) { x += s.width; continue; }
+        if (!s.text) {
+          if (s.deco?.wari) runs.push({ x, y: o.baseline - (s.dy ?? 0), text: '', font: s.font, size: s.size, color: s.color, width: s.width, deco: s.deco });
+          x += s.width;
+          continue;
+        }
         const run = runOf(s, x, o.baseline, lsExtra + letterFill, scale);
         runs.push(run);
         x += run.width;

@@ -126,7 +126,7 @@ function FileMenu() {
             setOpen(false);
             e.target.value = '';
           }} />
-          <input ref={importRef} type="file" multiple accept="image/*,.svg,.pdf,.ttf,.otf,.woff,.woff2,.docx,.txt,.md,.csv,.tsv" className="hidden" onChange={async (e) => {
+          <input ref={importRef} type="file" multiple accept="image/*,.svg,.pdf,.ttf,.otf,.woff,.woff2,.docx,.rtf,.idml,.txt,.md,.csv,.tsv" className="hidden" onChange={async (e) => {
             const files = e.target.files ? [...e.target.files] : [];
             const res = await importFiles(files);
             s().notify(res.errors[0] ?? (res.messages.join(' ') || 'Imported.'), res.errors.length ? 'error' : 'info');

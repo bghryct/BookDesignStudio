@@ -8,6 +8,7 @@ import { layoutText } from '../render/compile';
 import { pageSide, spreadsOf, pageKey } from '../model/surfaces';
 import { makeText, textStyle } from '../model/factory';
 import { textBlock } from '../engine/grid';
+import { pageLabel } from '../model/sections';
 
 /** Every text in the book: pages, masters, cover and jacket. */
 function allTexts(project: Project): string[] {
@@ -37,14 +38,14 @@ export function anchorNames(project: Project): string[] {
 const plain = (s: string) => s.replace(/<\/?(?:\{[^}]*\}|[^<>]{0,40})>|\{[^}]*\}|\[[^\]]*\]\s*|[*^\\]/g, '').replace(/\s+/g, ' ').trim();
 export const CONTENTS_NAME = 'Contents (generated)';
 
-export function contentsEntries(project: Project): { level: 1 | 2; text: string; page: number }[] {
-  const out: { level: 1 | 2; text: string; page: number }[] = [];
+export function contentsEntries(project: Project): { level: 1 | 2; text: string; page: string; index: number }[] {
+  const out: { level: 1 | 2; text: string; page: string; index: number }[] = [];
   project.pages.forEach((p, i) => {
     const els = [...p.elements].filter((e): e is TextElement => e.type === 'text' && e.name !== CONTENTS_NAME).sort((a, b) => a.y - b.y || a.x - b.x);
     for (const e of els) {
-      if (/chapter\s*title|^chapter$/i.test(e.name) && e.text.trim()) { out.push({ level: 1, text: plain(e.text.split('\n')[0]), page: i + 1 }); continue; }
+      if (/chapter\s*title|^chapter$/i.test(e.name) && e.text.trim()) { out.push({ level: 1, text: plain(e.text.split('\n')[0]), page: pageLabel(project, i), index: i }); continue; }
       const heads = layoutText(e, { project, surface: pageKey(p.id), pageIndex: i, side: pageSide(project, i) }).heads ?? [];
-      for (const h of heads) out.push({ level: h.level, text: plain(h.text), page: i + 1 });
+      for (const h of heads) out.push({ level: h.level, text: plain(h.text), page: pageLabel(project, i), index: i });
     }
   });
   return out.filter((e) => e.text);
@@ -86,7 +87,7 @@ export function indexEntries(project: Project): Map<string, { pages: Set<number>
       if (e.type !== 'text' || e.name === INDEX_NAME) continue;
       const marks = layoutText(e, { project, surface: pageKey(p.id), pageIndex: i, side: pageSide(project, i) }).marks ?? [];
       for (const m of marks) {
-        if (m.startsWith('\u0001')) continue;
+        if (m.startsWith('\u0001') || m.startsWith('\u0002')) continue;
         const [main, sub] = m.split('!').map((x) => x.trim());
         if (!main) continue;
         const key = main;
@@ -100,14 +101,14 @@ export function indexEntries(project: Project): Map<string, { pages: Set<number>
   return out;
 }
 
-/** 3, 4, 5, 9 → "3–5, 9". */
-function pageList(pages: Set<number>): string {
+/** 3, 4, 5, 9 → "3–5, 9" (in the pages' section labels). */
+function pageList(pages: Set<number>, label: (n: number) => string = String): string {
   const ps = [...pages].sort((a, b) => a - b);
   const parts: string[] = [];
   for (let i = 0; i < ps.length; i++) {
     let j = i;
     while (j + 1 < ps.length && ps[j + 1] === ps[j] + 1) j++;
-    parts.push(j > i ? `${ps[i]}–${ps[j]}` : String(ps[i]));
+    parts.push(j > i ? `${label(ps[i])}–${label(ps[j])}` : label(ps[i]));
     i = j;
   }
   return parts.join(', ');
@@ -117,13 +118,14 @@ export function generateIndex(): { entries: number; updated: boolean } {
   const s = useStore.getState();
   const project = s.project;
   const entries = [...indexEntries(project).entries()].sort((a, b) => a[0].localeCompare(b[0], undefined, { sensitivity: 'base' }));
+  const lab = (n: number) => pageLabel(project, n - 1);
   const lines: string[] = ['[{size:15; leading:22; after:10; span}] ^Index^'];
   let letter = '';
   for (const [term, rec] of entries) {
     const l = term[0].toUpperCase();
     if (l !== letter) { letter = l; lines.push(`[{before:8; keep:2}] ^${l}^`); }
-    lines.push(`${term}${rec.pages.size ? `, ${pageList(rec.pages)}` : ''}`);
-    for (const [sub, pages] of [...rec.subs.entries()].sort((a, b) => a[0].localeCompare(b[0]))) lines.push(`[{left:10}] ${sub}, ${pageList(pages)}`);
+    lines.push(`${term}${rec.pages.size ? `, ${pageList(rec.pages, lab)}` : ''}`);
+    for (const [sub, pages] of [...rec.subs.entries()].sort((a, b) => a[0].localeCompare(b[0]))) lines.push(`[{left:10}] ${sub}, ${pageList(pages, lab)}`);
   }
   const text = lines.join('\n');
   let existing: Element | null = null;

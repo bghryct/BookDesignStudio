@@ -11,7 +11,7 @@ import { LIBRARY_MIME } from '../library/LibraryPanel';
 import { getItem, insertItem, targetFor } from '../library/insert';
 import { uid } from '../../lib/random';
 import { applyMatrix, multiply, translate, scale as scaleM } from '../../render/primitives';
-import { layoutText, threadOf, crossesGutter } from '../../render/compile';
+import { layoutText, naturalWidth, threadOf, crossesGutter } from '../../render/compile';
 import { renderStroke, simulatePressure, stabilize } from '../../engine/brushes';
 import { parsePath, serialize, type Seg } from '../../lib/pathData';
 import { SurfaceView } from './SurfaceView';
@@ -129,20 +129,38 @@ export function Editor({ mode }: { mode: 'spreads' | 'cover' | 'jacket' }) {
     return out;
   }, [surfaces, project]);
 
-  // Frames set to fit their text follow the depth the story actually uses.
+  // Frames set to fit their text follow the width of their longest line and the depth the story uses.
   useEffect(() => {
-    const fixes: { id: string; h: number }[] = [];
+    const fixes: { id: string; h?: number; w?: number; x?: number }[] = [];
     for (const { el, surface } of allEls) {
-      if (el.type !== 'text' || !el.autoHeight) continue;
-      const lay = layoutText(el, { project, surface: surface.key, pageIndex: surface.pageIndex, side: surface.side });
-      const h = Math.max(12, Math.ceil(lay.usedHeight ?? el.h));
-      if (Math.abs(h - el.h) > 0.5) fixes.push({ id: el.id, h });
+      if (el.type !== 'text' || (!el.autoHeight && !el.autoWidth)) continue;
+      const ctx = { project, surface: surface.key, pageIndex: surface.pageIndex, side: surface.side };
+      const fix: { id: string; h?: number; w?: number; x?: number } = { id: el.id };
+      if (el.autoWidth) {
+        const w = Math.max(12, naturalWidth(el, ctx));
+        if (Math.abs(w - el.w) > 0.5) {
+          // The edge the text is aligned to stays where it is.
+          const a = el.style.align;
+          fix.w = w;
+          if (a === 'center') fix.x = el.x + (el.w - w) / 2; else if (a === 'right') fix.x = el.x + el.w - w;
+        }
+      }
+      if (el.autoHeight) {
+        const lay = layoutText(el, ctx);
+        const h = Math.max(12, Math.ceil(lay.usedHeight ?? el.h));
+        if (Math.abs(h - el.h) > 0.5) fix.h = h;
+      }
+      if (fix.h != null || fix.w != null) fixes.push(fix);
     }
     if (!fixes.length) return;
     useStore.getState().update((d) => {
       for (const f of fixes) {
         const loc = findElement(d as Project, f.id);
-        if (loc) surfaceElementsDraft(d as Project, loc.key)![loc.index].h = f.h;
+        if (!loc) continue;
+        const t = surfaceElementsDraft(d as Project, loc.key)![loc.index];
+        if (f.h != null) t.h = f.h;
+        if (f.w != null) t.w = f.w;
+        if (f.x != null) t.x = f.x;
       }
     }, { history: false });
   }, [allEls, project]);

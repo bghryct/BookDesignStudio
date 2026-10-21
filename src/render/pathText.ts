@@ -76,12 +76,42 @@ export function pathTextPrims(el: PathElement, d: string): Prim[] {
   // Text sits on the path, or hangs below it with its cap height on the line.
   const shift = pt.baselineShift + (pt.side === 'under' ? -m.capHeight * size : 0);
   const runs: TextRun[] = [];
+  const effect = pt.effect ?? 'rainbow';
+  // Gravity turns every glyph about the centre of the path's bounds.
+  let cx = 0, cy = 0;
+  if (effect === 'gravity') {
+    const xs = poly.pts.map((q) => q[0]), ys = poly.pts.map((q) => q[1]);
+    cx = (Math.min(...xs) + Math.max(...xs)) / 2; cy = (Math.min(...ys) + Math.max(...ys)) / 2;
+  }
+  const groups: Prim[] = [];
   for (const c of clusters) {
     const mid = s + c.adv / 2;
     if (c.text.trim() && mid >= 0 && mid <= L) {
       const p = at(poly, mid);
       const cos = Math.cos(p.a), sin = Math.sin(p.a);
       const half = (c.adv - ls) / 2;
+      if (effect !== 'rainbow') {
+        // The glyph drawn at the origin (baseline centre), then mapped by the effect's matrix:
+        // skew keeps verticals vertical, ribbon keeps horizontals horizontal, stair step keeps the
+        // glyph upright, gravity points it away from the path's centre.
+        const ox = p.x + sin * shift, oy = p.y - cos * shift;
+        let m: [number, number, number, number];
+        if (effect === 'skew') m = [cos, sin, 0, 1];
+        else if (effect === 'ribbon') m = [1, 0, -sin, cos];
+        else if (effect === 'stair') m = [1, 0, 0, 1];
+        else {
+          // Along the line from the centre, on the side of the path the type stands on.
+          let ux = p.x - cx, uy = p.y - cy;
+          const l = Math.hypot(ux, uy) || 1;
+          ux /= l; uy /= l;
+          if (ux * sin + uy * -cos < 0) { ux = -ux; uy = -uy; }
+          const th = Math.atan2(ux, -uy);
+          m = [Math.cos(th), Math.sin(th), -Math.sin(th), Math.cos(th)];
+        }
+        groups.push({ t: 'group', matrix: [m[0], m[1], m[2], m[3], ox, oy], children: [{ t: 'text', runs: [{ x: -half, y: 0, text: c.text, font, size, color: pt.color, width: c.adv - ls }] }] });
+        s += c.adv;
+        continue;
+      }
       // Up from the path (left of the direction of travel) in y-down space is (sin, −cos).
       const x = p.x - cos * half + sin * shift;
       const y = p.y - sin * half - cos * shift;
@@ -89,5 +119,5 @@ export function pathTextPrims(el: PathElement, d: string): Prim[] {
     }
     s += c.adv;
   }
-  return runs.length ? [{ t: 'text', runs }] : [];
+  return [...(runs.length ? [{ t: 'text', runs } as Prim] : []), ...groups];
 }

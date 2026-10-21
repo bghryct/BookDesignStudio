@@ -26,6 +26,7 @@ import {
   type WebGLRenderTarget,
 } from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+import { mm } from '../model/units';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import {
   ANIMATION_INFO,
@@ -1010,6 +1011,43 @@ export class BookScene {
     }
   }
 
+  /**
+   * Keep an orbiting / zooming camera out of the book's body (the closed block between its
+   * covers, a couple of millimetres grown): from the side, OrbitControls' minimum distance alone
+   * lets a close camera end up between the pages. Pushed back along its line to the target.
+   */
+  keepCameraOutside(): void {
+    const model = this.model;
+    if (!model) return;
+    const b = model.bounds(0);
+    const m = mm(2);
+    const lo = [b.a0 - m, b.y0 - m, b.z0 - m], hi = [b.a1 + m, b.y1 + m, b.z1 + m];
+    model.group.updateMatrixWorld(true);
+    const toLocal = model.group.matrixWorld.clone().invert();
+    const p = this.camera.position.clone().applyMatrix4(toLocal);
+    const inside = (q: Vector3) => q.x > lo[0] && q.x < hi[0] && q.y > lo[1] && q.y < hi[1] && q.z > lo[2] && q.z < hi[2];
+    if (!inside(p)) return;
+    const t = this.controls.target.clone().applyMatrix4(toLocal);
+    const dir = p.clone().sub(t);
+    if (dir.lengthSq() < 1e-12) dir.set(0, 1, 0);
+    dir.normalize();
+    // Along the ray from the target through the camera: out of the far side of the box when the
+    // target is inside it, else back to where the ray enters it.
+    let exit = Infinity, enter = -Infinity;
+    const o = [t.x, t.y, t.z], d = [dir.x, dir.y, dir.z];
+    for (let k = 0; k < 3; k++) {
+      if (Math.abs(d[k]) < 1e-12) continue;
+      const s1 = (lo[k] - o[k]) / d[k], s2 = (hi[k] - o[k]) / d[k];
+      exit = Math.min(exit, Math.max(s1, s2));
+      enter = Math.max(enter, Math.min(s1, s2));
+    }
+    if (!Number.isFinite(exit)) return;
+    const s0 = inside(t) ? exit + mm(0.1) : Math.max(0, enter - mm(0.1));
+    const q = t.clone().addScaledVector(dir, s0);
+    this.camera.position.copy(q.applyMatrix4(model.group.matrixWorld));
+    this.camera.updateMatrixWorld();
+  }
+
   private sortTransparentLeaves(): void {
     const model = this.model;
     if (!model) return;
@@ -1058,7 +1096,10 @@ export class BookScene {
     } else if (this.manual || this.mode === 'none') {
       if (this.updateTweens(now)) this.applyCurrent();
     }
-    if (this.controls.update()) this.dirty = true;
+    if (this.controls.update()) {
+      if (this.userCamera) this.keepCameraOutside();
+      this.dirty = true;
+    }
     if (this.dirty) this.renderNow();
   };
 

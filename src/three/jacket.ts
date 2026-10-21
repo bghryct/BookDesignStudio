@@ -21,8 +21,9 @@ export interface JacketBase {
   /**
    * Optional: nudge the posed mid-surface (a, y pairs, `count` samples) clear of the book where
    * a joint pinches it (the opening board's spine edge, the joint cloth, the spine's top edge).
+   * `first`: index in `mid` of the base's first sample (flaps and folds come before it).
    */
-  constrain?(mid: Float64Array, count: number, half: number): void;
+  constrain?(mid: Float64Array, count: number, half: number, first: number): void;
 }
 
 /** Jacket panel position on a left-bound jacket (pt). */
@@ -81,7 +82,8 @@ export function despike(p: Float64Array, n: number, passes = 3): void {
 }
 
 const FOLD_N = 12;
-const FLAP_N = 6;
+// Enough samples for a flap to follow a soft cover curled open (a coarse chord cuts through the pages on it).
+const FLAP_N = 16;
 export const JACKET_THICKNESS = mm(0.12);
 /** Air between the covering and the jacket. */
 export const JACKET_GAP = mm(0.15);
@@ -222,7 +224,7 @@ export class JacketRig {
     // case) leaves a little swallowtail loop: cut it at its crossing.
     untangle(pts, ns);
     if (b.constrain) {
-      b.constrain(pts, ns, JACKET_THICKNESS / 2);
+      b.constrain(pts, ns, JACKET_THICKNESS / 2, FLAP_N + FOLD_N);
       untangle(pts, ns);
       despike(pts, ns);
     }

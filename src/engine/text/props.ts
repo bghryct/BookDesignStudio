@@ -7,7 +7,7 @@
  *
  * Keys are forgiving (aliases, units-free numbers in pt / ‰ / %); unknown keys are ignored.
  */
-import type { TextStyle, ParagraphStyleProps, CharacterStyleProps } from '../../model/types';
+import type { TextStyle, ParagraphStyleProps, CharacterStyleProps, ParagraphStyleDef, CharacterStyleDef } from '../../model/types';
 
 /** The frame style with a paragraph style laid over it (unset properties inherit). */
 export function applyParagraphStyle(s: TextStyle, p: ParagraphStyleProps | null | undefined): TextStyle {
@@ -36,6 +36,41 @@ export function mergePara(a: ParagraphStyleProps | null, b: ParagraphStyleProps 
   return { ...a, ...b, features: a.features || b.features ? { ...(a.features ?? {}), ...(b.features ?? {}) } : undefined };
 }
 
+/*
+ * Based-on styles: a style's effective properties are its parent's (recursively) with its own on
+ * top. Resolved once per list of definitions; cycles stop at the first repeat.
+ */
+const resolvedPara = new WeakMap<object, ParagraphStyleDef[]>();
+const resolvedChar = new WeakMap<object, CharacterStyleDef[]>();
+
+function resolveDefs<D extends { id: string; props: P; basedOn?: string | null }, P>(defs: D[], merge: (a: P, b: P) => P): D[] {
+  const byId = new Map(defs.map((d) => [d.id, d]));
+  const memo = new Map<string, P>();
+  const eff = (d: D, seen: Set<string>): P => {
+    const hit = memo.get(d.id);
+    if (hit) return hit;
+    const parent = d.basedOn ? byId.get(d.basedOn) : undefined;
+    const p = parent && !seen.has(parent.id) ? merge(eff(parent, new Set([...seen, d.id])), d.props) : d.props;
+    memo.set(d.id, p);
+    return p;
+  };
+  return defs.map((d) => (d.basedOn ? { ...d, props: eff(d, new Set([d.id])) } : d));
+}
+
+export function resolveParaStyles(defs: ParagraphStyleDef[]): ParagraphStyleDef[] {
+  if (!defs.some((d) => d.basedOn)) return defs;
+  let r = resolvedPara.get(defs);
+  if (!r) { r = resolveDefs<ParagraphStyleDef, ParagraphStyleProps>(defs, (a, b) => mergePara(a, b) ?? {}); resolvedPara.set(defs, r); }
+  return r;
+}
+
+export function resolveCharStyles(defs: CharacterStyleDef[]): CharacterStyleDef[] {
+  if (!defs.some((d) => d.basedOn)) return defs;
+  let r = resolvedChar.get(defs);
+  if (!r) { r = resolveDefs<CharacterStyleDef, CharacterStyleProps>(defs, (a, b) => mergeCs([a, b]) ?? {}); resolvedChar.set(defs, r); }
+  return r;
+}
+
 const CHAR_KEYS: Record<string, keyof CharacterStyleProps> = {
   font: 'fontFamily', family: 'fontFamily', typeface: 'fontFamily', fontfamily: 'fontFamily',
   weight: 'weight', w: 'weight', wght: 'weight',
@@ -46,13 +81,13 @@ const CHAR_KEYS: Record<string, keyof CharacterStyleProps> = {
   case: 'textTransform', transform: 'textTransform',
   pos: 'position', position: 'position',
   shift: 'baselineShift', baseline: 'baselineShift', bs: 'baselineShift',
-  u: 'underline', underline: 'underline', uweight: 'underlineWeight', uoffset: 'underlineOffset', ucolor: 'underlineColor', ustyle: 'underlineStyle',
+  u: 'underline', underline: 'underline', uweight: 'underlineWeight', uoffset: 'underlineOffset', ucolor: 'underlineColor', ustyle: 'underlineStyle', ugap: 'underlineGap', link: 'link', href: 'link', url: 'link',
   s: 'strike', strike: 'strike', strikethrough: 'strike', sweight: 'strikeWeight', scolor: 'strikeColor',
   highlight: 'highlight', bg: 'highlight', mark: 'highlight',
   hscale: 'hScale', h: 'hScale', vscale: 'vScale', v: 'vScale', skew: 'skew', slant: 'skew',
   stroke: 'stroke', outline: 'stroke', strokewidth: 'strokeWidth', sw: 'strokeWidth',
   nobreak: 'noBreak', nb: 'noBreak',
-  lang: 'language', language: 'language', rotate: 'rotate', rot: 'rotate',
+  lang: 'language', language: 'language', rotate: 'rotate', rot: 'rotate', emphasis: 'emphasis', kenten: 'emphasis',
   features: 'features', ot: 'features',
 };
 
@@ -158,12 +193,15 @@ export function charPropsToString(p: CharacterStyleProps): string {
   if (p.position === 'subscript') parts.push('sub');
   add('shift', p.baselineShift);
   if (p.underline) parts.push(p.underlineStyle && p.underlineStyle !== 'solid' ? `underline:${p.underlineStyle}` : 'underline');
+  add('ugap', p.underlineGap);
+  add('link', p.link);
   if (p.strike) parts.push('strike');
   add('highlight', p.highlight);
   add('hscale', p.hScale);
   add('vscale', p.vScale);
   add('skew', p.skew);
   add('rotate', p.rotate);
+  add('kenten', p.emphasis);
   add('stroke', p.stroke);
   add('strokewidth', p.strokeWidth);
   if (p.noBreak) parts.push('nobreak');

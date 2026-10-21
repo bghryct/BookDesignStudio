@@ -54,7 +54,7 @@ export function applyConditions(text: string, hidden: string[] | undefined): str
 /** An inline graphic: `{img:assetId; w:120; h:80; shift:2}` (w may be a % of the column). */
 export interface InlineObj { id: string; w?: number; h?: number; pct?: number; shift?: number }
 
-export interface SpanStyle { italic: boolean; bold: boolean; sc: boolean; cs: CharacterStyleProps | null; fn?: boolean; obj?: InlineObj; ruby?: string }
+export interface SpanStyle { italic: boolean; bold: boolean; sc: boolean; cs: CharacterStyleProps | null; fn?: boolean; obj?: InlineObj; ruby?: string; wari?: [string, string] }
 /** `kern[i]`: manual kerning after UTF-16 unit `i`, thousandths of an em. */
 export interface Piece { text: string; st: SpanStyle; kern?: number[] }
 /** What separates a word from the one before it. */
@@ -89,6 +89,8 @@ export interface Paragraph {
   hasTabs: boolean;
   /** A paragraph holding nothing but one graphic: an anchored figure in the text flow. */
   figure?: InlineObj | null;
+  /** Names of the paragraph styles tagged on it (running heads by style). */
+  styleNames?: string[];
 }
 
 export const PLAIN: SpanStyle = { italic: false, bold: false, sc: false, cs: null };
@@ -196,8 +198,24 @@ function applyRuleStyles(body: string, eff: TextStyle, cmap: Map<string, Charact
 
 const LIST_RE = /^((?: {2}|\t)*)(?:([-•▪◦])|(\d{1,3}[.)]|[a-zA-Z]\)))[ \t]+(?=\S)/;
 
+/** Notes ({note:…}, nestable braces) are kept in the story but never set. */
+export function stripNotes(text: string): string {
+  if (!text.includes('{note:')) return text;
+  let out = '';
+  for (let i = 0; i < text.length; i++) {
+    if (text.startsWith('{note:', i)) {
+      let depth = 0, j = i;
+      for (; j < text.length; j++) { if (text[j] === '{') depth++; else if (text[j] === '}' && --depth === 0) break; }
+      i = j;
+      continue;
+    }
+    out += text[i];
+  }
+  return out;
+}
+
 export function parseStory(text: string, style: TextStyle, styles: StoryStyles | null): Paragraph[] {
-  text = applyConditions(text, styles?.hiddenConditions);
+  text = applyConditions(stripNotes(text), styles?.hiddenConditions);
   const pmap = new Map((styles?.para ?? []).map((d) => [nameKey(d.name), d.props]));
   const cmap = new Map((styles?.char ?? []).map((d) => [nameKey(d.name), d.props]));
   const paras: Paragraph[] = [];
@@ -213,12 +231,13 @@ export function parseStory(text: string, style: TextStyle, styles: StoryStyles |
 
     // Paragraph styles: named [Caption] and local [{align:center}], in any combination.
     let pstyle: ParagraphStyleProps | null = null;
+    const styleNames: string[] = [];
     for (;;) {
       const m = /^\[([^\]\n]{1,400})\]\s*/.exec(line);
       if (!m) break;
       const inner = m[1].trim();
       if (inner.startsWith('{') && inner.endsWith('}')) pstyle = mergePara(pstyle, parseParaProps(inner.slice(1, -1)));
-      else if (pmap.has(nameKey(inner))) pstyle = mergePara(pstyle, pmap.get(nameKey(inner))!);
+      else if (pmap.has(nameKey(inner))) { pstyle = mergePara(pstyle, pmap.get(nameKey(inner))!); styleNames.push(inner); }
       else break;
       line = line.slice(m[0].length);
     }
@@ -265,7 +284,7 @@ export function parseStory(text: string, style: TextStyle, styles: StoryStyles |
     body = applyRuleStyles(body, eff, cmap);
     const { words, footnotes, hasTabs } = parseInline(body, eff, cmap, fn);
     const only = words.length === 1 && words[0].pieces.length === 1 ? words[0].pieces[0].st.obj : undefined;
-    paras.push({ kind, words, first: afterBreak, style: eff, pstyle, list, marker, level, breakBefore: pendingBreak, footnotes, hasTabs, figure: only ?? null });
+    paras.push({ kind, words, first: afterBreak, style: eff, pstyle, list, marker, level, breakBefore: pendingBreak, footnotes, hasTabs, figure: only ?? null, styleNames: styleNames.length ? styleNames : undefined });
     pendingBreak = null;
     afterBreak = kind !== 'body';
   }
@@ -363,7 +382,7 @@ function parseInline(s: string, style: TextStyle, cmap: Map<string, CharacterSty
         i += m[0].length - 1;
         continue;
       }
-      if (s.startsWith('{fn:', i) || s.startsWith('{en:', i) || s.startsWith('{ix:', i) || s.startsWith('{img:', i) || s.startsWith('{anchor:', i) || s.startsWith('{ruby:', i)) {
+      if (s.startsWith('{fn:', i) || s.startsWith('{en:', i) || s.startsWith('{ix:', i) || s.startsWith('{img:', i) || s.startsWith('{anchor:', i) || s.startsWith('{ruby:', i) || s.startsWith('{wari:', i)) {
         let depth = 0, j = i;
         for (; j < s.length; j++) { if (s[j] === '{') depth++; else if (s[j] === '}' && --depth === 0) break; }
         const kind = s.slice(i + 1, s.indexOf(':', i));
@@ -374,6 +393,19 @@ function parseInline(s: string, style: TextStyle, cmap: Map<string, CharacterSty
           if (buf || cur.length) anchors.push(content);
           else if (words.length) (words[words.length - 1].anchors ??= []).push(content);
           else anchors.push(content);
+          continue;
+        }
+        if (kind === 'wari') {
+          // Warichu: {wari:top|bottom}, or split evenly at a space.
+          let [a, b] = content.split('|');
+          if (b == null) {
+            const mid = content.length / 2;
+            let cut = -1;
+            for (let k = 0; k < content.length; k++) if (content[k] === ' ' && (cut < 0 || Math.abs(k - mid) < Math.abs(cut - mid))) cut = k;
+            const at = cut > 0 ? cut : Math.ceil(mid);
+            a = content.slice(0, at).trim(); b = content.slice(at).trim();
+          }
+          if (a || b) { flush(); cur.push({ text: '\u2060', st: { ...st, wari: [a ?? '', b ?? ''] } }); }
           continue;
         }
         if (kind === 'ruby') {

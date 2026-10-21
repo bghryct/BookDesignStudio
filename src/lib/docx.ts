@@ -10,9 +10,9 @@
  * The .docx container is a zip; it is read with the browser's DecompressionStream.
  */
 
-interface ZipEntry { name: string; method: number; size: number; offset: number }
+export interface ZipEntry { name: string; method: number; size: number; offset: number }
 
-function zipEntries(buf: Uint8Array): ZipEntry[] {
+export function zipEntries(buf: Uint8Array): ZipEntry[] {
   const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
   // End of central directory: scan back from the end for its signature.
   let eocd = -1;
@@ -36,7 +36,7 @@ function zipEntries(buf: Uint8Array): ZipEntry[] {
   return out;
 }
 
-async function readEntry(buf: Uint8Array, e: ZipEntry): Promise<string> {
+export async function readEntry(buf: Uint8Array, e: ZipEntry): Promise<string> {
   const data = buf.subarray(e.offset, e.offset + e.size);
   if (e.method === 0) return new TextDecoder().decode(data);
   if (e.method !== 8) throw new Error(`unsupported compression in ${e.name}`);
