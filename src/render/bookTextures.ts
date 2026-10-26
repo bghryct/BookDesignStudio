@@ -506,22 +506,33 @@ export class TextureRefiner {
       const ppp = Math.min(pageCap, quantize(q.want));
       if (ppp > this.base.page * 1.3) jobs.push({ kind: 'page', index: q.index, region: 'front', ppp, need: q.want / Math.max(1e-6, this.base.page) });
     }
+    const panels: { kind: 'cover' | 'jacket'; region: WrapRegion; w: number; h: number; base: number; edge: number; want: number }[] = [];
     const panel = (kind: 'cover' | 'jacket', region: WrapRegion, need: number, w: number, h: number, base: number) => {
       if (need <= 0) return;
-      let want = Math.min(Math.min(caps.panel, maxTex) / Math.max(w, h), need * OVERSAMPLE);
-      // The live view keeps a panel's maps smaller: uploading hundreds of MB stalls the GPU for
-      // frames, and a close-up shows only part of the panel anyway. Exports take the full budget.
-      const budget = live ? caps.panelLive : caps.panel2;
-      if (w * h * want * want > budget) want = Math.sqrt(budget / (w * h));
-      // Rounding up to the next step must not overshoot the budget (it could double it).
-      const ppp = Math.min(Math.min(caps.panel, maxTex) / Math.max(w, h), quantize(want), Math.sqrt(budget / (w * h)));
-      if (ppp > base * 1.3) jobs.push({ kind, index: 0, region, ppp, need: want / Math.max(1e-6, base) });
+      const edge = Math.min(caps.panel, maxTex) / Math.max(w, h);
+      panels.push({ kind, region, w, h, base, edge, want: Math.min(edge, need * OVERSAMPLE) });
     };
     for (const region of WRAP_REGIONS) {
       const c = regionExtent(calc.panels, region);
       if (c) panel('cover', region, d.cover[region] ?? 0, c.w, calc.coverH, this.base.cover);
       const j = this.jacket ? regionExtent(this.jacket.panels, region) : null;
       if (j && this.jacket) panel('jacket', region, d.jacket[region] ?? 0, j.w, this.jacket.height, this.base.jacket);
+    }
+    // The live view keeps a wrap's maps smaller: uploading hundreds of MB stalls the GPU for
+    // frames, and a close-up shows only part of it anyway. Exports take the full budget. The
+    // regions of one wrap share its budget (as the whole wrap had it), each by what it asks for.
+    const budget = live ? caps.panelLive : caps.panel2;
+    for (const kind of ['cover', 'jacket'] as const) {
+      const mine = panels.filter((q) => q.kind === kind);
+      const area = mine.reduce((sum, q) => sum + q.w * q.h * q.want * q.want, 0);
+      if (!(area > 0)) continue;
+      const k = Math.min(1, Math.sqrt(budget / area));
+      for (const q of mine) {
+        const want = q.want * k, share = (budget * q.w * q.h * q.want * q.want) / area;
+        // Rounding up to the next step must not overshoot the share (it could double it).
+        const ppp = Math.min(q.edge, quantize(want), Math.sqrt(share / (q.w * q.h)));
+        if (ppp > q.base * 1.3) jobs.push({ kind, index: 0, region: q.region, ppp, need: want / Math.max(1e-6, q.base) });
+      }
     }
     return jobs.sort((a, b) => b.need - a.need);
   }

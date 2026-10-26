@@ -30,23 +30,34 @@ export default function App() {
   useEffect(() => {
     let cancelled = false;
     (async () => {
+      // Safe mode with nowhere to keep the book: autosave stays off, so it is not overwritten.
+      let autosave = true;
       if (SAFE_MODE) {
-        // Opening this book stopped the app last time: hand it over as a file rather than open it again.
+        // Opening this book stopped the app last time: keep it aside (File › Open the book safe mode
+        // kept) and hand it over as a file rather than open it again.
         const raw = await rawAutosave();
         if (cancelled) return;
-        // Once per tab (an address ending in ?safe would otherwise download it on every reload).
-        let handed = false;
-        try { handed = sessionStorage.getItem('bds.safeHanded') === '1'; sessionStorage.setItem('bds.safeHanded', '1'); } catch { /* storage blocked */ }
-        if (raw && !handed) {
-          await keepRecoveredAutosave(raw);
-          try {
-            const file = { format: 'book-design-studio', version: 1, savedAt: new Date().toISOString(), project: raw, fonts: [] };
-            downloadBlob(new Blob([JSON.stringify(file)], { type: 'application/json' }), 'autosaved-book.bds.json');
-            useStore.getState().notify('Safe mode: your last book stopped the app while opening, so it was not opened again. It was downloaded as autosaved-book.bds.json; open it with File › Open to try again.', 'error');
-          } catch {
-            // Too large to write as one file: it stays in this browser's storage.
-            useStore.getState().notify('Safe mode: your last book stopped the app while opening, so it was not opened again. It is too large to download as one file, and is kept in this browser.', 'error');
+        if (raw) {
+          const kept = await keepRecoveredAutosave(raw);
+          let json: string | null = null;
+          try { json = JSON.stringify({ format: 'book-design-studio', version: 1, savedAt: new Date().toISOString(), project: raw, fonts: [] }); } catch { /* too large for one string */ }
+          // Downloaded once per book and tab (an address ending in ?safe would otherwise download it
+          // on every reload); a different book that stops the app is downloaded too.
+          const sig = `${(raw as { id?: unknown }).id ?? ''}:${json?.length ?? 0}`;
+          let handed = false;
+          try { handed = sessionStorage.getItem('bds.safeHanded') === sig; sessionStorage.setItem('bds.safeHanded', sig); } catch { /* storage blocked */ }
+          let downloaded = handed;
+          if (json && !handed) {
+            try { downloadBlob(new Blob([json], { type: 'application/json' }), 'autosaved-book.bds.json'); downloaded = true; } catch { /* too large to write as one file */ }
           }
+          autosave = kept || downloaded;
+          const where = [
+            downloaded ? (handed ? 'It was downloaded as autosaved-book.bds.json' : 'It has been downloaded as autosaved-book.bds.json') : '',
+            kept ? 'it is kept in this browser (File › Open the book safe mode kept)' : '',
+          ].filter(Boolean).join(', and ');
+          useStore.getState().notify(autosave
+            ? `Safe mode: your last book stopped the app while opening, so it was not opened again. ${where.charAt(0).toUpperCase()}${where.slice(1)}.`
+            : 'Safe mode: your last book stopped the app while opening, so it was not opened again. It could not be downloaded or copied, so it stays in this browser’s autosave and autosave is off for now: save a project file to keep new work.', 'error');
         }
       } else {
         markOpening(true);
@@ -58,7 +69,7 @@ export default function App() {
         }
       }
       useStore.setState({ ready: true });
-      startAutosave();
+      if (autosave) startAutosave();
       // Opening finished once the book has been drawn: a timer runs after React's render, and only
       // if that render didn't freeze the page. (Not an animation frame: those never come in a
       // background tab, and a book opened there would look like one that never finished.)

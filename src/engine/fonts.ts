@@ -272,6 +272,13 @@ export async function fontsSettled(timeoutMs = 15000): Promise<void> {
   await Promise.race([all, deadline]);
 }
 
+/** Families with a face still downloading: after an export waited its 15 s, set with stand-ins. */
+export function fontsStillLoading(): string[] {
+  const out = new Set<string>();
+  for (const st of faces.values()) if (st.status === 'loading') out.add(families.get(st.family)?.name ?? st.family);
+  return [...out];
+}
+
 /* -------------------------------------------------------------------------- */
 /* Uploads (OTF / TTF / WOFF / WOFF2, static or variable)                      */
 /* -------------------------------------------------------------------------- */
@@ -328,7 +335,13 @@ export async function toSfnt(bytes: Uint8Array): Promise<Uint8Array> {
   return bytes;
 }
 
-export interface UploadResult { familyId: string; family: string; faceKey: string; weight: number; italic: boolean; variable: boolean }
+export interface UploadResult {
+  familyId: string; family: string; faceKey: string; weight: number; italic: boolean; variable: boolean;
+  /** The very same font was already loaded: nothing new was registered or stored. */
+  existing?: boolean;
+  /** A different file of the same face (a revised version) took over from this face. */
+  replaced?: string;
+}
 
 const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
 
@@ -347,9 +360,21 @@ export async function registerUploadedFont(raw: Uint8Array, fileName: string, id
   const os2 = (fk as unknown as { 'OS/2'?: { usWeightClass?: number } })['OS/2'];
   const weight = variable && axes.wght ? axes.wght.default : os2?.usWeightClass ?? 400;
   const familyId = `up-${slug(familyName)}`;
+  let def = families.get(familyId);
+  // An upload (not a restore) of a font already loaded is that face again; a different file of the
+  // same face (a revised version) replaces it, so the book is set in the newer one.
+  let replaced: string | undefined;
+  if (!id && def) {
+    const sameSlot = (f: FaceDef) => f.italic === italic && JSON.stringify(f.weight) === JSON.stringify(variable && axes.wght ? [axes.wght.min, axes.wght.max] : weight);
+    for (const f of def.faces) {
+      const st = faces.get(f.key);
+      if (st?.bytes && sameBytes(st.bytes, bytes)) return { familyId, family: familyName, faceKey: f.key, weight, italic, variable, existing: true };
+    }
+    const old = def.faces.find(sameSlot);
+    if (old) { replaced = old.key; def.faces = def.faces.filter((f) => f !== old); }
+  }
   const faceKey = id ?? `${familyId}-${slug(sub)}-${Math.random().toString(36).slice(2, 7)}`;
 
-  let def = families.get(familyId);
   if (!def) {
     def = {
       id: familyId, name: familyName, css: `BDS Up ${familyName}`, fallback: SERIF_FALLBACK,
@@ -371,7 +396,13 @@ export async function registerUploadedFont(raw: Uint8Array, fileName: string, id
   clearShapes();
   useFontStore.getState().bump();
   await idbSet('fonts', faceKey, { bytes, fileName }).catch(() => undefined);
-  return { familyId, family: familyName, faceKey, weight, italic, variable };
+  return { familyId, family: familyName, faceKey, weight, italic, variable, replaced };
+}
+
+function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
 }
 
 /** Restore uploaded faces from IndexedDB (or from bytes embedded in a project file). */
@@ -508,7 +539,7 @@ export interface Shaped {
  */
 let shapeCache = new Map<string, Shaped>();
 let shapeOld = new Map<string, Shaped>();
-function clearShapes() { shapeCache.clear(); shapeOld.clear(); }
+function clearShapes() { shapeCache.clear(); shapeOld.clear(); contextFree.clear(); }
 const featKey = (f: Record<string, boolean>) => Object.keys(f).sort().map((k) => (f[k] ? k : `-${k}`)).join(',');
 
 export function shape(text: string, ref: FontRef): Shaped | null {
@@ -519,6 +550,21 @@ export function shape(text: string, ref: FontRef): Shaped | null {
   if (hit) return hit;
   const old = shapeOld.get(key);
   if (old) { remember(key, old); return old; }
+  // Figures (tables, folios): composed from the shaped characters when the face is shown to set
+  // them alike one by one and together (no kerning or substitution between them).
+  if (text.length > 1 && text.length <= 40 && FIGURES.test(text) && (figuresContextFree(ref, fk, FIGURE_CHARS) || (DIGITS.test(text) && figuresContextFree(ref, fk, DIGIT_CHARS)))) {
+    let complete = true;
+    const glyphs: Shaped['glyphs'] = [];
+    for (const ch of text) {
+      const one = shape(ch, ref);
+      if (!one) { complete = false; break; }
+      if (!one.complete) complete = false;
+      glyphs.push(...one.glyphs);
+    }
+    const shaped: Shaped = { advance: glyphs.reduce((sum, g) => sum + g.xAdvance, 0), glyphs, complete };
+    remember(key, shaped);
+    return shaped;
+  }
   const upm = fk.unitsPerEm;
   let complete = true;
   for (const ch of text) {
@@ -538,6 +584,46 @@ export function shape(text: string, ref: FontRef): Shaped | null {
   const shaped: Shaped = { advance: glyphs.reduce((s, g) => s + g.xAdvance, 0), glyphs, complete };
   remember(key, shaped);
   return shaped;
+}
+
+/** Characters of figures: digits and the punctuation of numbers, money and percentages. */
+const FIGURE_CHARS = '0123456789.,-+%$€£()';
+const FIGURES = /^[0-9.,\-+%$€£()]+$/;
+/** The plain digits and separators alone, for faces whose signs and brackets are contextual. */
+const DIGIT_CHARS = '0123456789.,';
+const DIGITS = /^[0-9.,]+$/;
+const contextFree = new Map<string, boolean>();
+/**
+ * Whether this face and its features set a run of figures exactly as its characters one by one:
+ * every ordered pair of the figure characters is shaped together once and compared glyph by glyph.
+ * Kerned or contextual figures (common in text faces' proportional figures) fail, and keep the
+ * full shaper.
+ */
+function figuresContextFree(ref: FontRef, fk: FontkitFont, set: string): boolean {
+  const key = `${ref.face}|${axesKey(ref.axes)}|${featKey(ref.features)}|${set}`;
+  let ok = contextFree.get(key);
+  if (ok == null) {
+    ok = true;
+    const chars = [...set];
+    let test = '';
+    for (const a of chars) for (const b of chars) test += a + b;
+    const upm = fk.unitsPerEm;
+    const run = fk.layout(test, { ...ref.features } as TypeFeatures);
+    const single = new Map(chars.map((c) => {
+      const r = fk.layout(c, { ...ref.features } as TypeFeatures);
+      return [c, r.glyphs.length === 1 ? { id: r.glyphs[0].id, adv: r.positions[0].xAdvance, x: r.positions[0].xOffset, y: r.positions[0].yOffset } : null];
+    }));
+    if (run.glyphs.length !== test.length) ok = false;
+    else {
+      for (let i = 0; i < test.length && ok; i++) {
+        const want = single.get(test[i]);
+        const p = run.positions[i];
+        if (!want || run.glyphs[i].id !== want.id || Math.abs(p.xAdvance - want.adv) > 1e-6 * upm || p.xOffset !== want.x || p.yOffset !== want.y) ok = false;
+      }
+    }
+    contextFree.set(key, ok);
+  }
+  return ok;
 }
 
 function remember(key: string, shaped: Shaped) {

@@ -137,14 +137,17 @@ export async function importFiles(files: File[], opts: ImportOptions = {}): Prom
         // WOFF2 is unpacked here (the font engine's own decoder never starts in a browser).
         if (sig === 'wOF2') bytes = await (await import('../lib/woff2')).woff2ToSfnt(bytes);
         const r = await registerUploadedFont(bytes, file.name).catch((e: Error) => { throw new Error(`not a font this app can read (${e.message})`); });
-        // The same file uploaded again (to be sure it worked) must not store a second copy in the book.
-        if (useStore.getState().project.fonts.some((f) => f.fileName === file.name && f.family === r.family && f.weight === r.weight && f.italic === r.italic)) {
+        // The same font uploaded again (to be sure it worked) is the face already loaded: no second
+        // copy. A revised file of the same face takes its place in the book.
+        const fonts = useStore.getState().project.fonts;
+        if (r.existing && fonts.some((f) => f.id === r.faceKey)) {
           messages.push(`Font “${r.family}” is already in this book.`);
           continue;
         }
         const meta: UploadedFontMeta = { id: r.faceKey, family: r.family, fileName: file.name, weight: r.weight, italic: r.italic };
-        s.update((d) => { d.fonts.push(meta); });
-        messages.push(`Font “${r.family}”${r.variable ? ' (variable)' : ''} added.`);
+        const old = r.replaced ? fonts.findIndex((f) => f.id === r.replaced) : -1;
+        s.update((d) => { if (old >= 0) d.fonts[old] = meta; else d.fonts.push(meta); });
+        messages.push(old >= 0 ? `Font “${r.family}” updated from ${file.name}.` : `Font “${r.family}”${r.variable ? ' (variable)' : ''} added.`);
         continue;
       }
       if (/\.bds(\.json)?$|\.json$/i.test(file.name)) {

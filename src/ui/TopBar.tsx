@@ -1,9 +1,9 @@
 import React, { useEffect, useRef, useState } from 'react';
 import clsx from 'clsx';
 import { Undo2, Redo2, Download, PanelLeft, PanelRight, FolderOpen, Save, FilePlus, BookOpen, Box, LayoutGrid, Book, BookBookmark, ChevronDown, RotateCcw, Upload } from 'lucide-react';
-import { useStore, type View } from '../store/store';
+import { useStore, recoveredAutosave, type View } from '../store/store';
 import { createDefaultProject } from '../model/defaults';
-import { saveProjectFile, loadProjectFile, blankProject } from './projectIO';
+import { saveProjectFile, loadProjectFile, blankProject, openRecoveredBook } from './projectIO';
 import { importFiles } from './importFiles';
 
 const VIEWS: { id: View; label: string; icon: React.ReactNode; title: string }[] = [
@@ -83,11 +83,15 @@ function FileMenu() {
   const ref = useRef<HTMLDivElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const importRef = useRef<HTMLInputElement>(null);
+  // Whether safe mode kept a book aside, looked up each time the menu opens.
+  const [recovered, setRecovered] = useState(false);
   useEffect(() => {
     if (!open) return;
+    let live = true;
+    void recoveredAutosave().then((r) => { if (live) setRecovered(!!r); });
     const close = (e: PointerEvent) => { if (!ref.current?.contains(e.target as Node)) setOpen(false); };
     window.addEventListener('pointerdown', close);
-    return () => window.removeEventListener('pointerdown', close);
+    return () => { live = false; window.removeEventListener('pointerdown', close); };
   }, [open]);
   const s = useStore.getState;
   const item = 'flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[12px] text-ink-200 hover:bg-ink-700';
@@ -108,6 +112,13 @@ function FileMenu() {
           }}><RotateCcw size={14} /> Load sample book</button>
           <div className="my-1 border-t border-ink-700" />
           <button type="button" className={item} onClick={() => { fileRef.current?.click(); }}><FolderOpen size={14} /> Open project… <span className="ml-auto text-[10px] text-ink-500">.bds.json</span></button>
+          {recovered && (
+            <button type="button" className={item} title="The book that stopped the app while opening, kept aside by safe mode" onClick={async () => {
+              setOpen(false);
+              if (!confirm('Open the book safe mode kept? It stopped the app once while opening; if it does again, the next start is in safe mode. The current project can be brought back with Undo.')) return;
+              try { if (await openRecoveredBook()) s().notify('Opened the book safe mode kept.'); else s().notify('There is no book kept by safe mode.', 'error'); } catch (err) { s().notify(`Could not open the kept book: ${(err as Error).message}`, 'error'); }
+            }}><RotateCcw size={14} /> Open the book safe mode kept</button>
+          )}
           <button type="button" className={item} onClick={() => { saveProjectFile(s().project); setOpen(false); }}><Save size={14} /> Save project file</button>
           <button type="button" className={item} onClick={() => { importRef.current?.click(); }}><Upload size={14} /> Import images, SVG, fonts…</button>
           <input ref={fileRef} type="file" accept=".json,.bds.json,application/json" className="hidden" onChange={async (e) => {

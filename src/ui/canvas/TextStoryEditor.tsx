@@ -26,12 +26,16 @@ function smartType(value: string, caret: number, before: string, autocorrect: { 
     }
   }
   const lineStart = value.lastIndexOf('\n', caret - 1) + 1;
-  const line = value.slice(lineStart, caret);
+  // Tracked changes ({++typed++}, {--deleted--}) are not markup to stay out of: with track changes
+  // on, everything typed is inside a {++…++}, and quotes never curled.
+  const line = value.slice(lineStart, caret).replace(/\{--[\s\S]*?--\}|\{\+\+|\+\+\}/g, '');
   const open = (o: string, c: string) => line.lastIndexOf(o) > line.lastIndexOf(c);
-  if (open('{', '}') || open('[', ']') || open('<', '>')) return { value, caret };
+  // A tag is open after a < that is not a less-than sign (“gutters < 5 mm”).
+  if (open('{', '}') || open('[', ']') || /<(?!\s)[^<>]*$/.test(line)) return { value, caret };
   const ch = value[caret - 1], prev = value[caret - 2] ?? '';
   const put = (rep: string, back: number) => ({ value: value.slice(0, caret - back) + rep + value.slice(caret), caret: caret - back + rep.length });
-  const opening = !prev || /[\s([{—–\-“‘\/]/.test(prev);
+  const before1 = line[line.length - 2] ?? '';
+  const opening = !before1 || /[\s([{—–\-“‘\/]/.test(before1);
   if (ch === '"') return put(opening ? '“' : '”', 1);
   if (ch === "'") return put(opening ? '‘' : '’', 1);
   if (ch === '-' && prev === '-') return put('—', 2);
@@ -91,11 +95,12 @@ function highlightLine(line: string): string {
 /**
  * One line of the colour layer. Each line is its own element, so a keystroke in a book-length
  * story updates one line instead of re-parsing the whole layer (which took ~80 ms at 600k
- * characters). The text and newlines are exactly the story's, so the layer still lines up with
- * the text box.
+ * characters), and its own block, so the browser lays out only that line again (one inline run
+ * for the whole story took ~140 ms per keystroke at 300k). The text and newlines are exactly the
+ * story's, so the layer still lines up with the text box.
  */
 const HlLine = React.memo(function HlLine({ html }: { html: string }) {
-  return <><span dangerouslySetInnerHTML={{ __html: html }} />{'\n'}</>;
+  return <div dangerouslySetInnerHTML={{ __html: `${html}\n` }} />;
 });
 
 /* -------------------------------------------------------------------------- */
@@ -172,7 +177,7 @@ function countStory(text: string): { words: number; chars: number; paras: number
 
 /**
  * A DOM range over story characters [at, at + len) in the colour layer, whose text is the story's
- * exactly, one span per line: used to mark a find match and to scroll a range into view.
+ * exactly, one element per line: used to mark a find match and to scroll a range into view.
  */
 function rangeAt(pre: HTMLElement | null, text: string, at: number, len: number): Range | null {
   if (!pre) return null;
@@ -204,8 +209,9 @@ function rangeAt(pre: HTMLElement | null, text: string, at: number, len: number)
 /** Matches of a plain search in the story (case ignored), at most a few thousand. */
 function findAll(text: string, q: string): number[] {
   if (!q) return [];
-  const hay = text.toLowerCase(), needle = q.toLowerCase(), out: number[] = [];
-  for (let i = hay.indexOf(needle); i >= 0 && out.length < 5000; i = hay.indexOf(needle, i + needle.length)) out.push(i);
+  // Case-blind on the story itself: lower-casing it first moved every match after an İ by one.
+  const re = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'giu'), out: number[] = [];
+  for (let m = re.exec(text); m && out.length < 5000; m = re.exec(text)) out.push(m.index);
   return out;
 }
 
@@ -226,17 +232,45 @@ export function TextStoryEditor({ elementId, anchor, viewport }: { elementId: st
   const checkpointed = useRef(false);
   const idleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => () => { if (idleTimer.current) clearTimeout(idleTimer.current); }, []);
-  // When smart typing or track changes rewrite what was typed, React's new value puts the caret at
-  // the end: put it back as soon as the value is committed, before the next keystroke arrives
-  // (a frame later was too late for fast typing, and the next letters landed at the end).
-  const pendingCaret = useRef<number | null>(null);
+  // When smart typing, track changes, an insert, a style or undo rewrite the text, React's new
+  // value puts the caret at the end (and scrolls there): put it back as soon as the value is
+  // committed, before the next keystroke arrives (a frame later was too late for fast typing in a
+  // long story, and the next letters landed at the end).
+  const pendingSel = useRef<[number, number] | null>(null);
   useLayoutEffect(() => {
-    const p = pendingCaret.current;
+    const p = pendingSel.current;
     if (p == null || !ref.current) return;
-    pendingCaret.current = null;
-    ref.current.setSelectionRange(p, p);
+    pendingSel.current = null;
+    ref.current.setSelectionRange(p[0], p[1]);
   });
-  const lines = useMemo(() => (head ? head.text.split('\n').map(highlightLine) : []), [head?.text]); // eslint-disable-line react-hooks/exhaustive-deps
+  /** Select [a, b] once the text is committed; a toolbar button gives the focus back to the text. */
+  const selectAfter = (a: number, b = a) => {
+    pendingSel.current = [a, b];
+    const top = ref.current?.scrollTop;
+    requestAnimationFrame(() => {
+      const ta = ref.current;
+      if (!ta) return;
+      const pending = pendingSel.current?.[0] === a && pendingSel.current[1] === b;
+      if (pending) pendingSel.current = null;
+      // Typing: select if the text did not change (nothing committed); else leave later keys alone.
+      if (document.activeElement === ta) { if (pending) ta.setSelectionRange(a, b); return; }
+      // A toolbar button has the focus, and a text box without it loses its selection to new text:
+      // select, keep the scroll, then focus (focusing first scrolls to the old selection).
+      ta.setSelectionRange(a, b);
+      if (top != null) ta.scrollTop = top;
+      ta.focus();
+    });
+  };
+  // Keyed by their text (and which repeat of it), not their place: a return near the top of a
+  // book-length story adds one line to the layer instead of re-rendering every line after it.
+  const lines = useMemo(() => {
+    const seen = new Map<string, number>();
+    return (head ? head.text.split('\n') : []).map((t) => {
+      const n = seen.get(t) ?? 0;
+      seen.set(t, n + 1);
+      return { key: `${n}:${t}`, html: highlightLine(t) };
+    });
+  }, [head?.text]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Where the editor sits (moved, resized, maximised) and its text size, remembered in this browser.
   const [place, setPlace] = useState<Placement>(readPlacement);
@@ -251,12 +285,16 @@ export function TextStoryEditor({ elementId, anchor, viewport }: { elementId: st
     if (Math.abs(c - chrome) > 1) setChrome(c);
   });
 
-  // Find in this story (⌘F): the matches and the one shown.
+  // Find in this story (⌘F): the matches and the one shown, and what was looked for last (⌘F
+  // after Esc shows it again, selected).
   const [find, setFind] = useState<string | null>(null);
   const [hit, setHit] = useState(-1);
   const findRef = useRef<HTMLInputElement>(null);
+  const lastFind = useRef('');
   const matches = useMemo(() => (find && head ? findAll(head.text, find) : []), [find, head?.text]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { if (find != null) findRef.current?.focus(); }, [find != null]); // eslint-disable-line react-hooks/exhaustive-deps
+  // The text changed under an open find bar, or this is another story: the numbered match is gone.
+  useEffect(() => setHit(-1), [head?.text, headId]);
   // The match shown is marked in the coloured layer, so the find field can keep the focus.
   useLayoutEffect(() => {
     const reg = (globalThis as { CSS?: { highlights?: Map<string, unknown> } }).CSS?.highlights;
@@ -321,11 +359,16 @@ export function TextStoryEditor({ elementId, anchor, viewport }: { elementId: st
   const fontSize = clamp(place.size ?? 14, 11, 24);
   const maxBody = Math.max(80, viewport.h - 16 - chrome);
   const width = place.max ? viewport.w - 16 : clamp(place.w ?? Math.min(480, Math.max(340, anchor.w)), Math.min(280, viewport.w - 16), viewport.w - 16);
-  const bodyH = place.max ? maxBody : clamp(place.h ?? 256, 80, maxBody);
+  let bodyH = place.max ? maxBody : clamp(place.h ?? 256, 80, maxBody);
   let left: number, top: number;
   if (place.max) { left = 8; top = 8; }
-  else if (place.x != null && place.y != null) { left = clamp(place.x, 8, viewport.w - width - 8); top = clamp(place.y, 8, viewport.h - 40); }
-  else {
+  else if (place.x != null && place.y != null) {
+    left = clamp(place.x, 8, viewport.w - width - 8);
+    top = clamp(place.y, 8, viewport.h - 40);
+    // Shorter rather than past the bottom of the canvas (a smaller window), so the resize corner
+    // stays in reach; parked lower than that, only the header shows.
+    bodyH = clamp(bodyH, 80, viewport.h - 8 - top - chrome);
+  } else {
     left = anchor.x + anchor.w + 12;
     if (left + width > viewport.w - 8) left = Math.max(8, anchor.x - width - 12);
     if (left < 8) left = Math.max(8, Math.min(viewport.w - width - 8, anchor.x));
@@ -380,17 +423,20 @@ export function TextStoryEditor({ elementId, anchor, viewport }: { elementId: st
   const closeFind = () => {
     const at = find && hit >= 0 ? matches[hit] : undefined;
     const len = find?.length ?? 0;
+    lastFind.current = find ?? '';
     setFind(null);
     setHit(-1);
     const ta = ref.current;
     if (!ta) return;
-    ta.focus();
+    // Select before focusing: focus scrolls to the selection the text box had (the top of the
+    // story, often), and selecting afterwards does not scroll back to the match.
     if (at != null) { ta.setSelectionRange(at, at + len); setCaret(at); }
+    ta.focus();
   };
   const openFind = () => {
     const ta = ref.current;
     const picked = ta && ta.selectionEnd > ta.selectionStart && ta.selectionEnd - ta.selectionStart < 80 ? ta.value.slice(ta.selectionStart, ta.selectionEnd) : null;
-    setFind(picked && !picked.includes('\n') ? picked : find ?? '');
+    setFind(picked && !picked.includes('\n') ? picked : find ?? lastFind.current);
     setHit(-1);
     requestAnimationFrame(() => findRef.current?.select());
   };
@@ -416,7 +462,7 @@ export function TextStoryEditor({ elementId, anchor, viewport }: { elementId: st
     const { selectionStart: a, selectionEnd: b, value } = ta;
     const next = value.slice(0, a) + before + value.slice(a, b) + after + value.slice(b);
     setText(next);
-    requestAnimationFrame(() => { ta.focus(); ta.setSelectionRange(a + before.length, b + before.length); });
+    selectAfter(a + before.length, b + before.length);
   };
   const linePrefix = (prefix: string) => {
     const ta = ref.current;
@@ -426,6 +472,7 @@ export function TextStoryEditor({ elementId, anchor, viewport }: { elementId: st
     const line = value.slice(start);
     const stripped = line.replace(/^(#{1,2}\s)/, '');
     setText(value.slice(0, start) + prefix + stripped);
+    selectAfter(Math.max(start + prefix.length, a + prefix.length - (line.length - stripped.length)));
   };
   const insert = (str: string) => {
     const ta = ref.current;
@@ -434,7 +481,7 @@ export function TextStoryEditor({ elementId, anchor, viewport }: { elementId: st
     setText(value.slice(0, a) + str + value.slice(b));
     // Leave the caret inside an empty footnote / anchor / pair of quotes.
     const back = str === '{ruby:|}' ? 2 : /^\{\w+:\}$/.test(str) ? 1 : str === '‘’' || str === '“”' ? 1 : 0;
-    requestAnimationFrame(() => { ta.focus(); ta.setSelectionRange(a + str.length - back, a + str.length - back); });
+    selectAfter(a + str.length - back);
   };
 
   insertRef.current = insert;
@@ -446,7 +493,7 @@ export function TextStoryEditor({ elementId, anchor, viewport }: { elementId: st
     const { selectionStart: a, selectionEnd: b, value } = ta;
     const name = conditions[0] ?? 'Condition';
     setText(value.slice(0, a) + `{if:${name}}` + value.slice(a, b) + '{/if}' + value.slice(b));
-    requestAnimationFrame(() => { ta.focus(); ta.setSelectionRange(a + 4, a + 4 + name.length); });
+    selectAfter(a + 4, a + 4 + name.length);
   };
 
   /** Rewrite the paragraph tags of every line the selection touches. */
@@ -457,14 +504,18 @@ export function TextStoryEditor({ elementId, anchor, viewport }: { elementId: st
     const start = value.lastIndexOf('\n', a - 1) + 1;
     const endNl = value.indexOf('\n', b);
     const end = endNl < 0 ? value.length : endNl;
-    const lines = value.slice(start, end).split('\n').map((ln) => {
+    const old = value.slice(start, end).split('\n');
+    const lines = old.map((ln) => {
       const tags: string[] = [];
       let rest = ln;
       for (;;) { const m = /^\[([^\]\n]{1,400})\]\s*/.exec(rest); if (!m) break; tags.push(m[1]); rest = rest.slice(m[0].length); }
       return rest.trim() ? fn(rest, tags) : ln;
     });
-    setText(value.slice(0, start) + lines.join('\n') + value.slice(end));
-    requestAnimationFrame(() => ta.focus());
+    const block = lines.join('\n');
+    setText(value.slice(0, start) + block + value.slice(end));
+    // The selection keeps to the same words (the tags in front of the first line changed length).
+    const shift = lines[0].length - old[0].length;
+    selectAfter(Math.max(start, a + shift), Math.max(start, b + block.length - (end - start)));
   };
   const names = new Set(paraStyles.map((p) => p.name.toLowerCase()));
   /** Paragraph style tag on every line the selection touches (null removes it); local formatting stays. */
@@ -491,7 +542,8 @@ export function TextStoryEditor({ elementId, anchor, viewport }: { elementId: st
     const to = after ? a + after[0].length : a;
     setText(value.slice(0, from) + tag + value.slice(to));
     const pos = from + tag.length;
-    requestAnimationFrame(() => { ta.focus(); ta.setSelectionRange(pos, pos); setCaret(pos); });
+    setCaret(pos);
+    selectAfter(pos);
   };
   const caretKern = (() => {
     const v = head.text;
@@ -536,7 +588,8 @@ export function TextStoryEditor({ elementId, anchor, viewport }: { elementId: st
           <button type="button" title="Loosen the pair at the cursor (⌥→)" className={tb} onClick={() => kern(10)}><span className="text-[10px] tracking-[0.15em]">AV</span></button>
         </span>
       </div>
-      <div className="flex items-center gap-1 border-b border-ink-700 px-1.5 py-1">
+      {/* Wraps on a narrow canvas, so find, maximise and close never fall off the right edge. */}
+      <div className="flex flex-wrap items-center gap-1 border-b border-ink-700 px-1.5 py-1">
         <select className={sel} value="" title="Paragraph style for the lines in the selection" onChange={(e) => { const v = e.target.value; if (v === '__none') paraTag(null); else if (v) paraTag(v); }}>
           <option value="">¶ Paragraph style…</option>
           <option value="__none">No paragraph style</option>
@@ -547,13 +600,14 @@ export function TextStoryEditor({ elementId, anchor, viewport }: { elementId: st
           {charStyles.map((c) => <option key={c.id} value={c.name}>{c.name}</option>)}
         </select>
         {!paraStyles.length && !charStyles.length && <span className="truncate text-[10px] text-ink-500">Add styles in the Type panel</span>}
-        <span className="flex-1" />
-        <button type="button" title="Find in this story (⌘F)" className={clsx(tb, find != null && tbOn)} onClick={() => (find != null ? closeFind() : openFind())}><Search size={13} /></button>
-        <button type="button" title="Smaller text" className={tb} disabled={fontSize <= 11} onClick={() => setPlace((p) => ({ ...p, size: Math.max(11, fontSize - 1) }))}><AArrowDown size={14} /></button>
-        <button type="button" title="Larger text" className={tb} disabled={fontSize >= 24} onClick={() => setPlace((p) => ({ ...p, size: Math.min(24, fontSize + 1) }))}><AArrowUp size={14} /></button>
-        <button type="button" title={place.help === false ? 'Show the markup cheat sheet' : 'Hide the markup cheat sheet'} className={clsx(tb, place.help !== false && tbOn)} onClick={() => setPlace((p) => ({ ...p, help: p.help === false }))}><CircleHelp size={13} /></button>
-        <button type="button" title={place.max ? 'Restore the editor' : 'Fill the canvas with the editor'} className={tb} onClick={() => setPlace((p) => ({ ...p, max: !p.max }))}>{place.max ? <Minimize2 size={13} /> : <Maximize2 size={13} />}</button>
-        <button type="button" title="Close (Esc)" className={tb} onClick={() => useStore.getState().setTextEditing(null)}><X size={13} /></button>
+        <span className="ml-auto flex items-center gap-1">
+          <button type="button" title="Find in this story (⌘F)" className={clsx(tb, find != null && tbOn)} onClick={() => (find != null ? closeFind() : openFind())}><Search size={13} /></button>
+          <button type="button" title="Smaller text" className={tb} disabled={fontSize <= 11} onClick={() => setPlace((p) => ({ ...p, size: Math.max(11, fontSize - 1) }))}><AArrowDown size={14} /></button>
+          <button type="button" title="Larger text" className={tb} disabled={fontSize >= 24} onClick={() => setPlace((p) => ({ ...p, size: Math.min(24, fontSize + 1) }))}><AArrowUp size={14} /></button>
+          <button type="button" title={place.help === false ? 'Show the markup cheat sheet' : 'Hide the markup cheat sheet'} className={clsx(tb, place.help !== false && tbOn)} onClick={() => setPlace((p) => ({ ...p, help: p.help === false }))}><CircleHelp size={13} /></button>
+          <button type="button" title={place.max ? 'Restore the editor' : 'Fill the canvas with the editor'} className={tb} onClick={() => setPlace((p) => ({ ...p, max: !p.max }))}>{place.max ? <Minimize2 size={13} /> : <Maximize2 size={13} />}</button>
+          <button type="button" title="Close (Esc)" className={tb} onClick={() => useStore.getState().setTextEditing(null)}><X size={13} /></button>
+        </span>
       </div>
       {find != null && (
         <div className="flex items-center gap-1 border-b border-ink-700 px-1.5 py-1">
@@ -569,6 +623,8 @@ export function TextStoryEditor({ elementId, anchor, viewport }: { elementId: st
               if (e.key === 'Enter') { e.preventDefault(); go(e.shiftKey ? -1 : 1); }
               else if (e.key === 'Escape') { e.preventDefault(); closeFind(); }
               else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'g') { e.preventDefault(); go(e.shiftKey ? -1 : 1); }
+              // ⌘F again selects what is looked for (not the browser's own find bar).
+              else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'f') { e.preventDefault(); findRef.current?.select(); }
             }}
           />
           <span className="w-14 shrink-0 text-right font-mono text-[9.5px] tabular-nums text-ink-400">{!find ? '' : matches.length ? `${hit >= 0 ? hit + 1 : '–'} of ${matches.length}${matches.length >= 5000 ? '+' : ''}` : 'none'}</span>
@@ -577,7 +633,7 @@ export function TextStoryEditor({ elementId, anchor, viewport }: { elementId: st
           <button type="button" title="Close and select the match (Esc)" className={tb} onClick={closeFind}><X size={12} /></button>
         </div>
       )}
-      <ChangesBar text={head.text} caret={caret} tracking={!!project.trackChanges} smart={!!project.smartTyping} onText={(t, c) => { setText(t); if (c != null) { setCaret(c); requestAnimationFrame(() => { ref.current?.focus(); ref.current?.setSelectionRange(c, c); }); } }} />
+      <ChangesBar text={head.text} caret={caret} tracking={!!project.trackChanges} smart={!!project.smartTyping} onText={(t, c) => { const at = c ?? Math.min(caret, t.length); setText(t); setCaret(at); selectAfter(at); }} />
       {pop === 'char' && <CharFormat onApply={(props) => { if (props) wrap(`<{${props}}>`, '</>'); setPop(null); }} />}
       {pop === 'para' && <ParaFormat onApply={(props) => { paraLocal(props); setPop(null); }} />}
       {pop === 'insert' && (
@@ -612,7 +668,7 @@ export function TextStoryEditor({ elementId, anchor, viewport }: { elementId: st
         </div>
       )}
       <div ref={bodyRef} className="relative shrink-0 overflow-hidden" style={{ height: bodyH }}>
-        <pre ref={hlRef} aria-hidden className="scroll-thin pointer-events-none absolute inset-0 m-0 overflow-hidden text-ink-100" style={font}>{lines.map((h, i) => <HlLine key={i} html={h} />)}</pre>
+        <pre ref={hlRef} aria-hidden lang={head.style.language} dir={head.style.direction} className="scroll-thin pointer-events-none absolute inset-0 m-0 overflow-hidden text-ink-100" style={font}>{lines.map((l) => <HlLine key={l.key} html={l.html} />)}</pre>
         <textarea
           ref={ref}
           value={head.text}
@@ -627,15 +683,30 @@ export function TextStoryEditor({ elementId, anchor, viewport }: { elementId: st
             if (project.trackChanges) ({ text: value, caret: pos } = trackEdit(head.text, value, pos));
             setText(value);
             setCaret(pos);
-            if (value !== ta.value || pos !== ta.selectionStart) {
-              pendingCaret.current = pos;
-              requestAnimationFrame(() => { if (pendingCaret.current === pos) { pendingCaret.current = null; ta.setSelectionRange(pos, pos); } });
-            }
+            if (value !== ta.value || pos !== ta.selectionStart) selectAfter(pos);
           }}
           onSelect={(e) => setCaret((e.target as HTMLTextAreaElement).selectionStart)}
           onKeyDown={(e) => {
             e.stopPropagation();
             if (e.key === 'Escape') { if (pop) setPop(null); else if (find != null) closeFind(); else useStore.getState().setTextEditing(null); }
+            // Undo and redo are the book's, a step per burst of typing: the text box's own undo
+            // forgets everything typed before smart typing, track changes or an insert rewrote it.
+            if ((e.metaKey || e.ctrlKey) && !e.altKey && /^[zy]$/i.test(e.key)) {
+              e.preventDefault();
+              const s = useStore.getState();
+              if (e.shiftKey || e.key.toLowerCase() === 'y') s.redo(); else s.undo();
+              checkpointed.current = false;
+              const before = head.text;
+              const after = (findElement(useStore.getState().project, headId)?.el as TextElement | undefined)?.text;
+              if (after != null && after !== before) {
+                // The caret goes to the end of what changed.
+                let i = 0, j = 0;
+                while (i < after.length && i < before.length && after[i] === before[i]) i++;
+                while (j < after.length - i && j < before.length - i && after[after.length - 1 - j] === before[before.length - 1 - j]) j++;
+                setCaret(after.length - j);
+                selectAfter(after.length - j);
+              }
+            }
             if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'f') { e.preventDefault(); openFind(); }
             if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'g' && find) { e.preventDefault(); go(e.shiftKey ? -1 : 1, true); }
             // Tab types a tab (it is a typesetting character here, not focus navigation).

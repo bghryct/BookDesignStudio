@@ -1744,10 +1744,15 @@ export class BookModel {
     const nm = new Matrix3();
     const va = new Vector3(), vb = new Vector3(), vc = new Vector3(), vn = new Vector3(), tmp = new Vector3();
     const K = 4;
+    // Flaps lie inside the boards, so they face the pages: tucked away until the cover opens, the
+    // front flap under any leaf turned onto the front board, the back flap under the text block
+    // until every page has turned off it.
+    const staticBlock = L.tbY1 - L.nTurn * L.c - L.tbY0 >= 0.05;
+    const frontFlapHidden = coverShut || this.leaves.some((r) => r.x >= 1 - 1e-4);
+    const backFlapHidden = coverShut || staticBlock || this.leaves.some((r) => r.x <= 1e-4);
     for (const f of this.regionFaces) {
       if (f.which === 'cover' && jacketOn) continue;
-      // Flaps are tucked inside the boards until the cover opens.
-      if (coverShut && (f.region === 'front-flap' || f.region === 'back-flap')) continue;
+      if ((f.region === 'front-flap' && frontFlapHidden) || (f.region === 'back-flap' && backFlapHidden)) continue;
       const geo = f.mesh.geometry;
       const pos = geo.getAttribute('position'), nrm = geo.getAttribute('normal'), idx = geo.getIndex();
       if (!pos || !nrm || !idx) continue;

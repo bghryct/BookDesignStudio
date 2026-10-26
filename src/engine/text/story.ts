@@ -174,7 +174,7 @@ function applyRuleStyles(body: string, eff: TextStyle, cmap: Map<string, Charact
   // GREP styles: every match of the pattern outside markup.
   for (const g of grep) {
     let re: RegExp;
-    if (riskyPattern(g.pattern)) continue;
+    if (riskyPattern(g.pattern, g.flags)) continue;
     try { re = new RegExp(g.pattern, (g.flags ?? '').replace(/g/g, '') + 'g'); } catch { continue; }
     let m: RegExpExecArray | null;
     let guard = 0;
@@ -227,34 +227,138 @@ const LIST_RE = /^((?: {2}|\t)*)(?:([-•▪◦])|(\d{1,3}[.)]|[a-zA-Z]\)))[ \t]
 
 /**
  * True for a pattern that can backtrack for minutes on a long paragraph and freeze the page, so it
- * is not run: a repeated group that itself repeats, like (a+)+ or (\w*)*, or a repeated group of
- * alternatives that can match the same text, like (.|\s)* or (\w|\d)+.
+ * is not run: a repeated group that itself repeats, like (a+)+ or (\w*)*, unless a delimiter it
+ * cannot match ends or starts each repeat, like (\d+,)* or (,\d+)*; or a repeated group of
+ * alternatives that can start on the same character, like (.|\s)*, (\w|\d)+ or (x|xx)+, unlike
+ * (\d|-)+ or (\s|,)+, which can only match a text one way.
  */
-export function riskyPattern(src: string): boolean {
-  const open: { q: boolean; alt: boolean; broad: boolean }[] = [];
+export function riskyPattern(src: string, flags = ''): boolean {
+  const key = `${flags}|${src}`;
+  let risky = riskCache.get(key);
+  if (risky == null) {
+    risky = scanRisk(src, flags.replace(/[^iu]/g, ''));
+    if (riskCache.size > 500) riskCache.clear();
+    riskCache.set(key, risky);
+  }
+  return risky;
+}
+const riskCache = new Map<string, boolean>();
+
+function scanRisk(src: string, flags: string): boolean {
+  // q: a quantifier inside; alt: alternatives inside that can start alike.
+  const open: { q: boolean; alt: boolean; at: number }[] = [];
   let inClass = false;
   const quant = (k: number) => src[k] === '+' || src[k] === '*' || (src[k] === '{' && /^\{\d*,/.test(src.slice(k, k + 12)));
   const top = () => open[open.length - 1];
   for (let i = 0; i < src.length; i++) {
     const c = src[i];
-    if (c === '\\') {
-      if (open.length && /[sSwWdD]/.test(src[i + 1] ?? '')) top().broad = true;
-      i++;
-      continue;
-    }
+    if (c === '\\') { i++; continue; }
     if (inClass) { if (c === ']') inClass = false; continue; }
-    if (c === '[') { inClass = true; if (open.length) top().broad = true; }
-    else if (c === '.') { if (open.length) top().broad = true; }
-    else if (c === '|') { if (open.length) top().alt = true; }
-    else if (c === '(') open.push({ q: false, alt: false, broad: false });
+    if (c === '[') inClass = true;
+    else if (c === '(') open.push({ q: false, alt: false, at: i });
     else if (c === ')') {
-      const g = open.pop() ?? { q: false, alt: false, broad: false };
+      const g = open.pop() ?? { q: false, alt: false, at: i };
+      const body = groupBody(src.slice(g.at + 1, i));
+      const alts = body == null ? null : alternatives(body);
+      const alt = g.alt || !alts || (alts.length > 1 && !disjoint(alts.map((a) => firstAtom(a)), flags));
       const q = quant(i + 1);
-      if (q && (g.q || (g.alt && g.broad))) return true;
-      if (open.length) { top().q ||= g.q || q; top().broad ||= g.broad; }
+      if (q && (alt || (g.q && !delimited(body!, flags)))) return true;
+      if (open.length) { top().q ||= g.q || q; top().alt ||= alt; }
     } else if (open.length && quant(i)) top().q = true;
   }
   return false;
+}
+
+/** A group's pattern without its (?: or (?<name> opening; null for lookarounds. */
+function groupBody(inner: string): string | null {
+  if (!inner.startsWith('?')) return inner;
+  if (inner.startsWith('?:')) return inner.slice(2);
+  const named = /^\?<([A-Za-z_$][\w$]*)>/.exec(inner);
+  return named ? inner.slice(named[0].length) : null;
+}
+
+/** Split a group's pattern at its own | (not those inside classes or inner groups). */
+function alternatives(body: string): string[] {
+  const out: string[] = [];
+  let depth = 0, inClass = false, from = 0;
+  for (let i = 0; i < body.length; i++) {
+    const c = body[i];
+    if (c === '\\') { i++; continue; }
+    if (inClass) { if (c === ']') inClass = false; continue; }
+    if (c === '[') inClass = true;
+    else if (c === '(') depth++;
+    else if (c === ')') depth--;
+    else if (c === '|' && depth === 0) { out.push(body.slice(from, i)); from = i + 1; }
+  }
+  out.push(body.slice(from));
+  return out;
+}
+
+/** The single-character pattern at `at` (a letter, an escape, a class or .) and where it ends; null for anything else. */
+function atomAt(s: string, at: number): { atom: string; end: number } | null {
+  const c = s[at];
+  if (c == null || '()|^$*+?{}'.includes(c)) return null;
+  if (c === '\\') {
+    const e = s[at + 1];
+    if (e == null || /[bBkpPc1-9]/.test(e)) return null;
+    const hex = e === 'x' ? /^\\x[0-9a-fA-F]{2}/.exec(s.slice(at)) : e === 'u' ? /^\\u(?:[0-9a-fA-F]{4}|\{[0-9a-fA-F]{1,6}\})/.exec(s.slice(at)) : null;
+    if (e === 'x' || e === 'u') return hex ? { atom: hex[0], end: at + hex[0].length } : null;
+    return { atom: s.slice(at, at + 2), end: at + 2 };
+  }
+  if (c === '[') {
+    let j = at + 1;
+    if (s[j] === '^') j++;
+    for (; j < s.length && s[j] !== ']'; j++) if (s[j] === '\\') j++;
+    return j < s.length ? { atom: s.slice(at, j + 1), end: j + 1 } : null;
+  }
+  const len = (s.codePointAt(at) ?? 0) > 0xffff ? 2 : 1;
+  return { atom: s.slice(at, at + len), end: at + len };
+}
+
+const QUANT = /^(?:[+*]|\{\d*,\d*\}|\{\d+\})\??/;
+
+/** The first character's pattern of an alternative, or null if it can start with nothing or with a group. */
+function firstAtom(alt: string): string | null {
+  const a = atomAt(alt, 0);
+  if (!a) return null;
+  const next = alt.slice(a.end);
+  // Optional (x?, x*, x{0,}) lets the alternative start with whatever follows.
+  if (/^(?:\?|\*|\{0*,|\{0*\})/.test(next)) return null;
+  return a.atom;
+}
+
+/**
+ * Whether no character matches two of these one-character patterns: every character of the
+ * Basic Multilingual Plane is tried (a few milliseconds, once per pattern).
+ */
+function disjoint(atoms: (string | null)[], flags: string): boolean {
+  if (atoms.some((a) => a == null)) return false;
+  let res: RegExp[];
+  try { res = atoms.map((a) => new RegExp(`^(?:${a})$`, flags)); } catch { return false; }
+  for (let cp = 0; cp <= 0xffff; cp++) {
+    if (cp >= 0xd800 && cp <= 0xdfff) continue;
+    const ch = String.fromCharCode(cp);
+    let hits = 0;
+    for (const re of res) if (re.test(ch) && ++hits > 1) return false;
+  }
+  return true;
+}
+
+/**
+ * A repeat ended or started by a delimiter it cannot match, like `\d+,`, `,\d+`, `[^;]+;` or
+ * `\w+\s`: repeating the whole cannot split the text two ways, so `(\d+,)*\d+` is safe.
+ */
+function delimited(body: string, flags: string): boolean {
+  const parts: { atom: string; q: boolean }[] = [];
+  for (let i = 0; i < body.length;) {
+    const a = atomAt(body, i);
+    if (!a) return false;
+    const q = QUANT.exec(body.slice(a.end));
+    parts.push({ atom: a.atom, q: !!q && !/^\{\d+\}/.test(q[0]) });
+    i = a.end + (q ? q[0].length : 0);
+  }
+  if (parts.length !== 2 || parts[0].q === parts[1].q) return false;
+  return disjoint([parts[0].atom, parts[1].atom], flags);
 }
 
 /** Notes ({note:…}, nestable braces) are kept in the story but never set. */

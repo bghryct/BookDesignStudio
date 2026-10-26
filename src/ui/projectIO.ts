@@ -1,5 +1,5 @@
 import type { Project } from '../model/types';
-import { useStore } from '../store/store';
+import { useStore, recoveredAutosave, markOpening } from '../store/store';
 import { faceBytes, restoreUploadedFont, getFace } from '../engine/fonts';
 import { uid } from '../lib/random';
 import { createDefaultProject } from '../model/defaults';
@@ -144,6 +144,28 @@ export async function loadProjectFile(file: File) {
   ].filter(Boolean);
   // After the caller's own "Opened …" message.
   if (notes.length) setTimeout(() => useStore.getState().notify(`Opened ${file.name}: ${notes.join('; ')}.`), 0);
+}
+
+/**
+ * Open the book safe mode kept aside. It stopped the app once, so its opening is marked as for an
+ * autosave: if it stops the app again, the next start is in safe mode. False when there is none.
+ */
+export async function openRecoveredBook(): Promise<boolean> {
+  const raw = await recoveredAutosave();
+  if (!raw) return false;
+  const repairs = { count: 0 };
+  const project = normalizeProject(raw, repairs);
+  resolvePdfSources(project);
+  if (!project.pages.length) project.pages.push(makePage({ masterId: project.masters[0]?.id ?? null }));
+  markOpening(true);
+  const s = useStore.getState();
+  const previous = s.project;
+  s.replaceProject(project);
+  useStore.setState({ past: [previous] });
+  await restoreProjectFonts(useStore.getState().project).catch(() => undefined);
+  setTimeout(() => markOpening(false), 1000);
+  if (repairs.count) setTimeout(() => useStore.getState().notify(`Repaired ${repairs.count} problem${repairs.count === 1 ? '' : 's'} in this project.`), 0);
+  return true;
 }
 
 /** Re-register the uploaded fonts a project references (bytes from IndexedDB). */

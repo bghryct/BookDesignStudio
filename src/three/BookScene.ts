@@ -43,7 +43,7 @@ import {
 } from './animation';
 import { Backdrop, DEFAULT_BACKDROP, isSurface, resolveBackdrop, type ResolvedBackdrop } from './backdrop';
 import { ContactShadow } from './contactShadow';
-import { BookModel } from './geometry';
+import { BookModel, type BookBounds } from './geometry';
 import { SCENE_UNITS_PER_PT, computeLayout, type BookLayout } from './layout';
 import { LightRig, resolveLighting, type ResolvedLighting } from './lighting';
 import { BookMaterials, TextureCache, createCanvas, type PanelArt } from './materials';
@@ -249,6 +249,7 @@ export class BookScene {
     window.addEventListener('keydown', this.keyDown);
     window.addEventListener('keyup', this.keyUp);
     window.addEventListener('blur', this.keysOff);
+    document.addEventListener('visibilitychange', this.keysOff);
 
     this.applyLighting();
     this.applyBackdrop();
@@ -935,7 +936,8 @@ export class BookScene {
    */
   renderFrame(t: number, width: number, height: number): HTMLCanvasElement {
     this.assertContext();
-    // Hold the live loop until the caller restores the size with resize().
+    // Hold the live loop (and the camera keys) until the caller restores the size with resize().
+    if (!this.offline) this.keysOff();
     this.offline = true;
     const w = Math.max(2, Math.round(width));
     const h = Math.max(2, Math.round(height));
@@ -965,6 +967,7 @@ export class BookScene {
     const h = Math.max(2, Math.round(height));
     const wasOffline = this.offline;
     this.offline = true;
+    this.keysOff();
     const position = this.camera.position.clone();
     const target = this.controls.target.clone();
     const liveAspect = this.live.w / this.live.h;
@@ -1031,15 +1034,28 @@ export class BookScene {
   }
 
   /**
-   * Keep an orbiting / zooming camera out of the book's body (the closed block between its
-   * covers, a couple of millimetres grown): from the side, OrbitControls' minimum distance alone
+   * The book's box in its current pose: open, it takes in the open half too (the closed box let W
+   * walk into an open book's left-hand stack). Open flat with no leaf turning, nothing stands
+   * higher than the closed book, so close-ups of the spread still reach the page (bounds() keeps
+   * headroom for a leaf mid-turn and a board standing half open).
+   */
+  private poseBounds(model: BookModel): BookBounds {
+    const open = clamp01(this.sample.open);
+    const b = model.bounds(open);
+    if (open > 0.999 && !this.sample.leaves.some((v) => v > 0.001 && v < 0.999)) b.y1 = model.bounds(0).y1;
+    return b;
+  }
+
+  /**
+   * Keep an orbiting / zooming camera out of the book's body (its box in the current pose, a
+   * couple of millimetres grown): from the side, OrbitControls' minimum distance alone
    * lets a close camera end up between the pages. Pushed back along its line to the target.
    */
   /** Whether a world point is inside the book's box (with the margin keepCameraOutside keeps). */
   private insideBook(p: Vector3): boolean {
     const model = this.model;
     if (!model) return false;
-    const b = model.bounds(0);
+    const b = this.poseBounds(model);
     const m = mm(2);
     model.group.updateMatrixWorld(true);
     const q = p.clone().applyMatrix4(model.group.matrixWorld.clone().invert());
@@ -1049,7 +1065,7 @@ export class BookScene {
   keepCameraOutside(): void {
     const model = this.model;
     if (!model) return;
-    const b = model.bounds(0);
+    const b = this.poseBounds(model);
     const m = mm(2);
     const lo = [b.a0 - m, b.y0 - m, b.z0 - m], hi = [b.a1 + m, b.y1 + m, b.z1 + m];
     model.group.updateMatrixWorld(true);
@@ -1121,7 +1137,10 @@ export class BookScene {
   private shiftHeld = false;
   private readonly keyDown = (e: KeyboardEvent): void => {
     this.shiftHeld = e.shiftKey;
-    if (!BookScene.WALK.has(e.code) || e.metaKey || e.ctrlKey || e.altKey) return;
+    // macOS sends no keyup for a letter released while ⌘ is down: let go of everything then.
+    if (e.metaKey) this.keys.clear();
+    // Exporting (frames are posed and rendered offline): keys would move the camera mid-video.
+    if (this.offline || !BookScene.WALK.has(e.code) || e.metaKey || e.ctrlKey || e.altKey) return;
     const t = e.target as HTMLElement | null;
     if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return;
     e.preventDefault();
@@ -1130,8 +1149,13 @@ export class BookScene {
     // holding it moves smoothly, frame by frame (the system's key repeat adds nothing).
     if (!e.repeat) this.walk(1 / 20, e.shiftKey, new Set([e.code]));
   };
-  private readonly keyUp = (e: KeyboardEvent): void => { this.shiftHeld = e.shiftKey; this.keys.delete(e.code); };
-  private readonly keysOff = (): void => { this.keys.clear(); };
+  private readonly keyUp = (e: KeyboardEvent): void => {
+    this.shiftHeld = e.shiftKey;
+    if (e.key === 'Meta') this.keys.clear();
+    else this.keys.delete(e.code);
+  };
+  /** Window or tab left (its keyups go elsewhere), or an export starts: nothing stays held. */
+  private readonly keysOff = (): void => { this.keys.clear(); this.shiftHeld = false; };
 
   private walk(dt: number, fast: boolean, k: ReadonlySet<string> = this.keys): void {
     const step = Math.min(dt, 0.1) * (fast ? 3 : 1);
@@ -1161,6 +1185,8 @@ export class BookScene {
     if (k.has('KeyQ')) pan.sub(this.camera.up);
     if (pan.lengthSq() > 1e-12) {
       pan.normalize().multiplyScalar(off.length() * 0.8 * step);
+      // Not down through the floor (orbiting stops above it; Q panned on below it).
+      if (this.backdropState.showGround) pan.y = Math.max(pan.y, Math.min(0, mm(5) * SCENE_UNITS_PER_PT - cam.y));
       cam.add(pan);
       target.add(pan);
       moved = true;
@@ -1244,6 +1270,7 @@ export class BookScene {
     window.removeEventListener('keydown', this.keyDown);
     window.removeEventListener('keyup', this.keyUp);
     window.removeEventListener('blur', this.keysOff);
+    document.removeEventListener('visibilitychange', this.keysOff);
     cancelAnimationFrame(this.raf);
     this.controls.dispose();
     this.disposeModel();

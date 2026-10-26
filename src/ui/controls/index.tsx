@@ -122,7 +122,10 @@ export function NumberField({ label, value, onChange, length, unit, min, max, st
     const dx = e.clientX - scrub.current.x;
     const mult = e.shiftKey ? 10 : e.altKey ? 0.1 : 1;
     const delta = (dx / 2) * st * mult;
-    onChange(clamp(scrub.current.v + (length ? toPt(delta, docUnit) : delta)));
+    const v = clamp(scrub.current.v + (length ? toPt(delta, docUnit) : delta));
+    onChange(v);
+    // A focused field shows the new value too, or leaving it would commit the old text back.
+    setText(fmt(length ? fromPt(v, docUnit) : v));
   };
   const onPointerUp = () => { scrub.current = null; };
 
@@ -163,7 +166,10 @@ export function NumberField({ label, value, onChange, length, unit, min, max, st
               const dir = e.key === 'ArrowUp' ? 1 : -1;
               const mult = e.shiftKey ? 10 : e.altKey ? 0.1 : 1;
               const next = shown + dir * st * mult;
-              onChange(clamp(length ? toPt(next, docUnit) : next));
+              const v = clamp(length ? toPt(next, docUnit) : next);
+              onChange(v);
+              // Shown at once (the field has the focus), and what Enter or leaving it commits.
+              setText(fmt(length ? fromPt(v, docUnit) : v));
             }
           }}
         />

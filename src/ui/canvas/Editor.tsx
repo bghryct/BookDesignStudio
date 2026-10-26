@@ -291,17 +291,24 @@ export function Editor({ mode }: { mode: 'spreads' | 'cover' | 'jacket' }) {
         // A frame in the middle of another story would then belong to two stories at once.
         else if (threadOf(s.project, hit.el.id)[0] !== hit.el.id) s.notify('That frame already continues another story. Thread into an empty frame, or the first frame of a story.', 'error');
         else {
-          // Threading from a frame in the middle of a story puts the new frame into the thread:
-          // the frames that followed stay in the story after it, instead of being cut off.
+          // Threading from a frame in the middle of a story puts the new frame (and any frames
+          // threaded after it) into the thread: the frames that followed stay in the story after
+          // them, instead of being cut off. A story already in the new frame joins this one, its
+          // text after this story's, as in InDesign, rather than being hidden.
           const after = (findElement(s.project, linking)?.el as TextElement | undefined)?.flowNext ?? null;
           const target = hit.el as TextElement;
+          const theirs = threadOf(s.project, target.id);
+          const tail = theirs[theirs.length - 1];
+          const joined = !!target.text;
           s.update((d) => {
-            const from = findElement(d as Project, linking), to = findElement(d as Project, target.id);
-            if (!from || !to) return;
-            (surfaceElementsDraft(d as Project, from.key)![from.index] as Draft<TextElement>).flowNext = target.id;
-            if (after && after !== target.id && !target.flowNext) (surfaceElementsDraft(d as Project, to.key)![to.index] as Draft<TextElement>).flowNext = after;
+            const draft = (id: string) => { const f = findElement(d as Project, id); return f ? surfaceElementsDraft(d as Project, f.key)![f.index] as Draft<TextElement> : null; };
+            const from = draft(linking), to = draft(target.id), head = draft(chain[0]), last = draft(tail);
+            if (!from || !to || !head || !last) return;
+            from.flowNext = target.id;
+            if (after) last.flowNext = after;
+            if (joined) { head.text = head.text ? `${head.text}\n${to.text}` : to.text; to.text = ''; }
           });
-          s.notify('Frames threaded — the story now flows into the selected frame.');
+          s.notify(joined ? 'Frames threaded — the two stories are now one: the selected frame’s text follows this story.' : 'Frames threaded — the story now flows into the selected frame.');
         }
       }
       s.setLinking(null);
@@ -938,8 +945,9 @@ export function Editor({ mode }: { mode: 'spreads' | 'cover' | 'jacket' }) {
       if (mod && e.altKey && e.code === 'KeyI') { e.preventDefault(); s.update((d) => { d.book.grid.showInvisibles = !d.book.grid.showInvisibles; }, { history: false }); return; }
       if (mod && e.key === ';') { e.preventDefault(); s.update((d) => { if (e.altKey) d.guidesLocked = !d.guidesLocked; else d.guidesHidden = !d.guidesHidden; }, { history: false }); return; }
       if (mod && e.key === '1') { e.preventDefault(); const z = 1; zoomAt(z / s.zoom, size.w / 2, size.h / 2); return; }
-      if (mod && e.key === ']') { e.preventDefault(); s.arrange(e.shiftKey ? 'front' : 'forward'); return; }
-      if (mod && e.key === '[') { e.preventDefault(); s.arrange(e.shiftKey ? 'back' : 'backward'); return; }
+      // With Shift held the key reads } / { on Windows and Linux (macOS keeps ] / [).
+      if (mod && (e.key === ']' || e.key === '}' || e.code === 'BracketRight')) { e.preventDefault(); s.arrange(e.shiftKey ? 'front' : 'forward'); return; }
+      if (mod && (e.key === '[' || e.key === '{' || e.code === 'BracketLeft')) { e.preventDefault(); s.arrange(e.shiftKey ? 'back' : 'backward'); return; }
       if (e.key === 'Escape') {
         if (pen) { finishPen(false); return; }
         s.setLinking(null); s.setTextEditing(null); s.select([]); s.setTool('select');

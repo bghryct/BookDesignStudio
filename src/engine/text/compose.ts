@@ -86,6 +86,8 @@ export const INF = 10000;
 /** Breaking inside a run with no break opportunity: allowed, but dearer than any other line. */
 const EMERGENCY_PEN = 5000;
 const EMERGENCY_EM = 12;
+/** Width beyond which a run with nowhere to break gets emergency break points (see buildItems). */
+export const longRunWidth = (fontSize: number, measure: number) => Math.max(fontSize, Math.min(EMERGENCY_EM * fontSize, measure));
 /** May a run be cut before text[k]? Not inside a surrogate pair, before a combining mark or variation selector, or next to a joiner. */
 const cuttable = (text: string, k: number) => {
   const c = text.charCodeAt(k);
@@ -374,8 +376,9 @@ export function hyphenDictionary(list: string[] | undefined): Map<string, number
 }
 
 export function buildItems(p: Paragraph, style: TextStyle, ps: ParaStyle, scWords: number, ragged: boolean, dict: Map<string, number[] | null> | null, images?: StoryStyles['images'], measure = Infinity): Item[] {
-  // Runs wider than the column may break anywhere (see run below); without a known column, 12 em.
-  const longRun = Math.max(style.fontSize, Number.isFinite(measure) ? measure : EMERGENCY_EM * style.fontSize);
+  // Runs wider than this may break anywhere (see run below): 12 em, or the narrowest column if
+  // narrower. Those breaks are a last resort (breakLines), so a run that fits is never split.
+  const longRun = longRunWidth(style.fontSize, measure);
   const b = new ItemBuilder(style, ps, images);
   const items: Item[] = [];
   const sp = b.space();
@@ -458,7 +461,7 @@ export function buildItems(p: Paragraph, style: TextStyle, ps: ParaStyle, scWord
       }
     }
     breaks.sort((x, y) => x.at - y.at);
-    // A run with nowhere to break that is wider than its column (a URL, a long code) may also break
+    // A run with nowhere to break that is wider than 12 em or its column (a URL, a long code) may also break
     // between any two characters, at a cost so high that it only happens when the run would
     // otherwise stick out of its column. No hyphen is added.
     const run = (from: number, to: number) => {

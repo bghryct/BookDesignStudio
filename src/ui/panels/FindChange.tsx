@@ -66,7 +66,7 @@ export function FindChangeSection() {
   const setPos = (p: FindState['pos']) => useFind.setState({ pos: p });
   const setMsg = (m: string | null) => useFind.setState({ msg: m });
 
-  const risky = grep && !!find && riskyPattern(find);
+  const risky = grep && !!find && riskyPattern(find, caseSensitive ? 'u' : 'iu');
   const re = useMemo(() => {
     if (!find || risky) return null;
     try {

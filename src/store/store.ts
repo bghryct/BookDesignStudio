@@ -204,7 +204,8 @@ export const useStore = create<State>((set, get) => ({
   notify: (text, kind = 'info') => {
     set({ toast: { text, kind } });
     const t = text;
-    setTimeout(() => { if (get().toast?.text === t) set({ toast: null }); }, 3800);
+    // Long notices stay long enough to read (about 55 ms a character, up to 15 s).
+    setTimeout(() => { if (get().toast?.text === t) set({ toast: null }); }, Math.min(15000, Math.max(3800, text.length * 55)));
   },
 
   updateElement: (id, patch, opts) => {
@@ -320,22 +321,56 @@ export async function rawAutosave(): Promise<unknown> {
  * reload, so opening is marked as in progress until the book is on screen. If the last opening in
  * this tab never finished (or the address ends in ?safe), the next start does not open the
  * autosave. The mark is per tab (session storage survives a reload, even of a crashed tab), so
- * another tab of the app opening at the same moment never sets it off.
+ * another tab of the app opening at the same moment never sets it off. A frozen tab that was
+ * closed leaves its mark in local storage too: a new tab started more than 30 s after an opening
+ * that never finished starts in safe mode (an opening in a working tab takes seconds, and a tab
+ * that is closed or reloaded normally takes its mark away).
  */
 const OPENING = 'bds.opening';
+const OPENING_TABS = 'bds.openingTabs';
+const TAB = Math.random().toString(36).slice(2, 10);
+const MARK_LIFE = 10 * 60_000;
+function openingTabs(): Record<string, number> {
+  try { const v = JSON.parse(localStorage.getItem(OPENING_TABS) ?? '{}') as unknown; return v && typeof v === 'object' ? v as Record<string, number> : {}; } catch { return {}; }
+}
+function setOpeningTabs(tabs: Record<string, number>) {
+  try { if (Object.keys(tabs).length) localStorage.setItem(OPENING_TABS, JSON.stringify(tabs)); else localStorage.removeItem(OPENING_TABS); } catch { /* storage blocked */ }
+}
 export function startInSafeMode(): boolean {
   if (/[?&]safe\b/.test(location.search)) return true;
+  const now = Date.now();
+  let safe = false;
   try {
     const t = Number(sessionStorage.getItem(OPENING));
-    return t > 0 && Date.now() - t < 10 * 60_000;
-  } catch { return false; }
+    safe = t > 0 && now - t < MARK_LIFE;
+  } catch { /* storage blocked */ }
+  // Another tab's opening that never finished: once, and only for a recent one.
+  const tabs = openingTabs();
+  for (const [tab, t] of Object.entries(tabs)) {
+    const age = now - Number(t);
+    if (!(age >= 0 && age < MARK_LIFE)) delete tabs[tab];
+    else if (age > 30_000) { safe = true; delete tabs[tab]; }
+  }
+  setOpeningTabs(tabs);
+  return safe;
 }
 export function markOpening(on: boolean) {
   try { if (on) sessionStorage.setItem(OPENING, String(Date.now())); else sessionStorage.removeItem(OPENING); } catch { /* storage blocked */ }
+  const tabs = openingTabs();
+  if (on) tabs[TAB] = Date.now(); else delete tabs[TAB];
+  setOpeningTabs(tabs);
 }
+// A page closed or reloaded normally was not frozen (a frozen page runs no handlers).
+if (typeof window !== 'undefined') window.addEventListener('pagehide', () => markOpening(false));
+
+const RECOVERED_KEY = 'autosave-recovered';
 /** Safe mode keeps the book that would not open under its own key too, so nothing overwrites it. */
-export async function keepRecoveredAutosave(raw: unknown): Promise<void> {
-  try { await idbSet('projects', 'autosave-recovered', raw); } catch { /* storage full: the download still has it */ }
+export async function keepRecoveredAutosave(raw: unknown): Promise<boolean> {
+  try { await idbSet('projects', RECOVERED_KEY, raw); return true; } catch { return false; }
+}
+/** The book safe mode kept, if any (File › Open the book safe mode kept). */
+export async function recoveredAutosave(): Promise<unknown> {
+  try { return await idbGet<unknown>('projects', RECOVERED_KEY); } catch { return null; }
 }
 
 export async function loadAutosave(): Promise<Project | null> {

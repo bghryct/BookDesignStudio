@@ -21,7 +21,7 @@ import { illuminatedFrame } from './generators/cleves';
 import { toRoman } from '../model/units';
 import { parseStory, PLAIN, type Footnote, type Paragraph, type Piece, type StoryStyles } from './text/story';
 import {
-  ItemBuilder, buildItems, paraStyle, breakParagraph, tabCompose, linesFromBreaks, placeLine, hyphenDictionary,
+  ItemBuilder, buildItems, longRunWidth, paraStyle, breakParagraph, tabCompose, linesFromBreaks, placeLine, hyphenDictionary,
   INF, type Item, type Line, type ParaStyle, type TabResolution,
 } from './text/compose';
 
@@ -277,10 +277,15 @@ function cachedBreaks(items: Item[], widthAt: (ln: number) => number, style: Tex
   return breaks;
 }
 
-function prepare(text: string, style: TextStyle, firstWidth: number, styles: StoryStyles | null): Prepared {
+/**
+ * `firstWidth`: the first frame's column, for the first lines; `narrowest`: the narrowest column of
+ * every frame of the story, which decides which runs are too long to fit (they may then break
+ * anywhere, as a last resort).
+ */
+function prepare(text: string, style: TextStyle, firstWidth: number, narrowest: number, styles: StoryStyles | null): Prepared {
   // Images are keyed by id and size only: their data URLs are far too large to stringify.
   const sk = styles ? JSON.stringify({ p: styles.para, c: styles.char, h: styles.hyphenation, x: styles.hiddenConditions, l: styles.listStart }) + Object.entries(styles.images ?? {}).map(([k, v]) => `${k}:${v.w}x${v.h}`).join(',') : '';
-  const key = `${useFontStore.getState().version}|${JSON.stringify(style)}|${Math.round(firstWidth)}|${sk}|${text}`;
+  const key = `${useFontStore.getState().version}|${JSON.stringify(style)}|${Math.round(firstWidth)}|${Math.round(narrowest)}|${sk}|${text}`;
   const hit = storyCache.get(key);
   if (hit) { storyCache.delete(key); storyCache.set(key, hit); return hit; }
   const paras = parseStory(text, style, styles);
@@ -337,9 +342,11 @@ function prepare(text: string, style: TextStyle, firstWidth: number, styles: Sto
     if (dropCap && i === 0) ps.indent = 0;
     const ragged = ps.align === 'left' || ps.align === 'right' || ps.align === 'center';
     const special = (i === 0 && (!!dropCap || style.firstLineSmallCaps)) || !!pst.lineStyles?.length;
-    // The measure decides which runs are too long to fit it (they may then break anywhere).
-    const measure = Math.round(Math.max(1, firstWidth - ps.left - ps.right));
-    const ik = special ? '' : `${ctxId}|${jsonOf(pst)}|${para.kind}|${para.first}|${para.marker}|${para.level}|${measure}|${jsonOf(para.words)}`;
+    // The narrowest measure decides which runs are too long to fit it (they may then break anywhere);
+    // it only changes the items below 12 em, so resizing a wider frame keeps them.
+    const measure = Math.round(Math.max(1, narrowest - ps.left - ps.right));
+    const runKey = longRunWidth(pst.fontSize, measure) < longRunWidth(pst.fontSize, Infinity) ? measure : '';
+    const ik = special ? '' : `${ctxId}|${jsonOf(pst)}|${para.kind}|${para.first}|${para.marker}|${para.level}|${runKey}|${jsonOf(para.words)}`;
     let items = special ? undefined : itemCache.get(ik);
     if (!items) {
       items = buildItems(para, pst, ps, 0, ragged, dict, styles?.images, measure);
@@ -1275,10 +1282,12 @@ export function layoutStory(text: string, style0: TextStyle, frames0: FrameSpec[
     return frames.map((f, i) => (i === 0 ? layoutVertical(vparas, style, f) : { prims: [], lineCount: 0, overflow: false, baselines: [], lines: [] }));
   }
   const f0 = frames[0];
-  const in0 = f0?.insets ? f0.insets.left + f0.insets.right : (f0?.inset ?? 0) * 2;
-  const firstColW = f0 ? f0.colWidth ?? (f0.w - in0 - f0.columnGap * (Math.max(1, f0.columns) - 1)) / Math.max(1, f0.columns) : 100;
+  const colW = (f: FrameSpec) => f.colWidth ?? (f.w - (f.insets ? f.insets.left + f.insets.right : (f.inset ?? 0) * 2) - f.columnGap * (Math.max(1, f.columns) - 1)) / Math.max(1, f.columns);
+  const firstColW = f0 ? colW(f0) : 100;
+  // Columns under an em take no text and would only split every word into letters.
+  const narrowest = frames.reduce((n, f) => { const w = colW(f); return Number.isFinite(w) && w >= style.fontSize ? Math.min(n, w) : n; }, firstColW);
   const useStyles = styles && (styles.para.length || styles.char.length || styles.hyphenation?.length || styles.hiddenConditions?.length || styles.listStart?.length || /\{img:/.test(expanded)) ? styles : null;
-  const prep = prepare(expanded, style, firstColW, useStyles);
+  const prep = prepare(expanded, style, firstColW, narrowest, useStyles);
   const out: FrameLayout[] = [];
   // Long threads reuse the frames a change did not reach (see threadMemo).
   const memoKey = frames.length >= 3 ? `${JSON.stringify(style)}|${frames.length}` : null;

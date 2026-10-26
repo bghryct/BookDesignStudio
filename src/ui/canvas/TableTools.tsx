@@ -474,7 +474,8 @@ export function TableOverlay({ items, selection, tool, zoom, pan, size, calc, pr
     const isField = (t: EventTarget | null) => t instanceof HTMLElement && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable);
     const onKey = (e: KeyboardEvent) => {
       const st = useTableUi.getState();
-      if (isField(e.target) || st.editing) return;
+      // The Export dialog is modal: Delete, letters or Esc must not edit the cells behind it.
+      if (isField(e.target) || st.editing || useStore.getState().exportOpen) return;
       const t = findHead(el.id) ?? el;
       if (!t.rows.length) return;
       // Enter on a selected table steps into its first cell.
@@ -547,7 +548,7 @@ export function TableOverlay({ items, selection, tool, zoom, pan, size, calc, pr
     };
     const onPaste = (e: ClipboardEvent) => {
       const st = useTableUi.getState();
-      if (st.tableId !== el.id || !st.sel || st.editing || isField(e.target)) return;
+      if (st.tableId !== el.id || !st.sel || st.editing || isField(e.target) || useStore.getState().exportOpen) return;
       const text = e.clipboardData?.getData('text/plain');
       if (!text) return;
       e.preventDefault();

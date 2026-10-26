@@ -9,17 +9,32 @@ import { Button, Toggle, Select, Segmented, NumberField, Hint, Row } from './con
 import { spreadsOf } from '../model/surfaces';
 import { computeBinding } from '../engine/binding';
 import { ptToMm } from '../model/units';
+import { fontsStillLoading } from '../engine/fonts';
+
+/** The export message, saying which fonts never arrived (their text was set in a stand-in face). */
+function lateFonts(done: string): string {
+  const late = fontsStillLoading();
+  return late.length ? `${done} ${late.join(', ')} had not loaded after 15 s, so stand-in fonts were used for ${late.length === 1 ? 'it' : 'them'}: check your connection and export again.` : done;
+}
 
 type Tab = 'pdf' | 'svg' | 'video' | 'project';
 
 export default function ExportDialog() {
   const [tab, setTab] = useState<Tab>('pdf');
   const close = () => useStore.getState().setExportOpen(false);
-  // Esc closes the dialog (as the close button), wherever the focus is inside it.
+  // Esc closes the dialog (as the close button), unless something in it used the key first: an
+  // open picker closes itself, and a field being typed in lets go (a number field puts its value
+  // back). The page behind ignores keys while the dialog is open.
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } };
-    window.addEventListener('keydown', onKey, true);
-    return () => window.removeEventListener('keydown', onKey, true);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape' || e.defaultPrevented) return;
+      const t = e.target as HTMLElement | null;
+      const typing = t && ((t.tagName === 'INPUT' && !/^(checkbox|radio|button|range|file)$/.test((t as HTMLInputElement).type)) || t.tagName === 'TEXTAREA' || t.isContentEditable);
+      if (typing) { t.blur(); return; }
+      close();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
   }, []);
   return (
     <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/55 p-4 backdrop-blur-sm" onPointerDown={(e) => { if (e.target === e.currentTarget) close(); }}>
@@ -57,7 +72,7 @@ function PdfTab() {
       const bytes = await exportPdf(project, { ...o, spreadIndex: spread, onProgress: (p, label) => setBusy({ p, label }) });
       const suffix = o.scope === 'cover' ? 'cover' : o.scope === 'jacket' ? 'jacket' : o.scope === 'spread' ? `spread-${spread}` : 'interior';
       downloadBlob(new Blob([bytes.slice().buffer as ArrayBuffer], { type: 'application/pdf' }), `${safeName(project.book.title)}-${suffix}.pdf`);
-      useStore.getState().notify('PDF exported.');
+      useStore.getState().notify(lateFonts('PDF exported.'), fontsStillLoading().length ? 'error' : 'info');
     } catch (e) {
       useStore.getState().notify(`PDF export failed: ${(e as Error).message}`, 'error');
     } finally {
@@ -124,6 +139,7 @@ function SvgTab() {
       const opts = { ...o, spreadIndex: spread, selectionId: selection[0] };
       const { blob, name } = kind === 'svg' ? await exportSvg(project, opts) : await exportPng(project, opts);
       downloadBlob(blob, `${safeName(project.book.title)}-${name}`);
+      if (fontsStillLoading().length) useStore.getState().notify(lateFonts(`${kind.toUpperCase()} exported.`), 'error');
     } catch (e) {
       useStore.getState().notify(`Export failed: ${(e as Error).message}`, 'error');
     } finally {
