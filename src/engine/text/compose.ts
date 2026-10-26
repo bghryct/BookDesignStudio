@@ -202,9 +202,11 @@ export class ItemBuilder {
       let off = 0;
       for (const part of text.split(FIXED_RE)) {
         if (!part) continue;
-        if (FIXED[part] != null) {
+        if (FIXED_RE.test(part)) {
+          // Em, en, thin, hair… are fractions of the size; a figure space is as wide as a digit and a
+          // punctuation space as a full stop, measured in the font. (These two once recursed forever.)
           const size = this.sizeOf(st);
-          const w = FIXED[part] * size;
+          const w = FIXED[part] != null ? FIXED[part] * size : measure(part === '\u2007' ? '0' : '.', this.font(st), size);
           out.push({ text: '', font: this.font(st), size, ls: 0, width: w, glyphW: w, color: this.style.color });
         } else out.push(...this.segs(part, st, sc, manual?.slice(off, off + part.length)));
         off += part.length;

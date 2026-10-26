@@ -276,7 +276,9 @@ export function TextStoryEditor({ elementId, anchor, viewport }: { elementId: st
   const tb = 'inline-flex h-6 w-6 items-center justify-center rounded text-ink-300 hover:bg-ink-600 hover:text-ink-100';
   const tbOn = 'bg-ink-600 text-ink-100';
   const sel = 'h-6 max-w-[104px] rounded border border-ink-600 bg-ink-800 px-1 text-[10.5px] text-ink-200 outline-none';
-  const font: React.CSSProperties = { fontFamily: '"BDS EB Garamond", Georgia, serif', fontSize: 14, lineHeight: 1.45, padding: '8px 12px', whiteSpace: 'pre-wrap', overflowWrap: 'break-word', tabSize: 4 };
+  // The coloured layer and the text box must wrap identically: same font, padding and the same
+  // scrollbar gutter (a long story gives the text box a scrollbar, which narrowed it before).
+  const font: React.CSSProperties = { fontFamily: '"BDS EB Garamond", Georgia, serif', fontSize: 14, lineHeight: 1.45, padding: '8px 12px', whiteSpace: 'pre-wrap', overflowWrap: 'break-word', wordBreak: 'normal', tabSize: 4, scrollbarGutter: 'stable', letterSpacing: 'normal', fontWeight: 400 };
   return (
     <div
       className="absolute z-30 flex flex-col overflow-hidden rounded-lg border border-ink-600 bg-ink-850/97 shadow-2xl backdrop-blur"
@@ -285,7 +287,7 @@ export function TextStoryEditor({ elementId, anchor, viewport }: { elementId: st
       onDoubleClick={(e) => e.stopPropagation()}
       onWheel={(e) => e.stopPropagation()}
     >
-      <style>{`.hl-para{color:#e0b062}.hl-list{color:#9aa0b0}.hl-head{color:#f0e6d0;font-weight:600}.hl-tag{color:#5ec4b6}.hl-code{color:#7fa8ff}.hl-kern{color:#c39bff}.hl-fn{color:#9ed07f}.hl-mark{color:#e5483a}.hl-mute{color:#777}.hl-tab{background:rgba(127,168,255,.15);border-radius:2px}.hl-ins{color:#7fd88f;background:rgba(127,216,143,.12);text-decoration:underline}.hl-del{color:#f08a73;text-decoration:line-through;background:rgba(240,138,115,.1)}`}</style>
+      <style>{`.hl-para{color:#e0b062}.hl-list{color:#9aa0b0}.hl-head{color:#f6d38a}.hl-tag{color:#5ec4b6}.hl-code{color:#7fa8ff}.hl-kern{color:#c39bff}.hl-fn{color:#9ed07f}.hl-mark{color:#e5483a}.hl-mute{color:#777}.hl-tab{background:rgba(127,168,255,.15);border-radius:2px}.hl-ins{color:#7fd88f;background:rgba(127,216,143,.12);text-decoration:underline}.hl-del{color:#f08a73;text-decoration:line-through;background:rgba(240,138,115,.1)}`}</style>
       <div className="flex items-center gap-0.5 border-b border-ink-700 px-1.5 py-1">
         <span className="mr-1 text-[10.5px] font-semibold uppercase tracking-[0.08em] text-ink-400">Story{chain.length > 1 ? ` · ${chain.length} frames` : ''}</span>
         <button type="button" title="Italic (*text*, ⌘I)" className={tb} onClick={() => wrap('*')}><Italic size={13} /></button>
@@ -353,7 +355,7 @@ export function TextStoryEditor({ elementId, anchor, viewport }: { elementId: st
         </div>
       )}
       <div className="relative h-64 resize-y overflow-hidden" style={{ minHeight: 120 }}>
-        <pre ref={hlRef} aria-hidden className="pointer-events-none absolute inset-0 m-0 overflow-hidden text-ink-100" style={font} dangerouslySetInnerHTML={{ __html: html }} />
+        <pre ref={hlRef} aria-hidden className="scroll-thin pointer-events-none absolute inset-0 m-0 overflow-hidden text-ink-100" style={font} dangerouslySetInnerHTML={{ __html: html }} />
         <textarea
           ref={ref}
           value={head.text}

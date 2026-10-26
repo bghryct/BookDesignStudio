@@ -15,6 +15,7 @@ import { restoreProjectFonts } from './ui/projectIO';
 import { Toast } from './ui/Toast';
 import { enableJacket } from './ui/jacket';
 import { BrushPanel } from './ui/brush';
+import { saveProjectFile } from './ui/projectIO';
 
 const Viewer3D = lazy(() => import('./ui/Viewer3D'));
 const LayoutMatrix = lazy(() => import('./ui/LayoutMatrix'));
@@ -58,6 +59,7 @@ export default function App() {
       <div className="flex min-h-0 flex-1">
         {left && view !== '3d' && <LeftPanel />}
         <main className="relative flex min-w-0 flex-1 flex-col">
+          <Recover>
           {editing && (tool === 'brush' || tool === 'eraser') && <BrushBar />}
           <div className="relative flex min-h-0 flex-1">
             {editing && <Toolbar />}
@@ -73,6 +75,7 @@ export default function App() {
             </div>
           </div>
           <StatusBar />
+          </Recover>
         </main>
         {right && (editing || view === '3d') && <RightPanel />}
       </div>
@@ -102,4 +105,32 @@ function JacketGate() {
 
 function Loading() {
   return <div className="flex h-full items-center justify-center text-ink-400">Loading…</div>;
+}
+
+/**
+ * If drawing the work area ever throws, show a way out instead of a black screen: undo the last
+ * change (the usual cause), go back to the pages, or save a copy of the project first.
+ */
+class Recover extends React.Component<{ children: React.ReactNode }, { error: Error | null }> {
+  state = { error: null as Error | null };
+  static getDerivedStateFromError(error: Error) { return { error }; }
+  componentDidCatch(error: Error) { console.error('Book Design Studio view crashed:', error); }
+  private retry = (fn?: () => void) => { fn?.(); this.setState({ error: null }); };
+  render() {
+    if (!this.state.error) return this.props.children;
+    const s = useStore.getState();
+    const btn = 'rounded-md border border-ink-600 px-3 py-1.5 text-[12px] text-ink-100 hover:border-ink-400';
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-3 p-8 text-center">
+        <div className="text-[15px] text-ink-100">Something on this page couldn't be drawn.</div>
+        <div className="max-w-md text-[12px] text-ink-400">Your work is safe. Undo the last change, or go back to the pages; save a copy first if you like.</div>
+        <div className="flex flex-wrap justify-center gap-2">
+          <button type="button" className={btn} onClick={() => this.retry(() => s.undo())}>Undo last change</button>
+          <button type="button" className={btn} onClick={() => this.retry(() => { s.setTextEditing(null); s.setView('spreads'); })}>Back to the pages</button>
+          <button type="button" className={btn} onClick={() => saveProjectFile(s.project)}>Save a copy of the project</button>
+        </div>
+        <code className="max-w-lg truncate text-[10.5px] text-ink-500">{this.state.error.message}</code>
+      </div>
+    );
+  }
 }

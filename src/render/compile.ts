@@ -402,7 +402,27 @@ export function naturalWidth(el: TextElement, ctx: CompileContext): number {
   return Math.ceil(right + ins.right + 1);
 }
 
+/**
+ * Lay out a frame's text. A failure inside the text engine must never take the app down: the frame
+ * is drawn as a red "can't set this text" box instead and the error goes to the console.
+ */
 export function layoutText(el: TextElement, ctx: CompileContext): FrameLayout {
+  try {
+    return layoutTextUnsafe(el, ctx);
+  } catch (err) {
+    console.error('Book Design Studio could not set the text of', el.name || el.id, err);
+    const w = el.w, h = el.h;
+    return {
+      prims: [
+        { t: 'path', d: `M0 0H${w}V${h}H0Z`, fill: 'rgba(229,72,58,0.08)', stroke: '#e5483a', strokeWidth: 1, dash: [4, 3] },
+        { t: 'text', runs: [{ x: 6, y: 14, text: "Can't set this text: edit the story (see the console)", font: resolveFont({ family: 'eb-garamond', weight: 400, italic: true, size: 9 }), size: 9, color: '#e5483a', width: Math.min(w - 12, 260) }] },
+      ],
+      lineCount: 0, overflow: true, baselines: [], lines: [],
+    };
+  }
+}
+
+function layoutTextUnsafe(el: TextElement, ctx: CompileContext): FrameLayout {
   void ensureFamily(el.style.fontFamily);
   if (el.style.dropCap.enabled && el.style.dropCap.fontFamily) void ensureFamily(el.style.dropCap.fontFamily);
   const version = useFontStore.getState().version;
