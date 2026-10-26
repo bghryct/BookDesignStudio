@@ -374,8 +374,8 @@ export function hyphenDictionary(list: string[] | undefined): Map<string, number
 }
 
 export function buildItems(p: Paragraph, style: TextStyle, ps: ParaStyle, scWords: number, ragged: boolean, dict: Map<string, number[] | null> | null, images?: StoryStyles['images'], measure = Infinity): Item[] {
-  // Runs wider than this may break anywhere (see run below): 12 em, or the column if it is narrower.
-  const longRun = Math.max(style.fontSize, Math.min(EMERGENCY_EM * style.fontSize, measure));
+  // Runs wider than the column may break anywhere (see run below); without a known column, 12 em.
+  const longRun = Math.max(style.fontSize, Number.isFinite(measure) ? measure : EMERGENCY_EM * style.fontSize);
   const b = new ItemBuilder(style, ps, images);
   const items: Item[] = [];
   const sp = b.space();
@@ -458,7 +458,7 @@ export function buildItems(p: Paragraph, style: TextStyle, ps: ParaStyle, scWord
       }
     }
     breaks.sort((x, y) => x.at - y.at);
-    // A run with nowhere to break that is wider than 12 em or its column (a URL, a long code) may also break
+    // A run with nowhere to break that is wider than its column (a URL, a long code) may also break
     // between any two characters, at a cost so high that it only happens when the run would
     // otherwise stick out of its column. No hyphen is added.
     const run = (from: number, to: number) => {
@@ -500,7 +500,7 @@ const LINE_PENALTY = 10;
 const FLAGGED_DEMERITS = 3000;
 const FITNESS_DEMERITS = 3000;
 
-export interface BreakOptions { hyphenLimit?: number; hyphenZone?: number }
+export interface BreakOptions { hyphenLimit?: number; hyphenZone?: number; /** Allow breaks inside runs with nowhere to break (the last resort). */ emergency?: boolean }
 
 function knuthPlass(items: Item[], widthAt: (line: number) => number, tolerance: number, o: BreakOptions = {}): number[] | null {
   const hyphenLimit = o.hyphenLimit ?? 0, zone = o.hyphenZone ?? 0;
@@ -527,7 +527,7 @@ function knuthPlass(items: Item[], widthAt: (line: number) => number, tolerance:
       continue;
     }
     if (it.t === 'here' || it.t === 'tab') continue;
-    const legal = it.t === 'glue' ? i > 0 && items[i - 1].t === 'box' : it.p < INF;
+    const legal = it.t === 'glue' ? i > 0 && items[i - 1].t === 'box' : it.p < INF && (it.p < EMERGENCY_PEN || !!o.emergency);
     if (legal) {
       const best = new Map<string, { dem: number; node: KPNode; fit: number; hc: number }>();
       const flagged = it.t === 'pen' && it.f && it.p > -INF;
@@ -626,7 +626,8 @@ function breakLines(items: Item[], widthAt0: (line: number) => number, o: BreakO
     } else if (it.t === 'pen' && !Number.isFinite(it.w)) it.w = 0;
   }
   const widthAt = (line: number) => { const w = widthAt0(line); return Number.isFinite(w) ? w : 0; };
-  return knuthPlass(items, widthAt, 2, o) ?? knuthPlass(items, widthAt, 8, o) ?? knuthPlass(items, widthAt, 8) ?? greedy(items, widthAt);
+  // A run is broken mid-word only when no looser setting of the paragraph keeps it whole.
+  return knuthPlass(items, widthAt, 2, o) ?? knuthPlass(items, widthAt, 8, o) ?? knuthPlass(items, widthAt, 8) ?? knuthPlass(items, widthAt, 8, { emergency: true }) ?? greedy(items, widthAt);
 }
 
 /** Line breaks for a paragraph, with the rag shaped as the style asks. */

@@ -61,6 +61,7 @@ import type {
   LightingOptions,
   TextureDemand,
 } from './types';
+import type { WrapRegion } from './regions';
 
 const DEFAULT_BACKGROUND = '#d9d4cb';
 /** Seconds to lay the book down / stand it up in the interactive viewer. */
@@ -245,6 +246,9 @@ export class BookScene {
     this.controls.addEventListener('change', () => {
       this.dirty = true;
     });
+    window.addEventListener('keydown', this.keyDown);
+    window.addEventListener('keyup', this.keyUp);
+    window.addEventListener('blur', this.keysOff);
 
     this.applyLighting();
     this.applyBackdrop();
@@ -800,7 +804,7 @@ export class BookScene {
   /** Demand for the current camera on a viewport of vw × vh device pixels. */
   private demandNow(vw: number, vh: number): TextureDemand {
     const model = this.model;
-    if (!model) return { pages: [], coverFront: 0, jacketFront: 0 };
+    if (!model) return { pages: [], cover: {}, jacket: {} };
     this.camera.updateMatrixWorld();
     model.group.updateMatrixWorld(true);
     const m = model.group.matrixWorld;
@@ -815,8 +819,8 @@ export class BookScene {
     const d = model.textureDemand(toScreen, [eye.x, eye.y, eye.z], [vw, vh]);
     return {
       pages: [...d.pages.entries()].map(([index, pxPerPt]) => ({ index, pxPerPt })).sort((p, q) => q.pxPerPt - p.pxPerPt),
-      coverFront: d.coverFront,
-      jacketFront: d.jacketFront,
+      cover: d.cover,
+      jacket: d.jacket,
     };
   }
 
@@ -853,13 +857,16 @@ export class BookScene {
     this.camera.updateProjectionMatrix();
     const D = this.getAnimationDuration();
     const pages = new Map<number, number>();
-    let coverFront = 0, jacketFront = 0;
+    const cover: TextureDemand['cover'] = {}, jacket: TextureDemand['jacket'] = {};
+    const most = (into: TextureDemand['cover'], from: TextureDemand['cover']) => {
+      for (const [r, v] of Object.entries(from) as [WrapRegion, number][]) into[r] = Math.max(into[r] ?? 0, v);
+    };
     for (let i = 0; i < samples; i++) {
       this.applyAt((D * i) / samples, true);
       const d = this.demandNow(width, height);
       for (const p of d.pages) pages.set(p.index, Math.max(pages.get(p.index) ?? 0, p.pxPerPt));
-      coverFront = Math.max(coverFront, d.coverFront);
-      jacketFront = Math.max(jacketFront, d.jacketFront);
+      most(cover, d.cover);
+      most(jacket, d.jacket);
     }
     this.applyAt(this.time, false);
     this.camera.position.copy(position);
@@ -867,7 +874,7 @@ export class BookScene {
     this.camera.aspect = aspect;
     this.camera.updateProjectionMatrix();
     this.camera.lookAt(target);
-    return { pages: [...pages.entries()].map(([index, pxPerPt]) => ({ index, pxPerPt })).sort((p, q) => q.pxPerPt - p.pxPerPt), coverFront, jacketFront };
+    return { pages: [...pages.entries()].map(([index, pxPerPt]) => ({ index, pxPerPt })).sort((p, q) => q.pxPerPt - p.pxPerPt), cover, jacket };
   }
 
   /** Sharper art for page `index` (index 0 = page 1); null restores the base art. */
@@ -877,9 +884,9 @@ export class BookScene {
     else if (art && typeof ImageBitmap !== 'undefined' && art instanceof ImageBitmap) art.close();
   }
 
-  /** Sharper art for the front panel of the cover or jacket (see PanelArt); null restores it. */
-  setPanelArt(which: 'cover' | 'jacket', art: PanelArt | null): void {
-    this.materials?.setPanelArt(which, art);
+  /** Sharper art for a region (front, back, spine, flap) of the cover or jacket (see PanelArt); null restores it. */
+  setPanelArt(which: 'cover' | 'jacket', region: WrapRegion, art: PanelArt | null): void {
+    this.materials?.setPanelArt(which, region, art);
     this.dirty = true;
   }
 
@@ -1028,6 +1035,17 @@ export class BookScene {
    * covers, a couple of millimetres grown): from the side, OrbitControls' minimum distance alone
    * lets a close camera end up between the pages. Pushed back along its line to the target.
    */
+  /** Whether a world point is inside the book's box (with the margin keepCameraOutside keeps). */
+  private insideBook(p: Vector3): boolean {
+    const model = this.model;
+    if (!model) return false;
+    const b = model.bounds(0);
+    const m = mm(2);
+    model.group.updateMatrixWorld(true);
+    const q = p.clone().applyMatrix4(model.group.matrixWorld.clone().invert());
+    return q.x > b.a0 - m && q.x < b.a1 + m && q.y > b.y0 - m && q.y < b.y1 + m && q.z > b.z0 - m && q.z < b.z1 + m;
+  }
+
   keepCameraOutside(): void {
     const model = this.model;
     if (!model) return;
@@ -1092,10 +1110,74 @@ export class BookScene {
     this.dirty = false;
   }
 
+  /*
+   * Moving the camera with the keyboard: W/S closer to and further from the orbit centre (slowing
+   * as it nears, so it never passes through), A/D and Q/E pan left, right, down and up (camera and
+   * centre together), Shift faster. Speeds follow the distance, so it feels the same close and far.
+   */
+  private readonly keys = new Set<string>();
+  private lastFrame = 0;
+  private static readonly WALK = new Set(['KeyW', 'KeyA', 'KeyS', 'KeyD', 'KeyQ', 'KeyE']);
+  private shiftHeld = false;
+  private readonly keyDown = (e: KeyboardEvent): void => {
+    this.shiftHeld = e.shiftKey;
+    if (!BookScene.WALK.has(e.code) || e.metaKey || e.ctrlKey || e.altKey) return;
+    const t = e.target as HTMLElement | null;
+    if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return;
+    e.preventDefault();
+    this.keys.add(e.code);
+    // A tap moves a little at once (a key released before the next frame would not move at all);
+    // holding it moves smoothly, frame by frame (the system's key repeat adds nothing).
+    if (!e.repeat) this.walk(1 / 20, e.shiftKey, new Set([e.code]));
+  };
+  private readonly keyUp = (e: KeyboardEvent): void => { this.shiftHeld = e.shiftKey; this.keys.delete(e.code); };
+  private readonly keysOff = (): void => { this.keys.clear(); };
+
+  private walk(dt: number, fast: boolean, k: ReadonlySet<string> = this.keys): void {
+    const step = Math.min(dt, 0.1) * (fast ? 3 : 1);
+    const target = this.controls.target, cam = this.camera.position;
+    const off = cam.clone().sub(target);
+    const dist = Math.max(1e-6, off.length());
+    let moved = false;
+    const zoom = (k.has('KeyS') ? 1 : 0) - (k.has('KeyW') ? 1 : 0);
+    if (zoom) {
+      // World units, not the book's pt (the book is scaled into the scene): the orbit's own limits.
+      let next = Math.min(Math.max(dist * Math.exp(zoom * 1.4 * step), this.controls.minDistance), this.controls.maxDistance);
+      // Closer stops at the book's surface rather than going in (the target is inside the book).
+      for (let i = 0; i < 8 && next < dist && this.insideBook(target.clone().addScaledVector(off, next / dist)); i++) next = (next + dist) / 2;
+      if (Math.abs(next - dist) > 1e-6 && !(next < dist && this.insideBook(target.clone().addScaledVector(off, next / dist)))) {
+        off.multiplyScalar(next / dist);
+        cam.copy(target).add(off);
+        moved = true;
+      }
+    }
+    const dir = new Vector3();
+    this.camera.getWorldDirection(dir);
+    const right = new Vector3().crossVectors(dir, this.camera.up).normalize();
+    const pan = new Vector3();
+    if (k.has('KeyD')) pan.add(right);
+    if (k.has('KeyA')) pan.sub(right);
+    if (k.has('KeyE')) pan.add(this.camera.up);
+    if (k.has('KeyQ')) pan.sub(this.camera.up);
+    if (pan.lengthSq() > 1e-12) {
+      pan.normalize().multiplyScalar(off.length() * 0.8 * step);
+      cam.add(pan);
+      target.add(pan);
+      moved = true;
+    }
+    if (!moved) return;
+    this.userCamera = true;
+    this.keepCameraOutside();
+    this.dirty = true;
+  }
+
   private readonly frame = (now: number): void => {
     if (this.disposed) return;
     this.raf = requestAnimationFrame(this.frame);
+    const dt = this.lastFrame ? (now - this.lastFrame) / 1000 : 0;
+    this.lastFrame = now;
     if (this.offline) return;
+    if (this.keys.size && dt > 0) this.walk(dt, this.shiftHeld);
     if (this.playing && !this.manual) {
       let t = this.playFrom + (now - this.playStart) / 1000;
       const d = this.getAnimationDuration();
@@ -1159,6 +1241,9 @@ export class BookScene {
     this.disposed = true;
     this.canvas.removeEventListener('webglcontextlost', this.contextLost);
     this.canvas.removeEventListener('webglcontextrestored', this.contextRestored);
+    window.removeEventListener('keydown', this.keyDown);
+    window.removeEventListener('keyup', this.keyUp);
+    window.removeEventListener('blur', this.keysOff);
     cancelAnimationFrame(this.raf);
     this.controls.dispose();
     this.disposeModel();

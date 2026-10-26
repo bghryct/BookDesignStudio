@@ -68,7 +68,11 @@ function useNearViewport(ref: React.RefObject<globalThis.Element>): boolean {
   useEffect(() => {
     const el = ref.current;
     if (!el || typeof IntersectionObserver === 'undefined') { setNear(true); return; }
-    const io = new IntersectionObserver(([e]) => setNear(e.isIntersecting), { rootMargin: '600px 0px' });
+    // The thumbnails scroll inside the panel, which clips them: measured against the viewport the
+    // margin did nothing, and those just below the visible list stayed blank until scrolled in.
+    let root: globalThis.Element | null = el.parentElement;
+    while (root && !/^(auto|scroll)$/.test(getComputedStyle(root).overflowY)) root = root.parentElement;
+    const io = new IntersectionObserver(([e]) => setNear(e.isIntersecting), { root, rootMargin: '600px 0px' });
     io.observe(el);
     return () => io.disconnect();
   }, [ref]);
@@ -227,7 +231,9 @@ function PageMenu({ index, onClose }: { index: number; onClose: () => void }) {
   const project = useStore((s) => s.project);
   const page = project.pages[index];
   const s = useStore.getState;
-  const set = (fn: (p: Project['pages'][number]) => void) => s().update((d) => { fn(d.pages[index] as Project['pages'][number]); });
+  const set = (fn: (p: Project['pages'][number]) => void) => s().update((d) => { if (d.pages[index]) fn(d.pages[index] as Project['pages'][number]); });
+  // The page went away while its menu was open (⌘Z undid the pages it was on).
+  if (!page) return null;
   return (
     <div className="absolute left-1/2 top-full z-40 mt-1 w-56 -translate-x-1/2 space-y-2 rounded-md border border-ink-600 bg-ink-800 p-2 text-left shadow-2xl" onPointerDown={(e) => e.stopPropagation()}>
       <TextInput label="Label" value={page.label ?? ''} onChange={(v) => set((p) => { p.label = v; })} />
@@ -282,7 +288,11 @@ function FlowText({ onDone }: { onDone: () => void }) {
           const r = await loadManuscript(f, (project.paragraphStyles ?? []).map((p) => p.name), (msg) => setLoaded(msg));
           setText(r.text);
           setLoaded(`${f.name}: ${r.summary}.`);
-        } catch (err) { useStore.getState().notify(`${f.name}: ${(err as Error).message}`); }
+        } catch (err) {
+          // Not left saying "Reading …" for ever.
+          setLoaded(null);
+          useStore.getState().notify(`${f.name}: ${(err as Error).message}`, 'error');
+        }
       }} />
       <Button className="w-full" onClick={() => fileRef.current?.click()}><Upload size={12} /> Load .txt / .md / .docx / .rtf / .idml / .pdf…</Button>
       {loaded && <Hint>{loaded}</Hint>}
@@ -437,7 +447,13 @@ function AssetsPanel() {
             <div className="flex items-center gap-1 border-t border-ink-700 px-1.5 py-1 text-[10px] text-ink-400">
               {a.kind === 'svg' ? 'SVG' : <ImageIcon size={10} />}
               <span className="min-w-0 flex-1 truncate">{a.name}</span>
-              <button type="button" title="Remove asset" className="invisible hover:text-[#f08a73] group-hover:visible" onClick={() => s().update((d) => { delete d.assets[a.id]; })}><Trash size={11} /></button>
+              <button type="button" title="Remove asset" className="invisible hover:text-[#f08a73] group-hover:visible" onClick={() => {
+                // A picture still placed in the book would leave its frames empty.
+                const p = s().project;
+                const used = JSON.stringify([p.pages, p.masters, p.cover, p.jacket ?? null]).includes(a.id);
+                if (used && !confirm(`“${a.name}” is placed in the book. Remove it anyway? The frames that show it will be empty.`)) return;
+                s().update((d) => { delete d.assets[a.id]; });
+              }}><Trash size={11} /></button>
             </div>
           </div>
         ))}

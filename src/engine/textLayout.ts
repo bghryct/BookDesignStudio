@@ -337,9 +337,9 @@ function prepare(text: string, style: TextStyle, firstWidth: number, styles: Sto
     if (dropCap && i === 0) ps.indent = 0;
     const ragged = ps.align === 'left' || ps.align === 'right' || ps.align === 'center';
     const special = (i === 0 && (!!dropCap || style.firstLineSmallCaps)) || !!pst.lineStyles?.length;
-    // The measure only matters for runs too long to fit it (they may then break anywhere).
+    // The measure decides which runs are too long to fit it (they may then break anywhere).
     const measure = Math.round(Math.max(1, firstWidth - ps.left - ps.right));
-    const ik = special ? '' : `${ctxId}|${jsonOf(pst)}|${para.kind}|${para.first}|${para.marker}|${para.level}|${measure < 12 * pst.fontSize ? measure : ''}|${jsonOf(para.words)}`;
+    const ik = special ? '' : `${ctxId}|${jsonOf(pst)}|${para.kind}|${para.first}|${para.marker}|${para.level}|${measure}|${jsonOf(para.words)}`;
     let items = special ? undefined : itemCache.get(ik);
     if (!items) {
       items = buildItems(para, pst, ps, 0, ragged, dict, styles?.images, measure);
@@ -1304,7 +1304,7 @@ export function layoutStory(text: string, style0: TextStyle, frames0: FrameSpec[
       // What the frame read: its paragraphs, and the next one (keep with next looks ahead).
       const last = Math.min(prep.paras.length - 1, (next?.para ?? prep.paras.length - 1) + 1);
       const read = prep.paras.slice(cursor.para, last + 1);
-      memos[i] = { frame: frameKeys[i], start: cursor, end: next, count: prep.paras.length, items: read.map((pp) => pp.items), notes: read.map((pp) => pp.para.footnotes), layout };
+      memos[i] = { frame: frameKeys[i], start: cursor, end: next, count: prep.paras.length, items: read.map((pp) => pp.items), notes: read.map((pp) => pp.para.footnotes), tags: read.map(paraTags), layout };
     }
     cursor = next;
   });
@@ -1323,14 +1323,16 @@ export function layoutStory(text: string, style0: TextStyle, frames0: FrameSpec[
  * style and context are the same) and the same footnotes. The story's frame style and frame count
  * key the memo.
  */
-interface FrameMemo { frame: string; start: Cursor; end: Cursor | null; count: number; items: Item[][]; notes: Footnote[][]; layout: FrameLayout }
+interface FrameMemo { frame: string; start: Cursor; end: Cursor | null; count: number; items: Item[][]; notes: Footnote[][]; tags: string[]; layout: FrameLayout }
 const threadMemo = new Map<string, FrameMemo[]>();
+/** What a paragraph brings besides its items: a break before it ({col}, {frame}, {odd}) and its style names (running heads). */
+const paraTags = (pp: PreparedPara) => `${pp.para.breakBefore ?? ''}|${pp.para.styleNames?.join('\u0001') ?? ''}`;
 function sameParas(m: FrameMemo, prep: Prepared): boolean {
   // A frame that reached the end of the story would continue if paragraphs were added after it.
   if (!m.end && m.count !== prep.paras.length) return false;
   for (let k = 0; k < m.items.length; k++) {
     const pp = prep.paras[m.start.para + k];
-    if (!pp || pp.items !== m.items[k] || pp.para.footnotes !== m.notes[k]) return false;
+    if (!pp || pp.items !== m.items[k] || pp.para.footnotes !== m.notes[k] || paraTags(pp) !== m.tags[k]) return false;
   }
   return true;
 }

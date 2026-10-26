@@ -83,6 +83,14 @@ function defaultPlace(): { surfaceKey: string; x: number; y: number; w: number; 
   return { surfaceKey: pageKey(s.project.pages[pi].id), x: b.x, y: b.y, w: b.w, h: b.h };
 }
 
+/** The head of the text block on a page or master surface (undefined on the cover and jacket). */
+function blockTop(surfaceKey: string): number | undefined {
+  const p = useStore.getState().project;
+  const pi = p.pages.findIndex((pg) => pageKey(pg.id) === surfaceKey);
+  const side = pi >= 0 ? pageSide(p, pi) : surfaceKey.startsWith('master:') ? (surfaceKey.endsWith(':left') ? 'left' : 'right') : null;
+  return side ? textBlock(p.book, side).y : undefined;
+}
+
 export interface ImportOptions {
   place?: { surfaceKey: string; x: number; y: number };
   replaceImageId?: string;
@@ -129,6 +137,11 @@ export async function importFiles(files: File[], opts: ImportOptions = {}): Prom
         // WOFF2 is unpacked here (the font engine's own decoder never starts in a browser).
         if (sig === 'wOF2') bytes = await (await import('../lib/woff2')).woff2ToSfnt(bytes);
         const r = await registerUploadedFont(bytes, file.name).catch((e: Error) => { throw new Error(`not a font this app can read (${e.message})`); });
+        // The same file uploaded again (to be sure it worked) must not store a second copy in the book.
+        if (useStore.getState().project.fonts.some((f) => f.fileName === file.name && f.family === r.family && f.weight === r.weight && f.italic === r.italic)) {
+          messages.push(`Font “${r.family}” is already in this book.`);
+          continue;
+        }
         const meta: UploadedFontMeta = { id: r.faceKey, family: r.family, fileName: file.name, weight: r.weight, italic: r.italic };
         s.update((d) => { d.fonts.push(meta); });
         messages.push(`Font “${r.family}”${r.variable ? ' (variable)' : ''} added.`);
@@ -144,7 +157,7 @@ export async function importFiles(files: File[], opts: ImportOptions = {}): Prom
         const dp = opts.place ? null : defaultPlace();
         const place = opts.place ?? (dp && { surfaceKey: dp.surfaceKey, x: dp.x + dp.w / 2, y: dp.y + dp.h / 2 });
         if (!place) { errors.push(`${file.name}: open a page to place the table on.`); continue; }
-        const el = tableFromText(await file.text(), place, file.name.replace(/\.[^.]+$/, ''));
+        const el = tableFromText(await file.text(), place, file.name.replace(/\.[^.]+$/, ''), blockTop(place.surfaceKey));
         // Beyond this a first placement (and every reload of the autosave) holds the tab for many
         // seconds: refuse with the reason instead of hanging.
         const cells = el ? el.rows.length * el.cols.length : 0;

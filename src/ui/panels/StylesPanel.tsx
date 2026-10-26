@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import clsx from 'clsx';
 import { current, isDraft, type Draft } from 'immer';
 import { Plus, Trash, ChevronRight } from 'lucide-react';
@@ -381,11 +381,8 @@ function StyleRow({ kind, def, open, onToggle }: { kind: 'para' | 'char'; def: P
       {open && (
         <div className="space-y-2 px-2 pb-2 pt-1">
           <BasedOnControls kind={kind} def={def} edit={edit} />
-          <TextInput label="Name" value={def.name} onChange={(v) => {
-            const name = v.replace(/[[\]<>/]/g, '');
-            if (!name.trim()) return;
-            edit((t, d) => { retag(d, kind, t.name, name); t.name = name; });
-          }} />
+          <StyleName name={def.name} taken={((kind === 'para' ? useStore.getState().project.paragraphStyles : useStore.getState().project.characterStyles) ?? []).filter((x) => x.id !== def.id).map((x) => x.name)}
+            onRename={(name) => edit((t, d) => { retag(d, kind, t.name, name); t.name = name; })} />
           <PropsEditor defs={kind === 'para' ? PARA_PROPS : CHAR_PROPS} props={def.props as Record<string, unknown>} onChange={(next) => edit((t) => { t.props = next as Draft<ParagraphStyleProps>; })} />
           <div className="flex items-center justify-between">
             <code className="text-[10px] text-ink-400">{kind === 'para' ? `[${def.name}] …` : `<${def.name}>…</${def.name}>`}</code>
@@ -394,6 +391,41 @@ function StyleRow({ kind, def, open, onToggle }: { kind: 'para' | 'char'; def: P
         </div>
       )}
     </div>
+  );
+}
+
+/**
+ * A style's name, renamed when the field is left (Enter or a click elsewhere). Renaming retags the
+ * stories; done per keystroke, a name passing through another style's ("Caption 2" → "Caption" →
+ * "Caption small") merged the two styles' paragraphs for good. A name already taken is refused.
+ */
+function StyleName({ name, taken, onRename }: { name: string; taken: string[]; onRename: (name: string) => void }) {
+  const [draft, setDraft] = useState<string | null>(null);
+  const cancelled = useRef(false);
+  const commit = () => {
+    const cancel = cancelled.current;
+    cancelled.current = false;
+    if (draft == null || cancel) { setDraft(null); return; }
+    const next = draft.replace(/[[\]<>/]/g, '').trim();
+    setDraft(null);
+    if (!next || next === name) return;
+    if (taken.some((t) => t.toLowerCase() === next.toLowerCase())) { useStore.getState().notify(`There is already a style called “${next}”.`, 'error'); return; }
+    onRename(next);
+  };
+  return (
+    <label className="block">
+      <span className="block truncate text-[10.5px] text-ink-400">Name</span>
+      <input
+        className="mt-0.5 h-7 w-full rounded-[5px] border border-ink-700 bg-ink-900 px-2 text-[11.5px] text-ink-100 outline-none focus:border-ink-400"
+        value={draft ?? name}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+          if (e.key === 'Escape') { cancelled.current = true; (e.target as HTMLInputElement).blur(); }
+        }}
+      />
+    </label>
   );
 }
 

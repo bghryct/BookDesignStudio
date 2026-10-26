@@ -4,7 +4,7 @@ import type { BookSpec, JacketFinish, PanelGrid, Project } from '../../model/typ
 import { useStore } from '../../store/store';
 import { coverGrid, jacketGrid, computeJacket, computeBinding, DEFAULT_JACKET, DEFAULT_PANEL_GRID } from '../../engine/binding';
 import { computeGrid, panelGridLines, textBlock } from '../../engine/grid';
-import { spreadsOf, pageKey, pageSide, COVER_KEY, JACKET_KEY, guidesOf } from '../../model/surfaces';
+import { spreadsOf, pageKey, masterKey, pageSide, COVER_KEY, JACKET_KEY, guidesOf } from '../../model/surfaces';
 import { Section, Row, NumberField, Select, Toggle, ColorField, Button, Hint, Segmented } from '../controls';
 import { enableJacket, starterJacket } from '../jacket';
 import { cloneElement } from '../../model/factory';
@@ -91,6 +91,7 @@ export function GuidesSection() {
   const project = useStore((s) => s.project);
   const view = useStore((s) => s.view);
   const spread = useStore((s) => s.spread);
+  const masterEdit = useStore((s) => s.masterEdit);
   const s = useStore.getState;
   const [cols, setCols] = useState(4);
   const [rows, setRows] = useState(0);
@@ -106,6 +107,11 @@ export function GuidesSection() {
       const g = panelGridLines(panels, view === 'cover' ? coverGrid(spec) : jacketGrid(spec), H);
       const boxes = fit === 'margins' ? g.blocks.filter((b) => b.panel !== 'spine') : panels.filter((p) => !p.id.startsWith('hinge') && !p.id.endsWith('-fold') && p.id !== 'spine').map((p) => ({ x: p.x, y: 0, w: p.w, h: H }));
       return [{ key: view === 'cover' ? COVER_KEY : JACKET_KEY, box: boxes }];
+    }
+    // Editing a master: its two pages, not the spread hidden behind it.
+    const master = masterEdit ? project.masters.find((m) => m.id === masterEdit.id) : null;
+    if (master) {
+      return (['left', 'right'] as const).map((side) => ({ key: masterKey(master.id, side), box: [fit === 'margins' ? textBlock(spec, side) : { x: 0, y: 0, w: spec.trimW, h: spec.trimH }] }));
     }
     const sp = spreadsOf(project)[spread];
     return [sp?.left, sp?.right].filter((i): i is number => i != null).map((pi) => {
@@ -161,7 +167,7 @@ export function GuidesSection() {
           <NumberField label="Gutter" length value={gutter} min={0} onChange={setGutter} />
           <div className="flex items-end"><Segmented size="sm" value={fit} onChange={setFit} options={[{ value: 'margins', label: 'Margins' }, { value: 'page', label: view === 'spreads' ? 'Page' : 'Panel' }]} /></div>
         </Row>
-        <Button className="mt-2 w-full" onClick={create}>Add to {view === 'cover' ? 'cover panels' : view === 'jacket' ? 'jacket panels' : 'this spread'}</Button>
+        <Button className="mt-2 w-full" onClick={create}>Add to {view === 'cover' ? 'cover panels' : view === 'jacket' ? 'jacket panels' : masterEdit ? 'this master' : 'this spread'}</Button>
       </div>
       <Button variant="danger" className="w-full" disabled={!count} onClick={() => s().clearGuides(keys().map((k) => k.key))}>Clear {count} guide{count === 1 ? '' : 's'} here</Button>
     </Section>

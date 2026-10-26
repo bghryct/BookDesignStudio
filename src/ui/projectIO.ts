@@ -103,7 +103,11 @@ function resolvePdfSources(project: Project): void {
 
 /** Parse a project file (or a bare project), repaired so that nothing in it can blank the app. */
 async function readProjectFile(file: File, repairs?: { count: number }): Promise<{ project: Project; fonts: ProjectFile['fonts'] }> {
-  const data = JSON.parse(await file.text()) as ProjectFile | Project | null;
+  const raw = await file.text();
+  if (!raw.trim()) throw new Error('The file is empty.');
+  let data: ProjectFile | Project | null;
+  // The parser's own message ("Unexpected token 'P'…") means nothing to a student.
+  try { data = JSON.parse(raw) as ProjectFile | Project | null; } catch { throw new Error('Not a Book Design Studio project: the file is not a .bds.json project (another kind of file, or a download that did not finish).'); }
   const pf = data && typeof data === 'object' && 'format' in data ? data : { project: data, fonts: [] };
   const project = normalizeProject(pf.project, repairs);
   resolvePdfSources(project);
@@ -131,6 +135,9 @@ export async function loadProjectFile(file: File) {
   s.replaceProject(project);
   // The browser keeps one book: opening a file can be undone, back to the book it replaced.
   useStore.setState({ past: [previous] });
+  // Uploaded fonts the file did not carry (a safe-mode download has none) come from this
+  // browser's store, as on a reload, instead of standing in as the default face.
+  await restoreProjectFonts(useStore.getState().project).catch(() => undefined);
   const notes = [
     repairs.count ? `repaired ${repairs.count} problem${repairs.count === 1 ? '' : 's'} in this project` : '',
     badFonts ? `${badFonts} uploaded font${badFonts === 1 ? '' : 's'} could not be read (the default face stands in)` : '',
@@ -204,5 +211,7 @@ export async function insertProjectFile(file: File, afterIndex: number, opts: { 
     for (const f of src.fonts ?? []) if (!d.fonts.some((x) => x.id === f.id)) d.fonts.push(f);
     if (opts.section && pages.length) d.sections = [...(d.sections ?? []).filter((x) => x.pageId !== pages[0].id), { pageId: pages[0].id, start: 1, style: 'arabic', marker: src.book?.title || baseName }];
   });
+  // Its uploaded fonts that the file did not carry, from this browser's store.
+  await restoreProjectFonts(src).catch(() => undefined);
   return { pages: pages.length, styles: newStyles, masters: masters.length };
 }

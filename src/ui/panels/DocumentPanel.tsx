@@ -257,7 +257,9 @@ function SpellingSection() {
   const [res, setRes] = useState<{ results: Misspelling[]; skipped: number; words: number } | null>(null);
   const run = async () => {
     setBusy(true);
-    try { setRes(await checkSpelling(useStore.getState().project)); } finally { setBusy(false); }
+    try { setRes(await checkSpelling(useStore.getState().project)); }
+    catch (e) { useStore.getState().notify(`The spelling check could not run: ${(e as Error).message || 'the dictionary did not load'}.`, 'error'); }
+    finally { setBusy(false); }
   };
   const learn = (w: string) => { useStore.getState().update((d) => { d.spellingDictionary = [...new Set([...(d.spellingDictionary ?? []), w])]; }); setRes((r) => r && { ...r, results: r.results.filter((x) => x.word !== w) }); };
   const ignore = (w: string) => setRes((r) => r && { ...r, results: r.results.filter((x) => x.word !== w) });
@@ -266,14 +268,17 @@ function SpellingSection() {
     const byEl = new Map<string, number[]>();
     for (const w of m.where) byEl.set(w.elementId, [...(byEl.get(w.elementId) ?? []), w.index]);
     const s = useStore.getState();
+    const done = new Map<string, number[]>();
     s.update((d) => {
       const visit = (els: Element[]) => {
         for (const e of els) {
           const idx = e.type === 'text' ? byEl.get(e.id) : undefined;
           if (!idx || e.type !== 'text') continue;
           let t = e.text;
-          for (const i of [...idx].sort((a, b) => b - a)) if (t.slice(i, i + m.word.length) === m.word) t = t.slice(0, i) + to + t.slice(i + m.word.length);
+          const at: number[] = [];
+          for (const i of [...idx].sort((a, b) => b - a)) if (t.slice(i, i + m.word.length) === m.word) { t = t.slice(0, i) + to + t.slice(i + m.word.length); at.push(i); }
           e.text = t;
+          done.set(e.id, at);
         }
       };
       for (const p of d.pages) visit(p.elements as Element[]);
@@ -281,7 +286,14 @@ function SpellingSection() {
       visit(d.cover.elements as Element[]);
       visit((d.jacket?.elements ?? []) as Element[]);
     });
-    setRes((r) => r && { ...r, results: r.results.filter((x) => x !== m) });
+    // Words further on in the same stories moved with the change: keep their places right, or a
+    // later Change (or Find) missed them while the list said they were fixed.
+    const delta = to.length - m.word.length;
+    const shift = (w: Misspelling['where'][number]) => {
+      const at = done.get(w.elementId);
+      return at && delta ? { ...w, index: w.index + delta * at.filter((i) => i < w.index).length } : w;
+    };
+    setRes((r) => r && { ...r, results: r.results.filter((x) => x !== m).map((x) => ({ ...x, where: x.where.map(shift) })) });
   };
   const find = (m: Misspelling) => {
     const w = m.where[0];

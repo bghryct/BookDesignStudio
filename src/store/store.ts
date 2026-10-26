@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { produce, type Draft } from 'immer';
 import type { BrushType, Element, ID, Project, SurfaceKey } from '../model/types';
 import { createDefaultProject } from '../model/defaults';
-import { findElement, surfaceElementsDraft, spreadsOf } from '../model/surfaces';
+import { findElement, surfaceElementsDraft, spreadsOf, releaseTextFrames } from '../model/surfaces';
 import { cloneElement } from '../model/factory';
 import { releaseTableFrames } from '../model/table';
 import { idbGet, idbSet } from '../lib/idb';
@@ -105,6 +105,18 @@ interface State {
 const HISTORY_LIMIT = 150;
 let lastHistoryAt = 0;
 
+/**
+ * What the view keeps after undo or redo: the spread stays within the book (undoing Flow text
+ * removed the pages it was showing), and a master that no longer exists stops being edited.
+ */
+function viewFor(p: Project, s: { spread: number; masterEdit: MasterEdit | null }): Partial<Pick<State, 'spread' | 'masterEdit'>> {
+  const out: Partial<Pick<State, 'spread' | 'masterEdit'>> = {};
+  const last = Math.max(0, spreadsOf(p).length - 1);
+  if (s.spread > last) out.spread = last;
+  if (s.masterEdit && !p.masters.some((m) => m.id === s.masterEdit!.id)) out.masterEdit = null;
+  return out;
+}
+
 export const useStore = create<State>((set, get) => ({
   project: createDefaultProject(),
   past: [],
@@ -157,12 +169,12 @@ export const useStore = create<State>((set, get) => ({
     let rest = past.slice(0, -1);
     // Skip a checkpoint that equals the present (a click without a drag).
     if (prev === project && rest.length) { prev = rest[rest.length - 1]; rest = rest.slice(0, -1); }
-    set({ project: prev, past: rest, future: [project, ...future], rev: get().rev + 1 });
+    set({ project: prev, past: rest, future: [project, ...future], rev: get().rev + 1, ...viewFor(prev, get()) });
   },
   redo: () => {
     const { past, project, future } = get();
     if (!future.length) return;
-    set({ project: future[0], past: [...past, project], future: future.slice(1), rev: get().rev + 1 });
+    set({ project: future[0], past: [...past, project], future: future.slice(1), rev: get().rev + 1, ...viewFor(future[0], get()) });
   },
   replaceProject: (p) => {
     // Projects from outside (files, older versions) are repaired first; throws when it has no pages.
@@ -214,6 +226,7 @@ export const useStore = create<State>((set, get) => ({
     if (!ids.size) return;
     get().update((d) => {
       releaseTableFrames(d as Project, ids);
+      releaseTextFrames(d as Project, ids);
       const strip = (els: Draft<Element>[]) => {
         for (let i = els.length - 1; i >= 0; i--) if (ids.has(els[i].id) && !els[i].locked) els.splice(i, 1);
         // Unthread links that pointed at removed frames.
@@ -304,19 +317,25 @@ export async function rawAutosave(): Promise<unknown> {
 
 /*
  * Safe mode. A book that freezes or crashes the tab while it opens would do so again on every
- * reload, so opening is marked as in progress until the book is on screen. If the last opening
- * never finished (or the address ends in ?safe), the next start does not open the autosave.
+ * reload, so opening is marked as in progress until the book is on screen. If the last opening in
+ * this tab never finished (or the address ends in ?safe), the next start does not open the
+ * autosave. The mark is per tab (session storage survives a reload, even of a crashed tab), so
+ * another tab of the app opening at the same moment never sets it off.
  */
 const OPENING = 'bds.opening';
 export function startInSafeMode(): boolean {
   if (/[?&]safe\b/.test(location.search)) return true;
   try {
-    const t = Number(localStorage.getItem(OPENING));
+    const t = Number(sessionStorage.getItem(OPENING));
     return t > 0 && Date.now() - t < 10 * 60_000;
   } catch { return false; }
 }
 export function markOpening(on: boolean) {
-  try { if (on) localStorage.setItem(OPENING, String(Date.now())); else localStorage.removeItem(OPENING); } catch { /* storage blocked */ }
+  try { if (on) sessionStorage.setItem(OPENING, String(Date.now())); else sessionStorage.removeItem(OPENING); } catch { /* storage blocked */ }
+}
+/** Safe mode keeps the book that would not open under its own key too, so nothing overwrites it. */
+export async function keepRecoveredAutosave(raw: unknown): Promise<void> {
+  try { await idbSet('projects', 'autosave-recovered', raw); } catch { /* storage full: the download still has it */ }
 }
 
 export async function loadAutosave(): Promise<Project | null> {

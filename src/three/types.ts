@@ -1,5 +1,6 @@
 import type { BookSpec, PaperMaterial } from '../model/types';
 import type { BindingCalc, JacketCalc } from '../engine/binding';
+import type { WrapRegion } from './regions';
 
 export interface PageInfo {
   material: PaperMaterial;          // 'paper' | 'vellum' | 'colored' | 'kraft'
@@ -131,9 +132,9 @@ export interface BookSceneOptions {
 export interface TextureDemand {
   /** Page faces in view (index 0 = page 1), sharpest need first. */
   pages: { index: number; pxPerPt: number }[];
-  /** Front panel of the cover (case board, soft cover) and of the dust jacket. */
-  coverFront: number;
-  jacketFront: number;
+  /** Regions of the cover (case boards, soft cover) and of the dust jacket in view: front, back, spine, flaps. */
+  cover: Partial<Record<WrapRegion, number>>;
+  jacket: Partial<Record<WrapRegion, number>>;
 }
 
 /**

@@ -1,4 +1,4 @@
-import type { Element, ID, Project, SurfaceKey } from './types';
+import type { Element, ID, Project, SurfaceKey, TextElement } from './types';
 import type { PageSide } from '../engine/grid';
 
 export interface SpreadSlot { left: number | null; right: number | null }
@@ -111,6 +111,42 @@ export function findElement(project: Project, id: ID): Located | null {
   const j = jEls.findIndex((e) => e.id === id);
   if (j >= 0) return { key: JACKET_KEY, el: jEls[j], index: j, pageIndex: null };
   return null;
+}
+
+/**
+ * Text frames about to be deleted leave their story whole (InDesign's rule): the frames before and
+ * after them in the thread are linked up, and a deleted first frame hands the story (its text,
+ * style and paragraph style) to the next frame that stays. Without this, deleting a page in the
+ * middle of a flowed story cut the story off there, and deleting its first page lost the text.
+ * Locked frames are not deleted, so they stay in the thread unless `includeLocked` is set.
+ */
+export function releaseTextFrames(project: Project, ids: Set<string>, includeLocked = false): void {
+  const all: TextElement[] = [];
+  const visit = (els: Element[]) => { for (const e of els) if (e.type === 'text') all.push(e); };
+  project.pages.forEach((pg) => visit(pg.elements));
+  project.masters.forEach((m) => { visit(m.left); visit(m.right); });
+  visit(project.cover.elements);
+  if (project.jacket) visit(project.jacket.elements);
+  const byId = new Map(all.map((t) => [t.id, t]));
+  const gone = (t: TextElement) => ids.has(t.id) && (includeLocked || !t.locked);
+  const hasPrev = new Set<string>();
+  for (const t of all) if (t.flowNext && byId.has(t.flowNext) && t.flowNext !== t.id) hasPrev.add(t.flowNext);
+  for (const head of all) {
+    if (hasPrev.has(head.id) || !head.flowNext || !byId.has(head.flowNext)) continue;
+    const chain: TextElement[] = [];
+    const seen = new Set<string>();
+    for (let cur: TextElement | undefined = head; cur && !seen.has(cur.id); cur = cur.flowNext ? byId.get(cur.flowNext) : undefined) { chain.push(cur); seen.add(cur.id); }
+    if (!chain.some(gone)) continue;
+    const keep = chain.filter((t) => !gone(t));
+    if (!keep.length) continue;
+    if (gone(head)) {
+      const next = keep[0];
+      next.text = head.text;
+      next.style = JSON.parse(JSON.stringify(head.style));
+      next.paraStyle = head.paraStyle ?? null;
+    }
+    keep.forEach((t, i) => { t.flowNext = keep[i + 1]?.id ?? null; });
+  }
 }
 
 export function pageIndexOfKey(project: Project, key: SurfaceKey): number | null {

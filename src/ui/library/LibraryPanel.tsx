@@ -22,7 +22,10 @@ function Thumb({ item, project }: { item: LibraryItem; project: Project }) {
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
-    const io = new IntersectionObserver((entries) => { if (entries.some((e) => e.isIntersecting)) { setVisible(true); io.disconnect(); } }, { rootMargin: '200px' });
+    // Measured against the scrolling panel (it clips the list), or the margin draws nothing ahead.
+    let root: HTMLElement | null = el.parentElement;
+    while (root && !/^(auto|scroll)$/.test(getComputedStyle(root).overflowY)) root = root.parentElement;
+    const io = new IntersectionObserver((entries) => { if (entries.some((e) => e.isIntersecting)) { setVisible(true); io.disconnect(); } }, { root, rootMargin: '200px' });
     io.observe(el);
     return () => io.disconnect();
   }, []);

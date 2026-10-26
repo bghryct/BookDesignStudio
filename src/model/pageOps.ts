@@ -4,7 +4,7 @@ import { useStore } from '../store/store';
 import { makePage, makeText, makeMaster, cloneElement, textStyle } from './factory';
 import { releaseTableFrames } from './table';
 import { textBlock } from '../engine/grid';
-import { pageSide, spreadIndexOfPage } from './surfaces';
+import { pageSide, spreadIndexOfPage, releaseTextFrames } from './surfaces';
 import { layoutStory, frameSpecOf, type FrameSpec } from '../engine/textLayout';
 
 const st = () => useStore.getState();
@@ -22,6 +22,8 @@ export function deletePage(index: number) {
   const ids = new Set(p.pages[index].elements.map((e) => e.id));
   st().update((d) => {
     releaseTableFrames(d as Project, ids);
+    // Every frame on the page goes, locked or not; the story runs on in the frames that stay.
+    releaseTextFrames(d as Project, ids, true);
     d.pages.splice(index, 1);
     for (const pg of d.pages) for (const e of pg.elements) if (e.type === 'text' && e.flowNext && ids.has(e.flowNext)) e.flowNext = null;
   });

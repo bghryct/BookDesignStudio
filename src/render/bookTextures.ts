@@ -11,6 +11,7 @@ import { jacketSpec, type BindingCalc, type JacketCalc } from '../engine/binding
 import { useFontStore } from '../engine/fonts';
 import type { BookTextures, FinishKey, PageInfo, PanelArt, PanelMaps, TextureDemand } from '../three';
 import { finishParams, heightBlurRadius, JACKET_FINISH, type FinishParams } from '../three/finishing';
+import { WRAP_REGIONS, regionExtent, type WrapRegion } from '../three/regions';
 import { compileCover, compileJacket, compilePage, elementMatrix } from './compile';
 import { lowerPrims, preloadImages, renderToCanvas } from './canvasBackend';
 import { applyMatrix, type Prim } from './primitives';
@@ -345,22 +346,22 @@ export function renderPageArt(project: Project, index: number, pxPerPt: number, 
 }
 
 /**
- * Front panel of the cover (or jacket) rasterised at `pxPerPt` with its finishes: finished maps
- * from a raster worker, or the art and masks for the main thread to composite. `maxPx`: the
- * longest edge the GPU takes (the maps are also kept under 80 MP).
+ * A region (front, back, spine, flap) of the cover (or jacket) rasterised at `pxPerPt` with its
+ * finishes: finished maps from a raster worker, or the art and masks for the main thread to
+ * composite. `maxPx`: the longest edge the GPU takes (the maps are also kept under 80 MP).
  */
-export async function renderPanelArt(project: Project, calc: BindingCalc, jacket: JacketCalc | null, which: 'cover' | 'jacket', pxPerPt: number, o: ArtOptions & { maxPx?: number } = {}): Promise<PanelArt | null> {
-  const m = 2; // pt of the neighbouring panels, so filtering at the panel's edges stays clean
+export async function renderPanelArt(project: Project, calc: BindingCalc, jacket: JacketCalc | null, which: 'cover' | 'jacket', region: WrapRegion, pxPerPt: number, o: ArtOptions & { maxPx?: number } = {}): Promise<PanelArt | null> {
+  const m = 2; // pt of the neighbouring panels, so filtering at the region's edges stays clean
   let box: Box, w: Wrapper;
   if (which === 'cover') {
-    const P = calc.panels.find((p) => p.id === 'front');
+    const P = regionExtent(calc.panels, region);
     if (!P) return null;
     const x0 = Math.max(-calc.wrap, P.x - m), x1 = Math.min(calc.coverW + calc.wrap, P.x + P.w + m);
     box = { x: x0, y: -m, w: x1 - x0, h: calc.coverH + 2 * m };
     w = coverWrapper(project, calc);
   } else {
     if (!jacket) return null;
-    const P = jacket.panels.find((p) => p.id === 'front');
+    const P = regionExtent(jacket.panels, region);
     if (!P) return null;
     const x0 = Math.max(-jacket.bleed, P.x - m), x1 = Math.min(jacket.width + jacket.bleed, P.x + P.w + m);
     box = { x: x0, y: -m, w: x1 - x0, h: jacket.height + 2 * m };
@@ -381,20 +382,21 @@ export async function renderPanelArt(project: Project, calc: BindingCalc, jacket
 export interface RefinerTarget {
   /** Takes ownership of an ImageBitmap. */
   setPageArt(index: number, art: Art | null): void;
-  setPanelArt(which: 'cover' | 'jacket', art: PanelArt | null): void;
+  setPanelArt(which: 'cover' | 'jacket', region: WrapRegion, art: PanelArt | null): void;
   readonly maxTextureSize: number;
 }
 
-interface Job { kind: 'page' | 'cover' | 'jacket'; index: number; ppp: number; need: number }
+/** Sharpening a page (`index`) or a region of the cover / jacket wrap. */
+interface Job { kind: 'page' | 'cover' | 'jacket'; index: number; region: WrapRegion; ppp: number; need: number }
 
-const keyOf = (j: Job) => (j.kind === 'page' ? `page:${j.index}` : `${j.kind}:0`);
+const keyOf = (j: Job) => (j.kind === 'page' ? `page:${j.index}` : `${j.kind}:${j.region}`);
 
 /** A surface being sharpened. */
 interface Flight { ppp: number; live: boolean; ctrl: AbortController; done: Promise<void> }
 
 /**
- * Keeps the book's art as sharp as the view needs: pages in view, the front cover and the
- * jacket's front panel are re-rasterised at the density the camera asks for, and dropped back to
+ * Keeps the book's art as sharp as the view needs: pages in view, and every region of the cover
+ * and jacket (front, back, spine, flaps) are re-rasterised at the density the camera asks for, and dropped back to
  * the base art when they leave the view. The raster workers draw several surfaces at once; the
  * main thread only compiles and lowers them, in short steps between frames, and work the view no
  * longer needs is cancelled. Before a still or a video, `prepare` sharpens everything the export
@@ -481,7 +483,7 @@ export class TextureRefiner {
   private drop(key: string): void {
     const [kind, idx] = key.split(':');
     if (kind === 'page') this.target.setPageArt(Number(idx), null);
-    else this.target.setPanelArt(kind as 'cover' | 'jacket', null);
+    else this.target.setPanelArt(kind as 'cover' | 'jacket', idx as WrapRegion, null);
   }
 
   /** Jobs for a demand, most needed first, within the quality's caps and memory budgets. */
@@ -502,9 +504,9 @@ export class TextureRefiner {
     }
     for (const q of pages) {
       const ppp = Math.min(pageCap, quantize(q.want));
-      if (ppp > this.base.page * 1.3) jobs.push({ kind: 'page', index: q.index, ppp, need: q.want / Math.max(1e-6, this.base.page) });
+      if (ppp > this.base.page * 1.3) jobs.push({ kind: 'page', index: q.index, region: 'front', ppp, need: q.want / Math.max(1e-6, this.base.page) });
     }
-    const panel = (kind: 'cover' | 'jacket', need: number, w: number, h: number, base: number) => {
+    const panel = (kind: 'cover' | 'jacket', region: WrapRegion, need: number, w: number, h: number, base: number) => {
       if (need <= 0) return;
       let want = Math.min(Math.min(caps.panel, maxTex) / Math.max(w, h), need * OVERSAMPLE);
       // The live view keeps a panel's maps smaller: uploading hundreds of MB stalls the GPU for
@@ -513,12 +515,14 @@ export class TextureRefiner {
       if (w * h * want * want > budget) want = Math.sqrt(budget / (w * h));
       // Rounding up to the next step must not overshoot the budget (it could double it).
       const ppp = Math.min(Math.min(caps.panel, maxTex) / Math.max(w, h), quantize(want), Math.sqrt(budget / (w * h)));
-      if (ppp > base * 1.3) jobs.push({ kind, index: 0, ppp, need: want / Math.max(1e-6, base) });
+      if (ppp > base * 1.3) jobs.push({ kind, index: 0, region, ppp, need: want / Math.max(1e-6, base) });
     };
-    const front = calc.panels.find((q) => q.id === 'front');
-    if (front) panel('cover', d.coverFront, front.w, calc.coverH, this.base.cover);
-    const jf = this.jacket?.panels.find((q) => q.id === 'front');
-    if (jf && this.jacket) panel('jacket', d.jacketFront, jf.w, this.jacket.height, this.base.jacket);
+    for (const region of WRAP_REGIONS) {
+      const c = regionExtent(calc.panels, region);
+      if (c) panel('cover', region, d.cover[region] ?? 0, c.w, calc.coverH, this.base.cover);
+      const j = this.jacket ? regionExtent(this.jacket.panels, region) : null;
+      if (j && this.jacket) panel('jacket', region, d.jacket[region] ?? 0, j.w, this.jacket.height, this.base.jacket);
+    }
     return jobs.sort((a, b) => b.need - a.need);
   }
 
@@ -557,10 +561,10 @@ export class TextureRefiner {
         if (!live()) { closeArt(art); return; }
         this.target.setPageArt(job.index, art);
       } else {
-        const art = await renderPanelArt(p, calc, this.jacket, job.kind, job.ppp, { ...o, maxPx: this.target.maxTextureSize });
+        const art = await renderPanelArt(p, calc, this.jacket, job.kind, job.region, job.ppp, { ...o, maxPx: this.target.maxTextureSize });
         if (!art) return;
         if (!live()) { closePanel(art); return; }
-        this.target.setPanelArt(job.kind, art);
+        this.target.setPanelArt(job.kind, job.region, art);
       }
       this.applied.set(key, { ppp: job.ppp, live: f.live, seen: performance.now() / 1000 });
     } catch (e) {

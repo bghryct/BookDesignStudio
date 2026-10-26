@@ -14,7 +14,7 @@ import type {
 import { Section, Row, NumberField, Slider, Select, Toggle, ColorField, TextInput, Button, IconButton, Hint, Segmented } from '../controls';
 import { PATTERN_PARAMS, OVERPRINT_PARAMS, ORNAMENT_PARAMS } from '../../engine/generators';
 import { getFamilies } from '../../engine/fonts';
-import { threadOf, layoutText, contextForElement, crossesGutter } from '../../render/compile';
+import { threadOf, layoutText, contextForElement, crossesGutter, elementMatrix } from '../../render/compile';
 import { importFiles, switchPdfPage } from '../importFiles';
 import { autoFlow } from '../../model/pageOps';
 import { parseSvgCached, svgMarkupFromDataUrl, svgPrims } from '../../render/svgImport';
@@ -509,15 +509,18 @@ function TypeSpecific({ el, project }: { el: Element; project: Project }) {
                 else if (p.t === 'text') texts++;
               }
             };
-            walk(prims, [1, 0, 0, 1, 0, 0]);
+            // The graphic's own placement (position, rotation, flips) goes into the paths, so they
+            // stay where the graphic was drawn; its opacity, blend, finish and cover panel come along.
+            walk(prims, elementMatrix(e));
             const solid = (paint: Paint | null | undefined) => (typeof paint === 'string' ? paint : paint?.stops?.length ? paint.stops[Math.floor(paint.stops.length / 2)].color : null);
             const paths = flat.map(({ p, m }) => {
               const segs = transformSegs(parsePath(p.d), m);
               const b = pathBounds(segs);
               const d = serialize(transformSegs(segs, [1, 0, 0, 1, -b.x, -b.y]));
               const scale = Math.sqrt(Math.abs(m[0] * m[3] - m[1] * m[2])) || 1;
-              return makePath({ name: 'Path', x: e.x + b.x, y: e.y + b.y, w: Math.max(0.5, b.w), h: Math.max(0.5, b.h), vw: Math.max(0.5, b.w), vh: Math.max(0.5, b.h), d,
-                fill: solid(p.fill), stroke: solid(p.stroke), strokeWidth: (p.strokeWidth ?? 1) * scale, fillRule: p.fillRule ?? 'nonzero', rotation: 0 });
+              return makePath({ name: 'Path', x: b.x, y: b.y, w: Math.max(0.5, b.w), h: Math.max(0.5, b.h), vw: Math.max(0.5, b.w), vh: Math.max(0.5, b.h), d,
+                fill: solid(p.fill), stroke: solid(p.stroke), strokeWidth: (p.strokeWidth ?? 1) * scale, fillRule: p.fillRule ?? 'nonzero', rotation: 0,
+                opacity: e.opacity, blend: e.blend, finish: e.finish ?? 'none', anchor: e.anchor, spreadAbove: e.spreadAbove });
             });
             s().update((d) => {
               const arr = surfaceElementsDraft(d as Project, loc.key)!;
@@ -705,7 +708,9 @@ function PdfPageControls({ e }: { e: ImageElement }) {
   const goTo = async (page: number) => {
     setBusy(`Rendering page ${page}…`);
     // Keeps one copy of the PDF (see switchPdfPage).
-    try { await switchPdfPage(e.id, page); } finally { setBusy(null); }
+    try { await switchPdfPage(e.id, page); }
+    catch (err) { useStore.getState().notify(`Page ${page} of the PDF could not be shown: ${(err as Error).message}`, 'error'); }
+    finally { setBusy(null); }
   };
   const flowText = async () => {
     setBusy('Reading the PDF’s text…');
@@ -716,6 +721,9 @@ function PdfPageControls({ e }: { e: ImageElement }) {
       const p = useStore.getState().project;
       const n = autoFlow(r.text, { afterIndex: p.pages.length - 1, masterId: p.masters[0]?.id ?? null, startRecto: true });
       useStore.getState().notify(`${r.paragraphs} paragraphs from ${r.pages} PDF pages flowed into ${n} new page${n === 1 ? '' : 's'}. Check tables, notes and columns by eye.`);
+    } catch (err) {
+      // A damaged or protected PDF: say so instead of the button doing nothing.
+      useStore.getState().notify(`The PDF's text could not be read: ${(err as Error).message}`, 'error');
     } finally { setBusy(null); }
   };
   return (

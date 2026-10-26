@@ -226,24 +226,33 @@ function contextId(key: string): number {
 const LIST_RE = /^((?: {2}|\t)*)(?:([-•▪◦])|(\d{1,3}[.)]|[a-zA-Z]\)))[ \t]+(?=\S)/;
 
 /**
- * True for a pattern with a repeated group that itself repeats, like (a+)+ or (\w*)*: on a long
- * paragraph such a pattern can backtrack for minutes and freeze the page, so it is not run.
+ * True for a pattern that can backtrack for minutes on a long paragraph and freeze the page, so it
+ * is not run: a repeated group that itself repeats, like (a+)+ or (\w*)*, or a repeated group of
+ * alternatives that can match the same text, like (.|\s)* or (\w|\d)+.
  */
 export function riskyPattern(src: string): boolean {
-  const open: boolean[] = [];
+  const open: { q: boolean; alt: boolean; broad: boolean }[] = [];
   let inClass = false;
   const quant = (k: number) => src[k] === '+' || src[k] === '*' || (src[k] === '{' && /^\{\d*,/.test(src.slice(k, k + 12)));
+  const top = () => open[open.length - 1];
   for (let i = 0; i < src.length; i++) {
     const c = src[i];
-    if (c === '\\') { i++; continue; }
+    if (c === '\\') {
+      if (open.length && /[sSwWdD]/.test(src[i + 1] ?? '')) top().broad = true;
+      i++;
+      continue;
+    }
     if (inClass) { if (c === ']') inClass = false; continue; }
-    if (c === '[') inClass = true;
-    else if (c === '(') open.push(false);
+    if (c === '[') { inClass = true; if (open.length) top().broad = true; }
+    else if (c === '.') { if (open.length) top().broad = true; }
+    else if (c === '|') { if (open.length) top().alt = true; }
+    else if (c === '(') open.push({ q: false, alt: false, broad: false });
     else if (c === ')') {
-      const inner = open.pop() ?? false, q = quant(i + 1);
-      if (inner && q) return true;
-      if (open.length && (inner || q)) open[open.length - 1] = true;
-    } else if (open.length && quant(i)) open[open.length - 1] = true;
+      const g = open.pop() ?? { q: false, alt: false, broad: false };
+      const q = quant(i + 1);
+      if (q && (g.q || (g.alt && g.broad))) return true;
+      if (open.length) { top().q ||= g.q || q; top().broad ||= g.broad; }
+    } else if (open.length && quant(i)) top().q = true;
   }
   return false;
 }

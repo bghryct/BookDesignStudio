@@ -258,13 +258,18 @@ export function ensureFamily(id: string): Promise<void> {
  * Wait for every family load started so far, and for those they start in turn (an export compiles
  * its pages once, which asks for the fonts they use, then waits here before compiling for real).
  */
-export async function fontsSettled(): Promise<void> {
-  for (let round = 0; round < 4; round++) {
-    const pending = [...familyLoads.values()];
-    await Promise.allSettled(pending);
-    await Promise.resolve();
-    if (familyLoads.size === pending.length) return;
-  }
+export async function fontsSettled(timeoutMs = 15000): Promise<void> {
+  // A font that never arrives (a stalled download) must not hold an export forever.
+  const deadline = new Promise<void>((r) => setTimeout(r, timeoutMs));
+  const all = (async () => {
+    for (let round = 0; round < 4; round++) {
+      const pending = [...familyLoads.values()];
+      await Promise.allSettled(pending);
+      await Promise.resolve();
+      if (familyLoads.size === pending.length) return;
+    }
+  })();
+  await Promise.race([all, deadline]);
 }
 
 /* -------------------------------------------------------------------------- */

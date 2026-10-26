@@ -111,7 +111,7 @@ One shaping engine (fontkit) measures with the same font files the browser rende
 - **Fit the frame to its text**: its height, its width (labels and heads; the aligned edge stays put), or both.
 - **Columns**: a fixed number, a fixed width (as many as fit), or flexible up to a maximum width.
 - **Text wrap** around any item: its box, its shape, or jumping it, on both sides, the larger side, left or right, with an offset.
-- Threads across pages. Running heads with `{chapter}`, `{title}` and `{page:roman}`; also `{lastpage}` and `{date}`.
+- Threads across pages. Deleting a frame or a page keeps the story whole: it runs on in the frames that stay. Threading from a frame in the middle of a story puts the new frame into the thread. Running heads with `{chapter}`, `{title}` and `{page:roman}`; also `{lastpage}` and `{date}`.
 - **Type on a path**: any path can carry a line of type that follows its curves, positioned along the path, on or below it, with InDesign's effects: rainbow, skew, 3D ribbon, stair step and gravity.
 - **Notes**: `{note:…}` keeps an editorial note in the story without setting it.
 
@@ -172,6 +172,9 @@ One shaping engine (fontkit) measures with the same font files the browser rende
   - character and paragraph formatting popovers
   - an Insert menu for breaks, spaces, tabs, footnotes, anchors and cross-references, conditional text, ruby, tokens and typographic characters
   - ⇧↵ for a line break, ⇥ for a tab, ⌥←/→ for kerning
+  - a header you drag to move it (double-click puts it back beside the frame), a corner to resize it, and a button to fill the canvas. It remembers where it was put, its size and its text size
+  - ⌘F to find in the story (↵ / ⇧↵ next and previous, Esc selects the match), ⌘G in the text
+  - word, character and paragraph counts, and the paragraph at the cursor with its style
 - **Generate index** (Document panel): mark terms with `{ix:term}` or `{ix:term!subterm}`. The index lists each term with the pages it actually lands on, folds consecutive pages into ranges, groups terms by letter and sets them in two columns.
 - **Generate contents page** (Document panel): finds chapter titles and `#`/`##` headings, including those inside threaded stories, records the page each one is actually set on, and sets the contents with dot leaders. Run it again to refresh the page numbers.
 - **Find / change** across every story in the book, with GREP, `$1` groups and one-click clean-ups (straight → curly quotes, double spaces, ranges → en dashes, thin spaces before French punctuation).
@@ -252,7 +255,7 @@ Current Chrome, Edge, Safari and Firefox on desktop. MP4/WebM encoding uses WebC
 ## If the app won't open your book
 - **Something can't be drawn:** a panel or view that fails shows *Undo last change*. If the whole app fails, it offers *Download the autosaved project* and *Start a blank project*.
 - **Damaged projects:** a project with missing or broken values is repaired when it opens, and a message says how many problems were fixed.
-- **Freezes or crashes while opening:** if the tab froze or crashed while opening the autosaved book, the next start is in **safe mode**. The book is downloaded as `autosaved-book.bds.json` instead of being opened again. To start in safe mode on purpose, add `?safe` to the address.
+- **Freezes or crashes while opening:** if the tab froze or crashed while opening the autosaved book, reloading that tab starts in **safe mode**. The book is downloaded as `autosaved-book.bds.json` instead of being opened again, and a copy stays in the browser. To start in safe mode on purpose, add `?safe` to the address.
 
 ## Keyboard
 `V` select · `A` direct selection · `T` text · `R` rectangle · `E` ellipse · `L` rule · `P` pen · `B` brush · `X` eraser · `K` pattern · `O` ornament · `G` gradient · `D` die-cut · `M` dimension · `H`/Space hand · `Z` zoom · `[ ]` brush size · `⌘Z / ⇧⌘Z` undo/redo · `⌘D` duplicate · `⌘0` fit · `⌘= / ⌘-` zoom · `⌘] / ⌘[` arrange · `⌥⌘I` hidden characters · arrows nudge (⇧ ×10).

@@ -10,6 +10,7 @@ import {
   BufferGeometry,
   CatmullRomCurve3,
   Group,
+  Matrix3,
   Mesh,
   ShapeUtils,
   TubeGeometry,
@@ -24,7 +25,8 @@ import { EDGE_TILE, bandTaper, droopAngle, spineOuter, type BookLayout } from '.
 import type { BookMaterials } from './materials';
 import { SheetMesh, integrateCurve, linspace, mergeSamples, type SheetEdge, type UV } from './sheet';
 import type { BookSceneInput } from './types';
-import type { JacketCalc } from '../engine/binding';
+import type { BindingCalc, JacketCalc } from '../engine/binding';
+import { WRAP_REGIONS, regionExtent, type WrapRegion } from './regions';
 import { JACKET_GAP, JacketRig, jacketPanel, type JacketBase } from './jacket';
 
 type V3 = [number, number, number];
@@ -490,7 +492,49 @@ interface SoftCoverRig {
 }
 
 /** On-screen densities (px per pt) the textures need; 0 = not in view. */
-export interface TextureDensity { pages: Map<number, number>; coverFront: number; jacketFront: number }
+export interface TextureDensity { pages: Map<number, number>; cover: Partial<Record<WrapRegion, number>>; jacket: Partial<Record<WrapRegion, number>> }
+
+interface UVRect { u0: number; u1: number; v0: number; v1: number }
+
+/**
+ * Move the faces in material slot `slot` that lie wholly inside one of `rects` (UV space) to that
+ * rect's slot; every other face keeps its slot. The index is rewritten group by group.
+ */
+function splitByRegion(geo: BufferGeometry, slot: number, rects: (UVRect & { slot: number })[]): void {
+  const index = geo.getIndex(), uv = geo.getAttribute('uv');
+  if (!index || !uv || !rects.length) return;
+  const src = index.array;
+  const groups = geo.groups.length ? geo.groups.map((g) => ({ start: g.start, count: g.count, materialIndex: g.materialIndex ?? 0 })) : [{ start: 0, count: src.length, materialIndex: 0 }];
+  const eps = 1e-5;
+  const inRect = (r: UVRect, v: number) => {
+    const u = uv.getX(v), w = uv.getY(v);
+    return u >= r.u0 - eps && u <= r.u1 + eps && w >= r.v0 - eps && w <= r.v1 + eps;
+  };
+  const out: number[] = [];
+  const next: { start: number; count: number; materialIndex: number }[] = [];
+  const moved = new Map<number, number[]>();
+  for (const g of groups) {
+    const start = out.length;
+    for (let t = g.start; t + 2 < g.start + g.count; t += 3) {
+      const a = src[t], b = src[t + 1], c = src[t + 2];
+      const r = g.materialIndex === slot ? rects.find((q) => inRect(q, a) && inRect(q, b) && inRect(q, c)) : undefined;
+      if (r && r.slot !== slot) {
+        let m = moved.get(r.slot);
+        if (!m) moved.set(r.slot, (m = []));
+        m.push(a, b, c);
+      } else out.push(a, b, c);
+    }
+    if (out.length > start) next.push({ start, count: out.length - start, materialIndex: g.materialIndex });
+  }
+  if (!moved.size) return;
+  for (const [ms, tris] of moved) {
+    next.push({ start: out.length, count: tris.length, materialIndex: ms });
+    for (const v of tris) out.push(v);
+  }
+  geo.setIndex(out);
+  geo.clearGroups();
+  for (const g of next) geo.addGroup(g.start, g.count, g.materialIndex);
+}
 
 export interface BookBounds { a0: number; a1: number; y0: number; y1: number; z0: number; z1: number }
 
@@ -537,6 +581,10 @@ export class BookModel {
   private boardTheta = 0;
   private jacket: JacketRig | null = null;
   private lastJacket = '';
+  private readonly calc: BindingCalc;
+  private readonly jc: JacketCalc | null;
+  /** Faces of each region of the cover and jacket wraps (by mesh and index range), for texture demand. */
+  private readonly regionFaces: { mesh: Mesh; which: 'cover' | 'jacket'; region: WrapRegion; start: number; count: number }[] = [];
   /**
    * Gap between the support (opened board's inner face / opened cover's top) and the bottom of
    * the first turned leaf: pastedown and endpaper hinge, plus the flaps tucked in there, pt.
@@ -552,6 +600,8 @@ export class BookModel {
     this.L = L;
     this.mats = mats;
     const jc = input.jacket && mats.jacketOuter && mats.jacketInner ? input.jacket : null;
+    this.calc = input.calc;
+    this.jc = jc;
     this.e0 = L.clr + (L.family === 'soft' ? mm(0.02) : mm(0.16));
     const { spec, calc } = input;
     if (L.family === 'case') this.buildCase(calc.bands, spec.binding.headband, calc.headbandHeight, spec.binding.squares);
@@ -560,11 +610,61 @@ export class BookModel {
     this.buildBlock(spec.cover.edge === 'deckle');
     this.buildLeaves();
     if (jc) this.buildJacket(jc);
+    this.regionize();
     this.setPose(0, [], 1);
     const ext = this.closedExtents();
     this.groundLift = Math.max(0, -ext.y0);
     this.zHead = Math.min(ext.z0, -L.coverH / 2);
     this.zTail = Math.max(ext.z1, L.coverH / 2);
+  }
+
+  /** A region's rectangle of the wrap's UV space (null: the wrap has no such region). */
+  private regionUV(which: 'cover' | 'jacket', region: WrapRegion): UVRect | null {
+    if (which === 'cover') {
+      const e = regionExtent(this.calc.panels, region);
+      if (!e) return null;
+      const c = this.L.cover;
+      return { u0: (e.x + c.wrap) / c.totalW, u1: (e.x + e.w + c.wrap) / c.totalW, v0: c.v(c.coverH), v1: c.v(0) };
+    }
+    const jc = this.jc;
+    const e = jc ? regionExtent(jc.panels, region) : null;
+    if (!jc || !e) return null;
+    const total = jc.width + 2 * jc.bleed, totalH = jc.height + 2 * jc.bleed;
+    return { u0: (e.x + jc.bleed) / total, u1: (e.x + e.w + jc.bleed) / total, v0: 1 - (jc.height + jc.bleed) / totalH, v1: 1 - jc.bleed / totalH };
+  }
+
+  /**
+   * Faces of the cover and jacket meshes that lie inside one region of the wrap (front, back,
+   * spine, flaps) take that region's material, which can carry art as sharp as the camera needs.
+   * Faces straddling two regions, and the turn-ins, keep the wrap's own material.
+   */
+  private regionize(): void {
+    const m = this.mats;
+    const meshes: Mesh[] = [];
+    this.group.traverse((o) => { if ((o as Mesh).isMesh) meshes.push(o as Mesh); });
+    for (const mesh of meshes) {
+      const list = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+      const which = list.includes(m.cover) ? 'cover' : m.jacketOuter && list.includes(m.jacketOuter) ? 'jacket' : null;
+      if (!which) continue;
+      const wrapMat = which === 'cover' ? m.cover : m.jacketOuter!;
+      const slot = list.indexOf(wrapMat);
+      const mats = list.slice();
+      const rects: (UVRect & { slot: number; region: WrapRegion })[] = [];
+      for (const region of WRAP_REGIONS) {
+        const r = this.regionUV(which, region);
+        const mat = r ? m.regionMaterial(which, region) : null;
+        if (!r || !mat) continue;
+        let k = mats.indexOf(mat);
+        if (k < 0) { k = mats.length; mats.push(mat); }
+        rects.push({ ...r, slot: k, region });
+      }
+      splitByRegion(mesh.geometry, slot, rects);
+      mesh.material = mats;
+      for (const g of mesh.geometry.groups) {
+        const r = rects.find((q) => q.slot === g.materialIndex);
+        if (r) this.regionFaces.push({ mesh, which, region: r.region, start: g.start, count: g.count });
+      }
+    }
   }
 
   /** Extents of the closed book over every mesh (a-space), for ground contact. */
@@ -1571,7 +1671,7 @@ export class BookModel {
    */
   textureDemand(toScreen: (a: number, y: number, z: number) => [number, number] | null, eye: [number, number, number], view: [number, number] = [1e9, 1e9]): TextureDensity {
     const L = this.L;
-    const out: TextureDensity = { pages: new Map(), coverFront: 0, jacketFront: 0 };
+    const out: TextureDensity = { pages: new Map(), cover: {}, jacket: {} };
     const bump = (page: number, d: number) => { if (d > (out.pages.get(page) ?? 0)) out.pages.set(page, d); };
     // Density of a grid of a-space points (rows × cols) with a facing test per point.
     const [vw, vh] = view;
@@ -1637,36 +1737,38 @@ export class BookModel {
       }));
       grid(pts, (front, d) => { if (front) bump(2 * L.nTurn, d); });
     }
-    // Front cover panel (hidden under a jacket that is on).
+    // Wrap regions (front, back, spine, flaps) of the cover — hidden under a jacket that is on —
+    // and of the jacket: a lattice over a spread of each region's faces, as posed now.
     const jacketOn = this.jacket !== null && Math.abs(this.jacket.mesh.position.z) < 0.5 * L.coverH;
-    if (!jacketOn) {
-      if (this.soft) {
-        const sh = this.soft.sheet;
-        const cols: number[] = [];
-        for (let i = 0; i < sh.ns; i++) if (sh.s[i] >= this.soft.frontEnd - L.W - 1e-6 && sh.s[i] <= this.soft.frontEnd + 1e-6) cols.push(i);
-        const pick = cols.length > 12 ? spread(cols.length, 12).map((k) => cols[k]) : cols;
-        if (pick.length > 1) grid(ruledGrid(sh, pick), (front, d) => { if (front) out.coverFront = Math.max(out.coverFront, d); });
-      } else {
-        const th = this.boardTheta, c = Math.cos(th), sn = Math.sin(th);
-        const rot = (a: number, y: number): [number, number] => {
-          const da = a - L.pivotA, dy = y - L.pivotY;
-          return [L.pivotA + c * da - sn * dy, L.pivotY + sn * da + c * dy];
-        };
-        const n: [number, number, number] = [-sn, c, 0];
-        const pts = [0, 0.25, 0.5, 0.75, 1].map((fz) => [0, 0.25, 0.5, 0.75, 1].map((fa) => {
-          const q = rot(L.boardA0 + L.boardW * fa, L.thick);
-          return { p: [q[0], q[1], -L.boardH / 2 + L.boardH * fz] as [number, number, number], n };
+    const inv = this.group.matrixWorld.clone().invert();
+    const nm = new Matrix3();
+    const va = new Vector3(), vb = new Vector3(), vc = new Vector3(), vn = new Vector3(), tmp = new Vector3();
+    const K = 4;
+    for (const f of this.regionFaces) {
+      if (f.which === 'cover' && jacketOn) continue;
+      // Flaps are tucked inside the boards until the cover opens.
+      if (coverShut && (f.region === 'front-flap' || f.region === 'back-flap')) continue;
+      const geo = f.mesh.geometry;
+      const pos = geo.getAttribute('position'), nrm = geo.getAttribute('normal'), idx = geo.getIndex();
+      if (!pos || !nrm || !idx) continue;
+      const rel = f.mesh.matrixWorld.clone().premultiply(inv);
+      nm.getNormalMatrix(rel);
+      const tris = Math.floor(f.count / 3), step = Math.max(1, Math.floor(tris / 40));
+      let best = out[f.which][f.region] ?? 0;
+      for (let t = 0; t < tris; t += step) {
+        const i0 = idx.getX(f.start + 3 * t), i1 = idx.getX(f.start + 3 * t + 1), i2 = idx.getX(f.start + 3 * t + 2);
+        va.fromBufferAttribute(pos, i0).applyMatrix4(rel);
+        vb.fromBufferAttribute(pos, i1).applyMatrix4(rel);
+        vc.fromBufferAttribute(pos, i2).applyMatrix4(rel);
+        vn.fromBufferAttribute(nrm, i0).add(tmp.fromBufferAttribute(nrm, i1)).add(tmp.fromBufferAttribute(nrm, i2)).applyMatrix3(nm);
+        const n: [number, number, number] = [vn.x, vn.y, vn.z];
+        const rows = Array.from({ length: K + 1 }, (_, j) => Array.from({ length: K + 1 - j }, (_, i) => {
+          const fi = i / K, fj = j / K;
+          return { p: [va.x + (vb.x - va.x) * fi + (vc.x - va.x) * fj, va.y + (vb.y - va.y) * fi + (vc.y - va.y) * fj, va.z + (vb.z - va.z) * fi + (vc.z - va.z) * fj] as [number, number, number], n };
         }));
-        grid(pts, (front, d) => { if (front) out.coverFront = Math.max(out.coverFront, d); });
+        grid(rows, (front, d) => { if (front && d > best) best = d; });
       }
-    }
-    // Jacket front panel.
-    if (this.jacket) {
-      const sh = this.jacket.sheet;
-      const cols: number[] = [];
-      for (let i = 0; i < sh.ns - 1; i++) if (this.jacket.isFront(i)) cols.push(i);
-      const pick = cols.length > 12 ? spread(cols.length, 12).map((k) => cols[k]) : cols;
-      if (pick.length > 1) grid(ruledGrid(sh, pick, this.jacket.mesh.position.z), (front, d) => { if (front) out.jacketFront = Math.max(out.jacketFront, d); });
+      if (best > 0) out[f.which][f.region] = best;
     }
     return out;
   }

@@ -11,7 +11,7 @@ import { LIBRARY_MIME } from '../library/LibraryPanel';
 import { getItem, insertItem, targetFor } from '../library/insert';
 import { uid } from '../../lib/random';
 import { applyMatrix, multiply, translate, scale as scaleM } from '../../render/primitives';
-import { layoutText, naturalWidth, threadOf, crossesGutter } from '../../render/compile';
+import { layoutText, naturalWidth, threadOf, elementXExtent } from '../../render/compile';
 import { renderStroke, simulatePressure, stabilize } from '../../engine/brushes';
 import { parsePath, serialize, type Seg } from '../../lib/pathData';
 import { SurfaceView } from './SurfaceView';
@@ -288,8 +288,19 @@ export function Editor({ mode }: { mode: 'spreads' | 'cover' | 'jacket' }) {
       if (hit && hit.el.type === 'text' && hit.el.id !== linking) {
         const chain = threadOf(s.project, linking);
         if (chain.includes(hit.el.id)) s.notify('That frame is already in this thread.', 'error');
+        // A frame in the middle of another story would then belong to two stories at once.
+        else if (threadOf(s.project, hit.el.id)[0] !== hit.el.id) s.notify('That frame already continues another story. Thread into an empty frame, or the first frame of a story.', 'error');
         else {
-          s.updateElement(linking, { flowNext: hit.el.id } as Partial<TextElement>);
+          // Threading from a frame in the middle of a story puts the new frame into the thread:
+          // the frames that followed stay in the story after it, instead of being cut off.
+          const after = (findElement(s.project, linking)?.el as TextElement | undefined)?.flowNext ?? null;
+          const target = hit.el as TextElement;
+          s.update((d) => {
+            const from = findElement(d as Project, linking), to = findElement(d as Project, target.id);
+            if (!from || !to) return;
+            (surfaceElementsDraft(d as Project, from.key)![from.index] as Draft<TextElement>).flowNext = target.id;
+            if (after && after !== target.id && !target.flowNext) (surfaceElementsDraft(d as Project, to.key)![to.index] as Draft<TextElement>).flowNext = after;
+          });
           s.notify('Frames threaded — the story now flows into the selected frame.');
         }
       }
@@ -375,6 +386,19 @@ export function Editor({ mode }: { mode: 'spreads' | 'cover' | 'jacket' }) {
       if (single && single.el.type === 'drawing') {
         const bx = sceneBounds(single.el, single.surface, calc);
         if (p.x >= bx.x && p.x <= bx.x + bx.w && p.y >= bx.y && p.y <= bx.y + bx.h) { target = single.el as DrawingElement; layer = single.surface; }
+      }
+      if (!target && tool === 'eraser') {
+        // The eraser lifts paint from a drawing layer — the topmost one under the pointer. A new,
+        // empty layer (what a brush stroke starts) would have nothing to erase.
+        const under = [...allEls].reverse().find(({ el, surface: sf }) => {
+          if (el.type !== 'drawing' || el.hidden || el.locked) return false;
+          const bx = sceneBounds(el, sf, calc);
+          return p.x >= bx.x && p.x <= bx.x + bx.w && p.y >= bx.y && p.y <= bx.y + bx.h;
+        });
+        if (!under) { s.notify('Nothing to erase here: the eraser works on drawing layers (paint with a brush first).'); return; }
+        target = under.el as DrawingElement;
+        layer = under.surface;
+        s.select([target.id]);
       }
       if (!target) {
         const pair = surfaces.filter((sf) => sf.kind === surface.kind && (sf.kind === 'page' || sf.kind === 'master'));
@@ -719,14 +743,19 @@ export function Editor({ mode }: { mode: 'spreads' | 'cover' | 'jacket' }) {
     s.update((d) => {
       for (const id of ids) {
         const cur = allEls.find((x) => x.el.id === id);
-        if (!cur || cur.surface.kind !== 'page') continue;
+        // Pages, and the two sides of a master (an item dragged onto its right page belongs there).
+        if (!cur || (cur.surface.kind !== 'page' && cur.surface.kind !== 'master')) continue;
         const loc = findElement(d as Project, id);
         if (!loc) continue;
         const el = surfaceElementsDraft(d as Project, loc.key)![loc.index];
-        // Spread items stay with their page: they are drawn on both sides of the gutter anyway.
-        if (spec.facing && crossesGutter(el as Element, cur.surface.side, cur.surface.w)) continue;
+        // Spread items stay with their page: they are drawn on both sides of the gutter anyway. Only
+        // an item lying across the fold stays; one dragged wholly onto the other page moves there
+        // (crossesGutter is also true for those, so nothing ever changed page).
+        const [x0, x1] = elementXExtent(el as Element);
+        const fold = cur.surface.side === 'left' ? cur.surface.w : 0;
+        if (spec.facing && x0 < fold - 0.01 && x1 > fold + 0.01) continue;
         const cx = cur.surface.x + el.x + el.w / 2, cy = cur.surface.y + el.y + el.h / 2;
-        const target = surfaces.find((sf) => sf.kind === 'page' && cx >= sf.x && cx <= sf.x + sf.w && cy >= sf.y - 200 && cy <= sf.y + sf.h + 200);
+        const target = surfaces.find((sf) => sf.kind === cur.surface.kind && cx >= sf.x && cx <= sf.x + sf.w && cy >= sf.y - 200 && cy <= sf.y + sf.h + 200);
         if (!target || target.key === loc.key) continue;
         const [moved] = surfaceElementsDraft(d as Project, loc.key)!.splice(loc.index, 1);
         moved.x += cur.surface.x - target.x;
@@ -888,6 +917,8 @@ export function Editor({ mode }: { mode: 'spreads' | 'cover' | 'jacket' }) {
     const down = (e: KeyboardEvent) => {
       if (isField(e.target)) return;
       const s = st();
+      // The Export dialog is modal: Delete, arrows or tool keys must not edit the page behind it.
+      if (s.exportOpen) return;
       const mod = e.metaKey || e.ctrlKey;
       if (e.code === 'Space' && !e.repeat) { setSpaceDown(true); e.preventDefault(); return; }
       if (mod && e.key.toLowerCase() === 'z') { e.preventDefault(); if (e.shiftKey) s.redo(); else s.undo(); return; }
@@ -896,7 +927,8 @@ export function Editor({ mode }: { mode: 'spreads' | 'cover' | 'jacket' }) {
       if (mod && e.key.toLowerCase() === 'c') { s.copySelection(); return; }
       if (mod && e.key.toLowerCase() === 'v') {
         const target = single?.surface.key ?? surfaces[surfaces.length - 1]?.key;
-        if (target) { e.preventDefault(); s.paste(target); }
+        // Pasted onto the cover or jacket, items belong to the panel under them.
+        if (target) { e.preventDefault(); s.paste(target); if (calc) reanchor(st().selection); }
         return;
       }
       if (mod && e.key.toLowerCase() === 'a') { e.preventDefault(); s.select(allEls.filter((x) => !x.el.locked && !x.el.hidden).map((x) => x.el.id)); return; }
@@ -956,6 +988,8 @@ export function Editor({ mode }: { mode: 'spreads' | 'cover' | 'jacket' }) {
       if (item && target && surface) {
         const ax = target.anchor && calc ? calc.panels.find((pp) => pp.id === target.anchor)?.x ?? 0 : 0;
         insertItem(item, target, { x: p.x - surface.x - ax, y: p.y - surface.y });
+        // Dropped on the back, spine or a flap: belong to that panel, not to the front.
+        if (calc) reanchor(st().selection);
       }
       return;
     }
@@ -963,7 +997,12 @@ export function Editor({ mode }: { mode: 'spreads' | 'cover' | 'jacket' }) {
     if (!files.length) return;
     const p = toScene(e);
     const surface = surfaceAt(surfaces, p, 40) ?? surfaces[0];
+    const idsOn = () => new Set(surface ? surfaceEls(st().project, surface).map((e) => e.id) : []);
+    const before = idsOn();
     const res = await importFiles(files, { place: surface ? { surfaceKey: surface.key, x: p.x - surface.x, y: p.y - surface.y } : undefined });
+    // On the cover or jacket, what was dropped belongs to the panel under it, so it follows that
+    // panel when the spine changes (as drawn and library items do).
+    if (calc) reanchor([...idsOn()].filter((id) => !before.has(id)));
     if (res.errors.length) st().notify(res.errors[0], 'error');
     else if (res.messages.length) st().notify(res.messages.join(' '));
   };

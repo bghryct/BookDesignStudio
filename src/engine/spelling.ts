@@ -30,6 +30,8 @@ async function speller(lang: Lang): Promise<Speller> {
       const make = (mod as unknown as { default: (aff: string, dic: string) => Speller }).default;
       return make(aff, dic);
     })();
+    // A failed download (offline) is tried again next time rather than remembered.
+    p.catch(() => { if (spellers.get(lang) === p) spellers.delete(lang); });
     spellers.set(lang, p);
   }
   return p;

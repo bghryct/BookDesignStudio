@@ -36,6 +36,13 @@ export function anchorNames(project: Project): string[] {
 }
 
 const plain = (s: string) => s.replace(/<\/?(?:\{[^}]*\}|[^<>]{0,40})>|\{[^}]*\}|\[[^\]]*\]\s*|[*^\\]/g, '').replace(/\s+/g, ' ').trim();
+
+/**
+ * A generated line whose text would read as markup at the start of a paragraph — a list item
+ * (“3. The page”, “a) Notes”, “- Interlude”), a heading, a section break or a style tag — is
+ * escaped so it is set as written: a numbered chapter became a hanging list item in the contents.
+ */
+const literal = (s: string) => (/^(?:(?: {2}|\t)*(?:[-•▪◦]|\d{1,3}[.)]|[a-zA-Z]\))[ \t]|#{1,2}\s|-{3,}\s*$|\*\s\*\s\*|⁂|\[)/.test(s) ? `\\${s}` : s);
 export const CONTENTS_NAME = 'Contents (generated)';
 
 export function contentsEntries(project: Project): { level: 1 | 2; text: string; page: string; index: number }[] {
@@ -56,7 +63,7 @@ export function generateContents(): { entries: number; updated: boolean } {
   const s = useStore.getState();
   const project = s.project;
   const entries = contentsEntries(project);
-  const lines = entries.map((e) => (e.level === 1 ? `${e.text}{rtab}${e.page}` : `[{left:14; size:${(project.book.grid.baseline || 12) > 12 ? 9.5 : 9}}] ${e.text}{rtab}${e.page}`));
+  const lines = entries.map((e) => (e.level === 1 ? `${literal(e.text)}{rtab}${e.page}` : `[{left:14; size:${(project.book.grid.baseline || 12) > 12 ? 9.5 : 9}}] ${literal(e.text)}{rtab}${e.page}`));
   const text = `[{size:15; leading:22; after:12}] ^Contents^\n${lines.join('\n')}`;
   let existing: { pageIndex: number; el: Element } | null = null;
   project.pages.forEach((p, i) => { const e = p.elements.find((x) => x.name === CONTENTS_NAME); if (e && !existing) existing = { pageIndex: i, el: e }; });
@@ -123,9 +130,10 @@ export function generateIndex(): { entries: number; updated: boolean } {
   let letter = '';
   for (const [term, rec] of entries) {
     const l = term[0].toUpperCase();
-    if (l !== letter) { letter = l; lines.push(`[{before:8; keep:2}] ^${l}^`); }
-    lines.push(`${term}${rec.pages.size ? `, ${pageList(rec.pages, lab)}` : ''}`);
-    for (const [sub, pages] of [...rec.subs.entries()].sort((a, b) => a[0].localeCompare(b[0]))) lines.push(`[{left:10}] ${sub}, ${pageList(pages, lab)}`);
+    // A group for terms starting with a mark (*, ^, {…) shows the mark, not markup.
+    if (l !== letter) { letter = l; lines.push(`[{before:8; keep:2}] ^${/[\p{L}\p{N}]/u.test(l) ? l : `\\${l}`}^`); }
+    lines.push(`${literal(term)}${rec.pages.size ? `, ${pageList(rec.pages, lab)}` : ''}`);
+    for (const [sub, pages] of [...rec.subs.entries()].sort((a, b) => a[0].localeCompare(b[0]))) lines.push(`[{left:10}] ${literal(sub)}, ${pageList(pages, lab)}`);
   }
   const text = lines.join('\n');
   let existing: Element | null = null;

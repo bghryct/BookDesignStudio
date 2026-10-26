@@ -193,7 +193,7 @@ function gridFor(spec: BookSpec, side: PageSide, el: Element, surface: SurfaceKe
 /* Text layout service                                                         */
 /* -------------------------------------------------------------------------- */
 
-interface ChainCache { members: Element[]; book: BookSpec; styles: string; version: number; tokens: string; wraps: string; layouts: Map<string, FrameLayout> }
+interface ChainCache { members: Element[]; book: BookSpec; styles: string; version: number; tokens: string; wraps: string; pages: string; layouts: Map<string, FrameLayout> }
 const chainCache = new WeakMap<Element, ChainCache>();
 interface ChainInfo { chain: { el: TextElement; pageIndex: number | null; surface: SurfaceKey }[]; tokens: TokenContext; tokensKey: string; wraps: WrapShape[][]; wk: string; version: number }
 const chainMemo = new WeakMap<Project, Map<string, ChainInfo>>();
@@ -455,7 +455,9 @@ function layoutTextUnsafe(el: TextElement, ctx: CompileContext): FrameLayout {
     const head = chain[0].el;
     const cached = chainCache.get(head);
     const sKey = ss.key + listKey(project, head);
-    if (cached && cached.version === version && cached.book === project.book && cached.styles === sKey && cached.tokens === tokensKey && cached.wraps === wk &&
+    // Where the frames sit (odd / even pages decide {odd}, start-on-odd and inside / outside anchors).
+    const pagesKey = chain.map((c) => c.pageIndex ?? -1).join(',');
+    if (cached && cached.version === version && cached.book === project.book && cached.styles === sKey && cached.tokens === tokensKey && cached.wraps === wk && cached.pages === pagesKey &&
       cached.members.length === chain.length && cached.members.every((m, i) => m === chain[i].el)) {
       const hit = cached.layouts.get(el.id);
       if (hit) return hit;
@@ -464,7 +466,7 @@ function layoutTextUnsafe(el: TextElement, ctx: CompileContext): FrameLayout {
     const results = layoutStory(head.text, head.style, frames, tokens, stylesWithList(ss.styles, project, head));
     const layouts = new Map<string, FrameLayout>();
     chain.forEach((c, i) => layouts.set(c.el.id, results[i]));
-    chainCache.set(head, { members: chain.map((c) => c.el), book: project.book, styles: sKey, version, tokens: tokensKey, wraps: wk, layouts });
+    chainCache.set(head, { members: chain.map((c) => c.el), book: project.book, styles: sKey, version, tokens: tokensKey, wraps: wk, pages: pagesKey, layouts });
     return layouts.get(el.id)!;
   }
   const tokens = tokensFor(project, ctx.pageIndex, el.text);
@@ -720,8 +722,19 @@ function contextKey(el: Element, ctx: CompileContext): string {
   const v = useFontStore.getState().version;
   if (el.type === 'motif') return `${v}|${bookKey(ctx.project.book)}`;
   if (el.type === 'table') return tableContextKey(ctx, v, el);
-  if (el.type === 'image' || el.type === 'svg') return `${v}|${el.assetId ? (ctx.project.assets[el.assetId] ? 1 : 0) : 0}`;
+  // The asset itself, not just its id: a placed PDF switched to another page keeps its id.
+  if (el.type === 'image' || el.type === 'svg') return `${v}|${el.assetId ? objectNo(ctx.project.assets[el.assetId]) : 0}`;
   return String(v);
+}
+
+const objectNos = new WeakMap<object, number>();
+let objectCount = 0;
+/** A number per object (0 for none), so a cache key changes when an object is replaced. */
+function objectNo(o: object | undefined): number {
+  if (!o) return 0;
+  let n = objectNos.get(o);
+  if (n == null) objectNos.set(o, (n = ++objectCount));
+  return n;
 }
 
 /** Local primitives for an element (memoised; text is cached by the layout service). */

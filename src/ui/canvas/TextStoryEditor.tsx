@@ -1,6 +1,6 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import clsx from 'clsx';
-import { X, Bold, Italic, CaseSensitive, Heading1, Heading2, Minus, Hash, Type, Pilcrow, Plus } from 'lucide-react';
+import { X, Bold, Italic, CaseSensitive, Heading1, Heading2, Minus, Hash, Type, Pilcrow, Plus, GripVertical, Maximize2, Minimize2, Search, ChevronUp, ChevronDown, CircleHelp, AArrowUp, AArrowDown } from 'lucide-react';
 import { useStore } from '../../store/store';
 import { findElement } from '../../model/surfaces';
 import { threadOf } from '../../render/compile';
@@ -145,6 +145,70 @@ const INSERTS: { group: string; items: { label: string; text: string; hint?: str
 
 type Pop = null | 'char' | 'para' | 'insert';
 
+/**
+ * Where the editor sits on the canvas once moved, its size, text size and whether the cheat sheet
+ * shows, remembered in this browser (no position: beside the frame being edited).
+ */
+interface Placement { x?: number; y?: number; w?: number; h?: number; max?: boolean; size?: number; help?: boolean }
+const PLACEMENT = 'bds.storyEditor';
+function readPlacement(): Placement {
+  try { const p = JSON.parse(localStorage.getItem(PLACEMENT) ?? '{}'); return p && typeof p === 'object' ? p : {}; } catch { return {}; }
+}
+function writePlacement(p: Placement) {
+  try { localStorage.setItem(PLACEMENT, JSON.stringify(p)); } catch { /* storage blocked: forget it */ }
+}
+const clamp = (v: number, lo: number, hi: number) => Math.min(Math.max(v, lo), Math.max(lo, hi));
+
+/** Words, characters and paragraphs as the story reads: markup, notes and deletions left out. */
+function countStory(text: string): { words: number; chars: number; paras: number } {
+  const plain = text
+    .replace(/\{(?:note|ix|anchor|k|img|xref|xreftext|if|running):[^{}]*\}|\{--[\s\S]*?--\}|\{\/if\}/g, '')
+    .replace(/\{(?:fn|en|ruby|wari):|\{\+\+|\+\+\}|\}/g, ' ')
+    .replace(/\{[a-z]+(?::[^{}]*)?\}|<\/?\{[^}]*\}>|<\/?[^<>\n]{0,40}>|^(?:\[[^\]\n]{1,400}\]\s*)+|^#{1,2}\s|[*^]|\\(?=.)/gm, ' ');
+  let paras = 0;
+  for (const line of plain.split('\n')) if (line.trim() && !/^\s*(-{3,}|⁂)\s*$/.test(line)) paras++;
+  return { words: (plain.match(/[\p{L}\p{N}]+(?:['’-][\p{L}\p{N}]+)*/gu) ?? []).length, chars: plain.replace(/\s+/g, ' ').trim().length, paras };
+}
+
+/**
+ * A DOM range over story characters [at, at + len) in the colour layer, whose text is the story's
+ * exactly, one span per line: used to mark a find match and to scroll a range into view.
+ */
+function rangeAt(pre: HTMLElement | null, text: string, at: number, len: number): Range | null {
+  if (!pre) return null;
+  let line = 0, start = 0;
+  for (let i = text.indexOf('\n'); i >= 0 && i < at; i = text.indexOf('\n', i + 1)) { line++; start = i + 1; }
+  const span = pre.children[line];
+  if (!span) return null;
+  const nl = text.indexOf('\n', at);
+  const end = Math.min(at + len, nl < 0 ? text.length : nl);
+  const pos = (off: number): [Node, number] | null => {
+    const walker = document.createTreeWalker(span, NodeFilter.SHOW_TEXT);
+    let last: Node | null = null;
+    for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+      const l = n.textContent?.length ?? 0;
+      if (off <= l) return [n, off];
+      off -= l;
+      last = n;
+    }
+    return last ? [last, last.textContent?.length ?? 0] : null;
+  };
+  const a = pos(at - start), b = pos(end - start);
+  if (!a || !b) return null;
+  const r = document.createRange();
+  r.setStart(a[0], a[1]);
+  r.setEnd(b[0], b[1]);
+  return r;
+}
+
+/** Matches of a plain search in the story (case ignored), at most a few thousand. */
+function findAll(text: string, q: string): number[] {
+  if (!q) return [];
+  const hay = text.toLowerCase(), needle = q.toLowerCase(), out: number[] = [];
+  for (let i = hay.indexOf(needle); i >= 0 && out.length < 5000; i = hay.indexOf(needle, i + needle.length)) out.push(i);
+  return out;
+}
+
 /** Floating story editor: edits the head of the frame's thread, so the whole story reflows. */
 export function TextStoryEditor({ elementId, anchor, viewport }: { elementId: string; anchor: { x: number; y: number; w: number; h: number }; viewport: { w: number; h: number } }) {
   const project = useStore((s) => s.project);
@@ -174,6 +238,56 @@ export function TextStoryEditor({ elementId, anchor, viewport }: { elementId: st
   });
   const lines = useMemo(() => (head ? head.text.split('\n').map(highlightLine) : []), [head?.text]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Where the editor sits (moved, resized, maximised) and its text size, remembered in this browser.
+  const [place, setPlace] = useState<Placement>(readPlacement);
+  useEffect(() => writePlacement(place), [place]);
+  const boxRef = useRef<HTMLDivElement>(null);
+  const bodyRef = useRef<HTMLDivElement>(null);
+  // Height of the toolbars and footer around the text, so a maximised editor fits the canvas.
+  const [chrome, setChrome] = useState(150);
+  useLayoutEffect(() => {
+    if (!boxRef.current || !bodyRef.current) return;
+    const c = boxRef.current.offsetHeight - bodyRef.current.offsetHeight;
+    if (Math.abs(c - chrome) > 1) setChrome(c);
+  });
+
+  // Find in this story (⌘F): the matches and the one shown.
+  const [find, setFind] = useState<string | null>(null);
+  const [hit, setHit] = useState(-1);
+  const findRef = useRef<HTMLInputElement>(null);
+  const matches = useMemo(() => (find && head ? findAll(head.text, find) : []), [find, head?.text]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (find != null) findRef.current?.focus(); }, [find != null]); // eslint-disable-line react-hooks/exhaustive-deps
+  // The match shown is marked in the coloured layer, so the find field can keep the focus.
+  useLayoutEffect(() => {
+    const reg = (globalThis as { CSS?: { highlights?: Map<string, unknown> } }).CSS?.highlights;
+    const Mark = (globalThis as { Highlight?: new (...r: Range[]) => unknown }).Highlight;
+    if (!reg || !Mark) return;
+    reg.delete('story-find');
+    const at = find && hit >= 0 ? matches[hit] : undefined;
+    const r = at != null && head ? rangeAt(hlRef.current, head.text, at, find!.length) : null;
+    if (r) reg.set('story-find', new Mark(r));
+  });
+  useEffect(() => () => { (globalThis as { CSS?: { highlights?: Map<string, unknown> } }).CSS?.highlights?.delete('story-find'); }, []);
+
+  // Words and characters, counted once typing pauses (a whole book takes a moment).
+  const [counts, setCounts] = useState<ReturnType<typeof countStory> | null>(null);
+  useEffect(() => {
+    if (!head) return;
+    const t = setTimeout(() => setCounts(countStory(head.text)), 400);
+    return () => clearTimeout(t);
+  }, [head?.text]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  /** Scroll the text so story offset `at` sits a third of the way down (exact, wrapped lines too). */
+  const revealRef = useRef<(at: number, len?: number) => void>(() => {});
+  revealRef.current = (at: number, len = 1) => {
+    const ta = ref.current, pre = hlRef.current;
+    if (!ta || !pre || !head) return;
+    const r = rangeAt(pre, head.text, at, Math.max(1, len));
+    const box = r?.getBoundingClientRect();
+    if (!box) return;
+    ta.scrollTop = Math.max(0, box.top - pre.getBoundingClientRect().top + pre.scrollTop - ta.clientHeight / 3);
+  };
+
   useEffect(() => {
     ref.current?.focus();
     checkpointed.current = false;
@@ -193,10 +307,7 @@ export function TextStoryEditor({ elementId, anchor, viewport }: { elementId: st
         ta.focus();
         ta.setSelectionRange(start, end);
         setCaret(start);
-        // Bring the selection into view: put the caret's line near the top.
-        const line = ta.value.slice(0, start).split('\n').length - 1;
-        const lh = parseFloat(getComputedStyle(ta).lineHeight) || 16;
-        ta.scrollTop = Math.max(0, line * lh - ta.clientHeight / 3);
+        revealRef.current(start, end - start);
       });
     };
     window.addEventListener('bds:select', sel);
@@ -205,12 +316,90 @@ export function TextStoryEditor({ elementId, anchor, viewport }: { elementId: st
 
   if (!head || head.type !== 'text') return null;
 
-  // At least 340 px wide, but never wider than the canvas (phones).
-  const width = Math.max(200, Math.min(480, Math.max(340, anchor.w), viewport.w - 16));
-  let left = anchor.x + anchor.w + 12;
-  if (left + width > viewport.w - 8) left = Math.max(8, anchor.x - width - 12);
-  if (left < 8) left = Math.max(8, Math.min(viewport.w - width - 8, anchor.x));
-  const top = Math.max(8, Math.min(viewport.h - 360, anchor.y));
+  // Size and place: maximised, where it was moved to (kept on the canvas), or beside the frame.
+  // At least 280 px wide, but never wider than the canvas (phones).
+  const fontSize = clamp(place.size ?? 14, 11, 24);
+  const maxBody = Math.max(80, viewport.h - 16 - chrome);
+  const width = place.max ? viewport.w - 16 : clamp(place.w ?? Math.min(480, Math.max(340, anchor.w)), Math.min(280, viewport.w - 16), viewport.w - 16);
+  const bodyH = place.max ? maxBody : clamp(place.h ?? 256, 80, maxBody);
+  let left: number, top: number;
+  if (place.max) { left = 8; top = 8; }
+  else if (place.x != null && place.y != null) { left = clamp(place.x, 8, viewport.w - width - 8); top = clamp(place.y, 8, viewport.h - 40); }
+  else {
+    left = anchor.x + anchor.w + 12;
+    if (left + width > viewport.w - 8) left = Math.max(8, anchor.x - width - 12);
+    if (left < 8) left = Math.max(8, Math.min(viewport.w - width - 8, anchor.x));
+    top = clamp(anchor.y, 8, viewport.h - bodyH - chrome - 8);
+  }
+
+  /** Follow the pointer until it is released. */
+  const drag = (e: React.PointerEvent, onMove: (dx: number, dy: number) => void) => {
+    e.preventDefault();
+    const x0 = e.clientX, y0 = e.clientY;
+    const move = (ev: PointerEvent) => onMove(ev.clientX - x0, ev.clientY - y0);
+    const up = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); window.removeEventListener('pointercancel', up); };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', up);
+  };
+  /** The header moves the editor (its buttons still work); a double-click puts it back beside the frame. */
+  const onHeader = (e: React.PointerEvent) => {
+    if (e.button !== 0 || (e.target as HTMLElement).closest('button, select, input, label')) return;
+    const l0 = left, t0 = top;
+    drag(e, (dx, dy) => setPlace((p) => ({ ...p, max: false, x: l0 + dx, y: t0 + dy })));
+  };
+  const dock = (e: React.MouseEvent) => {
+    if ((e.target as HTMLElement).closest('button, select, input, label')) return;
+    setPlace((p) => ({ ...p, max: false, x: undefined, y: undefined }));
+  };
+  /** The corner resizes the editor and pins it where it is. */
+  const onResize = (e: React.PointerEvent) => {
+    if (e.button !== 0) return;
+    e.stopPropagation();
+    const l0 = left, t0 = top, w0 = width, h0 = bodyH;
+    setPlace((p) => ({ ...p, max: false, x: l0, y: t0, w: w0, h: h0 }));
+    drag(e, (dx, dy) => setPlace((p) => ({ ...p, w: Math.max(280, w0 + dx), h: Math.max(80, h0 + dy) })));
+  };
+
+  /** Show the next (1) or previous (−1) match: the first after the cursor when none is shown yet. */
+  const go = (dir: 1 | -1, select = false) => {
+    if (!matches.length || !find) return;
+    let i = hit;
+    if (i < 0) {
+      const c = ref.current?.selectionStart ?? caret;
+      i = dir > 0 ? matches.findIndex((m) => m >= c) : -1;
+      if (dir < 0) for (let k = matches.length - 1; k >= 0; k--) if (matches[k] < c) { i = k; break; }
+      if (i < 0) i = dir > 0 ? 0 : matches.length - 1;
+    } else i = (i + dir + matches.length) % matches.length;
+    setHit(i);
+    const at = matches[i];
+    if (select && ref.current) { ref.current.setSelectionRange(at, at + find.length); setCaret(at); }
+    requestAnimationFrame(() => revealRef.current(at, find.length));
+  };
+  /** Close the find bar with the match shown selected in the text. */
+  const closeFind = () => {
+    const at = find && hit >= 0 ? matches[hit] : undefined;
+    const len = find?.length ?? 0;
+    setFind(null);
+    setHit(-1);
+    const ta = ref.current;
+    if (!ta) return;
+    ta.focus();
+    if (at != null) { ta.setSelectionRange(at, at + len); setCaret(at); }
+  };
+  const openFind = () => {
+    const ta = ref.current;
+    const picked = ta && ta.selectionEnd > ta.selectionStart && ta.selectionEnd - ta.selectionStart < 80 ? ta.value.slice(ta.selectionStart, ta.selectionEnd) : null;
+    setFind(picked && !picked.includes('\n') ? picked : find ?? '');
+    setHit(-1);
+    requestAnimationFrame(() => findRef.current?.select());
+  };
+
+  // The paragraph at the cursor and its style, for the footer.
+  let paraAt = 1;
+  for (let i = head.text.indexOf('\n'); i >= 0 && i < caret; i = head.text.indexOf('\n', i + 1)) paraAt++;
+  const lineStart = head.text.lastIndexOf('\n', caret - 1) + 1;
+  const styleAt = /^\[([^\]{}\n]{1,80})\]/.exec(head.text.slice(lineStart, lineStart + 90))?.[1];
 
   // One undo step per burst of typing: after a pause of a second the next edit starts a new step.
   const setText = (text: string) => {
@@ -315,18 +504,20 @@ export function TextStoryEditor({ elementId, anchor, viewport }: { elementId: st
   const sel = 'h-6 max-w-[104px] rounded border border-ink-600 bg-ink-800 px-1 text-[10.5px] text-ink-200 outline-none';
   // The coloured layer and the text box must wrap identically: same font, padding and the same
   // scrollbar gutter (a long story gives the text box a scrollbar, which narrowed it before).
-  const font: React.CSSProperties = { fontFamily: '"BDS EB Garamond", Georgia, serif', fontSize: 14, lineHeight: 1.45, padding: '8px 12px', whiteSpace: 'pre-wrap', overflowWrap: 'break-word', wordBreak: 'normal', tabSize: 4, scrollbarGutter: 'stable', letterSpacing: 'normal', fontWeight: 400 };
+  const font: React.CSSProperties = { fontFamily: '"BDS EB Garamond", Georgia, serif', fontSize, lineHeight: 1.45, padding: '8px 12px', whiteSpace: 'pre-wrap', overflowWrap: 'break-word', wordBreak: 'normal', tabSize: 4, scrollbarGutter: 'stable', letterSpacing: 'normal', fontWeight: 400 };
   return (
     <div
+      ref={boxRef}
       className="absolute z-30 flex flex-col overflow-hidden rounded-lg border border-ink-600 bg-ink-850/97 shadow-2xl backdrop-blur"
       style={{ left, top, width }}
       onPointerDown={(e) => e.stopPropagation()}
       onDoubleClick={(e) => e.stopPropagation()}
       onWheel={(e) => e.stopPropagation()}
     >
-      <style>{`.hl-para{color:#e0b062}.hl-list{color:#9aa0b0}.hl-head{color:#f6d38a}.hl-tag{color:#5ec4b6}.hl-code{color:#7fa8ff}.hl-kern{color:#c39bff}.hl-fn{color:#9ed07f}.hl-mark{color:#e5483a}.hl-mute{color:#777}.hl-tab{background:rgba(127,168,255,.15);border-radius:2px}.hl-ins{color:#7fd88f;background:rgba(127,216,143,.12);text-decoration:underline}.hl-del{color:#f08a73;text-decoration:line-through;background:rgba(240,138,115,.1)}`}</style>
-      <div className="flex items-center gap-0.5 border-b border-ink-700 px-1.5 py-1">
-        <span className="mr-1 text-[10.5px] font-semibold uppercase tracking-[0.08em] text-ink-400">Story{chain.length > 1 ? ` · ${chain.length} frames` : ''}</span>
+      <style>{`.hl-para{color:#e0b062}.hl-list{color:#9aa0b0}.hl-head{color:#f6d38a}.hl-tag{color:#5ec4b6}.hl-code{color:#7fa8ff}.hl-kern{color:#c39bff}.hl-fn{color:#9ed07f}.hl-mark{color:#e5483a}.hl-mute{color:#777}.hl-tab{background:rgba(127,168,255,.15);border-radius:2px}.hl-ins{color:#7fd88f;background:rgba(127,216,143,.12);text-decoration:underline}.hl-del{color:#f08a73;text-decoration:line-through;background:rgba(240,138,115,.1)}::highlight(story-find){background-color:rgba(246,211,138,.42)}`}</style>
+      <div className="flex cursor-grab touch-none flex-wrap items-center gap-0.5 border-b border-ink-700 px-1.5 py-1 active:cursor-grabbing" onPointerDown={onHeader} onDoubleClick={dock} title="Drag to move the editor · double-click to put it back beside the frame">
+        <GripVertical size={12} className="shrink-0 text-ink-500" />
+        <span className="mr-1 select-none whitespace-nowrap text-[10.5px] font-semibold uppercase tracking-[0.08em] text-ink-400">Story{chain.length > 1 ? ` · ${chain.length} frames` : ''}</span>
         <button type="button" title="Italic (*text*, ⌘I)" className={tb} onClick={() => wrap('*')}><Italic size={13} /></button>
         <button type="button" title="Bold (**text**, ⌘B)" className={tb} onClick={() => wrap('**')}><Bold size={13} /></button>
         <button type="button" title="Small caps (^text^)" className={tb} onClick={() => wrap('^')}><CaseSensitive size={14} /></button>
@@ -339,9 +530,11 @@ export function TextStoryEditor({ elementId, anchor, viewport }: { elementId: st
         <button type="button" title="Paragraph formatting for these lines" className={clsx(tb, pop === 'para' && tbOn)} onClick={() => setPop(pop === 'para' ? null : 'para')}><Pilcrow size={13} /></button>
         <button type="button" title="Insert special characters, spaces and breaks" className={clsx(tb, pop === 'insert' && tbOn)} onClick={() => setPop(pop === 'insert' ? null : 'insert')}><Plus size={13} /></button>
         <span className="flex-1" />
-        <button type="button" title="Tighten the pair at the cursor (⌥←)" className={tb} onClick={() => kern(-10)}><span className="text-[10px] tracking-[-0.15em]">AV</span></button>
-        <span className="w-7 text-center font-mono text-[9.5px] tabular-nums text-ink-400" title="Kerning at the cursor, ‰ em">{caretKern || '0'}</span>
-        <button type="button" title="Loosen the pair at the cursor (⌥→)" className={tb} onClick={() => kern(10)}><span className="text-[10px] tracking-[0.15em]">AV</span></button>
+        <span className="flex items-center whitespace-nowrap">
+          <button type="button" title="Tighten the pair at the cursor (⌥←)" className={tb} onClick={() => kern(-10)}><span className="text-[10px] tracking-[-0.15em]">AV</span></button>
+          <span className="w-7 text-center font-mono text-[9.5px] tabular-nums text-ink-400" title="Kerning at the cursor, ‰ em">{caretKern || '0'}</span>
+          <button type="button" title="Loosen the pair at the cursor (⌥→)" className={tb} onClick={() => kern(10)}><span className="text-[10px] tracking-[0.15em]">AV</span></button>
+        </span>
       </div>
       <div className="flex items-center gap-1 border-b border-ink-700 px-1.5 py-1">
         <select className={sel} value="" title="Paragraph style for the lines in the selection" onChange={(e) => { const v = e.target.value; if (v === '__none') paraTag(null); else if (v) paraTag(v); }}>
@@ -355,8 +548,35 @@ export function TextStoryEditor({ elementId, anchor, viewport }: { elementId: st
         </select>
         {!paraStyles.length && !charStyles.length && <span className="truncate text-[10px] text-ink-500">Add styles in the Type panel</span>}
         <span className="flex-1" />
+        <button type="button" title="Find in this story (⌘F)" className={clsx(tb, find != null && tbOn)} onClick={() => (find != null ? closeFind() : openFind())}><Search size={13} /></button>
+        <button type="button" title="Smaller text" className={tb} disabled={fontSize <= 11} onClick={() => setPlace((p) => ({ ...p, size: Math.max(11, fontSize - 1) }))}><AArrowDown size={14} /></button>
+        <button type="button" title="Larger text" className={tb} disabled={fontSize >= 24} onClick={() => setPlace((p) => ({ ...p, size: Math.min(24, fontSize + 1) }))}><AArrowUp size={14} /></button>
+        <button type="button" title={place.help === false ? 'Show the markup cheat sheet' : 'Hide the markup cheat sheet'} className={clsx(tb, place.help !== false && tbOn)} onClick={() => setPlace((p) => ({ ...p, help: p.help === false }))}><CircleHelp size={13} /></button>
+        <button type="button" title={place.max ? 'Restore the editor' : 'Fill the canvas with the editor'} className={tb} onClick={() => setPlace((p) => ({ ...p, max: !p.max }))}>{place.max ? <Minimize2 size={13} /> : <Maximize2 size={13} />}</button>
         <button type="button" title="Close (Esc)" className={tb} onClick={() => useStore.getState().setTextEditing(null)}><X size={13} /></button>
       </div>
+      {find != null && (
+        <div className="flex items-center gap-1 border-b border-ink-700 px-1.5 py-1">
+          <Search size={12} className="shrink-0 text-ink-500" />
+          <input
+            ref={findRef}
+            value={find}
+            placeholder="Find in this story"
+            className="h-6 min-w-0 flex-1 rounded border border-ink-600 bg-ink-800 px-1.5 text-[11px] text-ink-100 outline-none focus:border-ink-400"
+            onChange={(e) => { setFind(e.target.value); setHit(-1); }}
+            onKeyDown={(e) => {
+              e.stopPropagation();
+              if (e.key === 'Enter') { e.preventDefault(); go(e.shiftKey ? -1 : 1); }
+              else if (e.key === 'Escape') { e.preventDefault(); closeFind(); }
+              else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'g') { e.preventDefault(); go(e.shiftKey ? -1 : 1); }
+            }}
+          />
+          <span className="w-14 shrink-0 text-right font-mono text-[9.5px] tabular-nums text-ink-400">{!find ? '' : matches.length ? `${hit >= 0 ? hit + 1 : '–'} of ${matches.length}${matches.length >= 5000 ? '+' : ''}` : 'none'}</span>
+          <button type="button" title="Previous (⇧↵)" className={tb} disabled={!matches.length} onClick={() => go(-1)}><ChevronUp size={13} /></button>
+          <button type="button" title="Next (↵)" className={tb} disabled={!matches.length} onClick={() => go(1)}><ChevronDown size={13} /></button>
+          <button type="button" title="Close and select the match (Esc)" className={tb} onClick={closeFind}><X size={12} /></button>
+        </div>
+      )}
       <ChangesBar text={head.text} caret={caret} tracking={!!project.trackChanges} smart={!!project.smartTyping} onText={(t, c) => { setText(t); if (c != null) { setCaret(c); requestAnimationFrame(() => { ref.current?.focus(); ref.current?.setSelectionRange(c, c); }); } }} />
       {pop === 'char' && <CharFormat onApply={(props) => { if (props) wrap(`<{${props}}>`, '</>'); setPop(null); }} />}
       {pop === 'para' && <ParaFormat onApply={(props) => { paraLocal(props); setPop(null); }} />}
@@ -391,7 +611,7 @@ export function TextStoryEditor({ elementId, anchor, viewport }: { elementId: st
           ))}
         </div>
       )}
-      <div className="relative h-64 resize-y overflow-hidden" style={{ minHeight: 120 }}>
+      <div ref={bodyRef} className="relative shrink-0 overflow-hidden" style={{ height: bodyH }}>
         <pre ref={hlRef} aria-hidden className="scroll-thin pointer-events-none absolute inset-0 m-0 overflow-hidden text-ink-100" style={font}>{lines.map((h, i) => <HlLine key={i} html={h} />)}</pre>
         <textarea
           ref={ref}
@@ -415,7 +635,9 @@ export function TextStoryEditor({ elementId, anchor, viewport }: { elementId: st
           onSelect={(e) => setCaret((e.target as HTMLTextAreaElement).selectionStart)}
           onKeyDown={(e) => {
             e.stopPropagation();
-            if (e.key === 'Escape') { if (pop) setPop(null); else useStore.getState().setTextEditing(null); }
+            if (e.key === 'Escape') { if (pop) setPop(null); else if (find != null) closeFind(); else useStore.getState().setTextEditing(null); }
+            if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'f') { e.preventDefault(); openFind(); }
+            if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'g' && find) { e.preventDefault(); go(e.shiftKey ? -1 : 1, true); }
             // Tab types a tab (it is a typesetting character here, not focus navigation).
             if (e.key === 'Tab' && !e.metaKey && !e.ctrlKey) { e.preventDefault(); insert(e.shiftKey ? '{rtab}' : '\t'); }
             // Shift-Return: forced line break inside the paragraph.
@@ -441,8 +663,21 @@ export function TextStoryEditor({ elementId, anchor, viewport }: { elementId: st
           style={{ ...font, color: 'transparent', caretColor: '#f0e6d0' }}
         />
       </div>
-      <div className="border-t border-ink-700 px-3 py-1 text-[10px] leading-snug text-ink-500">
-        One paragraph per line · *italic* · **bold** · ^small caps^ · # heading · [Style] / [{'{align:center}'}] paragraph · &lt;Style&gt;…&lt;/Style&gt; · &lt;{'{size:14}'}&gt;…&lt;/&gt; · {'{fn:…}'} note · ⇧↵ line break · ⇥ tab · ⌥←/→ kern
+      <div className="flex items-center gap-2 border-t border-ink-700 px-3 py-1 text-[10px] tabular-nums text-ink-500">
+        <span className="truncate">{counts ? `${counts.words.toLocaleString()} words · ${counts.chars.toLocaleString()} characters · ${counts.paras.toLocaleString()} paragraphs` : 'Counting…'}</span>
+        <span className="flex-1" />
+        <span className="shrink-0 truncate" title="The paragraph the cursor is in, and its style">¶ {paraAt.toLocaleString()}{styleAt ? ` · ${styleAt}` : ''}</span>
+      </div>
+      {place.help !== false && <div className="border-t border-ink-700 px-3 py-1 text-[10px] leading-snug text-ink-500">
+        One paragraph per line · *italic* · **bold** · ^small caps^ · # heading · [Style] / [{'{align:center}'}] paragraph · &lt;Style&gt;…&lt;/Style&gt; · &lt;{'{size:14}'}&gt;…&lt;/&gt; · {'{fn:…}'} note · ⇧↵ line break · ⇥ tab · ⌥←/→ kern · ⌘F find
+      </div>}
+      <div
+        className="absolute bottom-0 right-0 z-10 cursor-nwse-resize touch-none p-0.5 text-ink-500 hover:text-ink-300"
+        style={{ width: 18, height: 18 }}
+        title="Drag to resize the editor"
+        onPointerDown={onResize}
+      >
+        <svg viewBox="0 0 14 14" className="h-full w-full" aria-hidden><path d="M13 5L5 13M13 9L9 13" stroke="currentColor" strokeWidth="1.2" /></svg>
       </div>
     </div>
   );

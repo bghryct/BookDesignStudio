@@ -338,6 +338,7 @@ function ScenePanel({ anims, startMode, hasJacket }: { anims: AnimationInfo[]; s
       </Section>
 
       <Section title="Camera & pose" id="s3d-camera">
+        <Hint>Drag to orbit, scroll to zoom, right-drag to pan. Keys: W / S closer and further, A / D left and right, Q / E down and up, ⇧ faster.</Hint>
         <Slider label="Lens" value={st.fov} min={15} max={75} step={1} onChange={(v) => st.set({ fov: v })} format={(v) => `${focal(v)} mm`} hint="Longer lenses flatten perspective for product shots" />
         <Segmented value={st.pose} onChange={(v) => st.set({ pose: v })} options={[{ value: 'standing', label: 'Standing' }, { value: 'angled', label: 'Angled' }, { value: 'lying', label: 'Lying' }, { value: 'open', label: 'Open' }]} />
         <span className="text-[10.5px] text-ink-400">Quality</span>

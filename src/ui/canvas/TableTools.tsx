@@ -162,13 +162,17 @@ export function makeTableFromDrag(project: Project, surface: SurfaceDesc, x: num
   });
 }
 
-/** A new table from CSV / TSV text centred on a point (surface coordinates) — for dropped files. */
-export function tableFromText(text: string, at: { x: number; y: number }, name = 'Table'): TableElement | null {
+/**
+ * A new table from CSV / TSV text centred on a point (surface coordinates) — for dropped files.
+ * It never starts above `top` (the head of the page's text block): a long table centred on the
+ * drop point used to begin far above the page, where its first rows could not be seen or printed.
+ */
+export function tableFromText(text: string, at: { x: number; y: number }, name = 'Table', top = -Infinity): TableElement | null {
   const data = parseDelimited(text);
   if (!data.length) return null;
   const m = tableFromMatrix(data);
   const w = Math.min(340, Math.max(160, m.cols.length * 72)), h = data.length * 15;
-  return makeTable({ ...m, name, x: at.x - w / 2, y: at.y - h / 2, w, h });
+  return makeTable({ ...m, name, x: at.x - w / 2, y: Math.max(top, at.y - h / 2), w, h });
 }
 
 /** Double-click on a table: edit the cell under the point (frame-local coordinates). */

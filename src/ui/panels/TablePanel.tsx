@@ -180,8 +180,9 @@ function StructureSection({ el, project, T, L, mut, threaded }: { el: TableEleme
         {L.overset && <span className="font-medium text-[#e5483a]" title="Rows that do not fit the frame are not printed">Overset rows</span>}
       </div>
       <Row>
-        <NumberField label="Rows" value={el.rows.length} min={1} max={500} decimals={0} onChange={(v) => setRowCount(Math.round(v))} />
-        <NumberField label="Columns" value={el.cols.length} min={1} max={60} decimals={0} onChange={(v) => setColCount(Math.round(v))} />
+        {/* The limits never fall below the table's own size: a CSV of 1,600 rows clamped to 500 deleted 1,100 rows on the first arrow key. */}
+        <NumberField label="Rows" value={el.rows.length} min={1} max={Math.max(500, el.rows.length + 500)} decimals={0} onChange={(v) => setRowCount(Math.round(v))} />
+        <NumberField label="Columns" value={el.cols.length} min={1} max={Math.max(60, el.cols.length + 60)} decimals={0} onChange={(v) => setColCount(Math.round(v))} />
       </Row>
       <Row>
         <NumberField label="Head rows" value={el.headerRows} min={0} max={el.rows.length} decimals={0} onChange={(v) => mut((t) => { t.headerRows = Math.round(v); t.footerRows = Math.min(t.footerRows, t.rows.length - t.headerRows); })} hint="Header rows take the header cell style and the header rule" />

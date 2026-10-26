@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import clsx from 'clsx';
 import { X, FileDown, Film, Image as ImageIcon, Save, FolderOpen } from 'lucide-react';
 import { useStore } from '../store/store';
@@ -15,6 +15,12 @@ type Tab = 'pdf' | 'svg' | 'video' | 'project';
 export default function ExportDialog() {
   const [tab, setTab] = useState<Tab>('pdf');
   const close = () => useStore.getState().setExportOpen(false);
+  // Esc closes the dialog (as the close button), wherever the focus is inside it.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } };
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  }, []);
   return (
     <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/55 p-4 backdrop-blur-sm" onPointerDown={(e) => { if (e.target === e.currentTarget) close(); }}>
       <div className="flex max-h-[92vh] w-full max-w-[640px] flex-col overflow-hidden rounded-xl border border-ink-600 bg-ink-850 shadow-2xl">

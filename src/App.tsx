@@ -1,6 +1,6 @@
 import React, { Suspense, lazy, useEffect, useState } from 'react';
 import clsx from 'clsx';
-import { useStore, loadAutosave, startAutosave, rawAutosave, startInSafeMode, markOpening } from './store/store';
+import { useStore, loadAutosave, startAutosave, rawAutosave, startInSafeMode, markOpening, keepRecoveredAutosave } from './store/store';
 import { ensureFamily } from './engine/fonts';
 import { ensureHyphenation } from './engine/hyphenate';
 import { TopBar } from './ui/TopBar';
@@ -34,10 +34,19 @@ export default function App() {
         // Opening this book stopped the app last time: hand it over as a file rather than open it again.
         const raw = await rawAutosave();
         if (cancelled) return;
-        if (raw) {
-          const file = { format: 'book-design-studio', version: 1, savedAt: new Date().toISOString(), project: raw, fonts: [] };
-          downloadBlob(new Blob([JSON.stringify(file)], { type: 'application/json' }), 'autosaved-book.bds.json');
-          useStore.getState().notify('Safe mode: your last book stopped the app while opening, so it was not opened again. It was downloaded as autosaved-book.bds.json; open it with File › Open to try again.', 'error');
+        // Once per tab (an address ending in ?safe would otherwise download it on every reload).
+        let handed = false;
+        try { handed = sessionStorage.getItem('bds.safeHanded') === '1'; sessionStorage.setItem('bds.safeHanded', '1'); } catch { /* storage blocked */ }
+        if (raw && !handed) {
+          await keepRecoveredAutosave(raw);
+          try {
+            const file = { format: 'book-design-studio', version: 1, savedAt: new Date().toISOString(), project: raw, fonts: [] };
+            downloadBlob(new Blob([JSON.stringify(file)], { type: 'application/json' }), 'autosaved-book.bds.json');
+            useStore.getState().notify('Safe mode: your last book stopped the app while opening, so it was not opened again. It was downloaded as autosaved-book.bds.json; open it with File › Open to try again.', 'error');
+          } catch {
+            // Too large to write as one file: it stays in this browser's storage.
+            useStore.getState().notify('Safe mode: your last book stopped the app while opening, so it was not opened again. It is too large to download as one file, and is kept in this browser.', 'error');
+          }
         }
       } else {
         markOpening(true);

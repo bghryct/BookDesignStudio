@@ -86,10 +86,14 @@ export function NumberField({ label, value, onChange, length, unit, min, max, st
   const fmt = (v: number) => (Number.isFinite(v) ? String(+v.toFixed(dec)) : '');
   const [text, setText] = useState(fmt(shown));
   const [focused, setFocused] = useState(false);
+  const escaped = useRef(false);
   useEffect(() => { if (!focused) setText(fmt(shown)); }, [shown, focused]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const clamp = (v: number) => Math.max(min ?? -Infinity, Math.min(max ?? Infinity, v));
   const commit = (raw: string) => {
+    // Leaving a field without changing it changes nothing: re-reading the rounded text used to nudge
+    // the value (16.004 mm became 16 mm), add an undo step, or clamp it to the field's limits.
+    if (raw.trim() === fmt(shown)) return;
     let v: number | null;
     if (length) v = parseLength(raw, docUnit);
     else {
@@ -144,11 +148,16 @@ export function NumberField({ label, value, onChange, length, unit, min, max, st
           value={text}
           disabled={disabled}
           onFocus={(e) => { setFocused(true); e.target.select(); }}
-          onBlur={() => { setFocused(false); commit(text); }}
+          onBlur={() => {
+            setFocused(false);
+            // Esc leaves the field as it was (the blur it causes still sees the typed text).
+            if (escaped.current) { escaped.current = false; return; }
+            commit(text);
+          }}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === 'Enter') { commit(text); (e.target as HTMLInputElement).blur(); }
-            if (e.key === 'Escape') { setText(fmt(shown)); (e.target as HTMLInputElement).blur(); }
+            if (e.key === 'Escape') { escaped.current = true; setText(fmt(shown)); (e.target as HTMLInputElement).blur(); }
             if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
               e.preventDefault();
               const dir = e.key === 'ArrowUp' ? 1 : -1;
