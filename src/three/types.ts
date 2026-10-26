@@ -120,6 +120,8 @@ export interface CameraOptions {
 export interface BookSceneOptions {
   background?: string;
   preserveDrawingBuffer?: boolean;
+  /** The WebGL context was lost (true: the canvas shows nothing) or restored (false). */
+  onContextChange?: (lost: boolean) => void;
 }
 
 /**

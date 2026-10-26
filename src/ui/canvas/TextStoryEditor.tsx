@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import clsx from 'clsx';
 import { X, Bold, Italic, CaseSensitive, Heading1, Heading2, Minus, Hash, Type, Pilcrow, Plus } from 'lucide-react';
 import { useStore } from '../../store/store';
@@ -140,6 +140,18 @@ export function TextStoryEditor({ elementId, anchor, viewport }: { elementId: st
   const headId = chain[0] ?? elementId;
   const head = findElement(project, headId)?.el as TextElement | undefined;
   const checkpointed = useRef(false);
+  const idleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => { if (idleTimer.current) clearTimeout(idleTimer.current); }, []);
+  // When smart typing or track changes rewrite what was typed, React's new value puts the caret at
+  // the end: put it back as soon as the value is committed, before the next keystroke arrives
+  // (a frame later was too late for fast typing, and the next letters landed at the end).
+  const pendingCaret = useRef<number | null>(null);
+  useLayoutEffect(() => {
+    const p = pendingCaret.current;
+    if (p == null || !ref.current) return;
+    pendingCaret.current = null;
+    ref.current.setSelectionRange(p, p);
+  });
   const html = useMemo(() => (head ? highlight(head.text) : ''), [head?.text]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
@@ -160,6 +172,7 @@ export function TextStoryEditor({ elementId, anchor, viewport }: { elementId: st
         if (!ta) return;
         ta.focus();
         ta.setSelectionRange(start, end);
+        setCaret(start);
         // Bring the selection into view: put the caret's line near the top.
         const line = ta.value.slice(0, start).split('\n').length - 1;
         const lh = parseFloat(getComputedStyle(ta).lineHeight) || 16;
@@ -172,16 +185,20 @@ export function TextStoryEditor({ elementId, anchor, viewport }: { elementId: st
 
   if (!head || head.type !== 'text') return null;
 
-  const width = Math.min(480, Math.max(340, anchor.w));
+  // At least 340 px wide, but never wider than the canvas (phones).
+  const width = Math.max(200, Math.min(480, Math.max(340, anchor.w), viewport.w - 16));
   let left = anchor.x + anchor.w + 12;
   if (left + width > viewport.w - 8) left = Math.max(8, anchor.x - width - 12);
   if (left < 8) left = Math.max(8, Math.min(viewport.w - width - 8, anchor.x));
   const top = Math.max(8, Math.min(viewport.h - 360, anchor.y));
 
+  // One undo step per burst of typing: after a pause of a second the next edit starts a new step.
   const setText = (text: string) => {
     const s = useStore.getState();
     if (!checkpointed.current) { s.checkpoint(); checkpointed.current = true; }
     s.updateElement(headId, { text } as Partial<TextElement>, { history: false });
+    if (idleTimer.current) clearTimeout(idleTimer.current);
+    idleTimer.current = setTimeout(() => { checkpointed.current = false; }, 1000);
   };
 
   const wrap = (before: string, after = before) => {
@@ -320,7 +337,7 @@ export function TextStoryEditor({ elementId, anchor, viewport }: { elementId: st
         <span className="flex-1" />
         <button type="button" title="Close (Esc)" className={tb} onClick={() => useStore.getState().setTextEditing(null)}><X size={13} /></button>
       </div>
-      <ChangesBar text={head.text} caret={caret} tracking={!!project.trackChanges} smart={!!project.smartTyping} onText={(t, c) => { setText(t); if (c != null) requestAnimationFrame(() => { ref.current?.focus(); ref.current?.setSelectionRange(c, c); }); }} />
+      <ChangesBar text={head.text} caret={caret} tracking={!!project.trackChanges} smart={!!project.smartTyping} onText={(t, c) => { setText(t); if (c != null) { setCaret(c); requestAnimationFrame(() => { ref.current?.focus(); ref.current?.setSelectionRange(c, c); }); } }} />
       {pop === 'char' && <CharFormat onApply={(props) => { if (props) wrap(`<{${props}}>`, '</>'); setPop(null); }} />}
       {pop === 'para' && <ParaFormat onApply={(props) => { paraLocal(props); setPop(null); }} />}
       {pop === 'insert' && (
@@ -370,7 +387,10 @@ export function TextStoryEditor({ elementId, anchor, viewport }: { elementId: st
             if (project.trackChanges) ({ text: value, caret: pos } = trackEdit(head.text, value, pos));
             setText(value);
             setCaret(pos);
-            if (value !== ta.value || pos !== ta.selectionStart) requestAnimationFrame(() => ta.setSelectionRange(pos, pos));
+            if (value !== ta.value || pos !== ta.selectionStart) {
+              pendingCaret.current = pos;
+              requestAnimationFrame(() => { if (pendingCaret.current === pos) { pendingCaret.current = null; ta.setSelectionRange(pos, pos); } });
+            }
           }}
           onSelect={(e) => setCaret((e.target as HTMLTextAreaElement).selectionStart)}
           onKeyDown={(e) => {

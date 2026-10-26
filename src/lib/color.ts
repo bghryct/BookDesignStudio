@@ -12,11 +12,49 @@ export function parseColor(input: string): RGB & { a: number } {
     return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255, a };
   }
   const m = s.match(/rgba?\(([^)]+)\)/i);
-  if (m) {
+  if (m && !m[1].includes('%')) {
     const [r, g, b, a = '1'] = m[1].split(/[\s,/]+/).filter(Boolean);
     return { r: +r, g: +g, b: +b, a: +a };
   }
-  return { r: 0, g: 0, b: 0, a: 1 };
+  // Names (red, white, …), hsl(), percentages: imported SVGs use them, and the canvas draws them,
+  // so the PDF and the colour maths must read them too (they used to come out black).
+  return cssColor(s) ?? { r: 0, g: 0, b: 0, a: 1 };
+}
+
+const cssCache = new Map<string, RGB & { a: number }>();
+let probe: { fillStyle: unknown } | null | undefined;
+
+/** Any other CSS colour, through a 2D context (which knows them all); null if it isn't one. */
+function cssColor(s: string): (RGB & { a: number }) | null {
+  const key = s.toLowerCase();
+  const hit = cssCache.get(key);
+  if (hit) return hit;
+  if (probe === undefined) {
+    try {
+      probe = typeof OffscreenCanvas !== 'undefined' ? new OffscreenCanvas(1, 1).getContext('2d')
+        : typeof document !== 'undefined' ? document.createElement('canvas').getContext('2d') : null;
+    } catch {
+      probe = null;
+    }
+  }
+  if (!probe) return null;
+  // A string the context rejects leaves fillStyle unchanged: try two sentinels to tell.
+  probe.fillStyle = '#000000';
+  probe.fillStyle = s;
+  const a = String(probe.fillStyle);
+  probe.fillStyle = '#ffffff';
+  probe.fillStyle = s;
+  if (a === '#000000' && String(probe.fillStyle) === '#ffffff') return null;
+  let out: RGB & { a: number };
+  if (a.startsWith('#')) {
+    const n = parseInt(a.slice(1, 7), 16);
+    out = { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255, a: 1 };
+  } else {
+    const [r, g, b, al = '1'] = (a.match(/\(([^)]+)\)/)?.[1] ?? '0,0,0').split(/[\s,/]+/).filter(Boolean);
+    out = { r: +r, g: +g, b: +b, a: +al };
+  }
+  if (cssCache.size < 1024) cssCache.set(key, out);
+  return out;
 }
 
 const h2 = (n: number) => Math.round(Math.max(0, Math.min(255, n))).toString(16).padStart(2, '0');

@@ -162,6 +162,8 @@ const circlePath = (cx: number, cy: number, r: number) => {
 
 /** Underline rules: solid, double, dashed, dotted or wavy, from x0 to x1 centred on y. */
 function underlinePrims(x0: number, x1: number, y: number, u: { w: number; c: string; k?: 'double' | 'dashed' | 'dotted' | 'wavy'; g?: string }): Prim[] {
+  if (!Number.isFinite(x0) || !Number.isFinite(x1) || !Number.isFinite(y)) return [];
+  if (!(u.w > 0 && u.w < 200)) u = { ...u, w: u.w >= 200 ? 200 : 0.5 };
   const rect = (yy: number, w: number, fill = u.c): Prim => ({ t: 'path', d: `M${x0} ${yy - w / 2}H${x1}V${yy + w / 2}H${x0}Z`, fill });
   // Gap colour: a band behind the rule, filling between its strokes, dashes or dots.
   if (u.g && u.k && u.k !== 'wavy') return [u.k === 'double' ? rect(y + u.w * 0.5, u.w * 2.6, u.g) : rect(y, u.w * 1.1, u.g), ...underlinePrims(x0, x1, y, { ...u, g: undefined })];
@@ -170,7 +172,7 @@ function underlinePrims(x0: number, x1: number, y: number, u: { w: number; c: st
     case 'dashed': return [{ t: 'path', d: `M${x0} ${y}H${x1}`, stroke: u.c, strokeWidth: u.w, dash: [u.w * 4, u.w * 2.5] }];
     case 'dotted': return [{ t: 'path', d: `M${x0 + u.w / 2} ${y}H${x1}`, stroke: u.c, strokeWidth: u.w * 1.1, dash: [0, u.w * 2.4], cap: 'round' }];
     case 'wavy': {
-      const a = u.w * 1.2, p = u.w * 4;
+      const a = u.w * 1.2, p = Math.max(u.w * 4, (x1 - x0) / 4000);
       let d = `M${x0} ${y}`;
       for (let x = x0, i = 0; x < x1; x += p, i++) d += `Q${Math.min(x1, x + p / 2)} ${y + (i % 2 ? a : -a) * 2} ${Math.min(x1, x + p)} ${y}`;
       return [{ t: 'path', d, stroke: u.c, strokeWidth: u.w * 0.8 }];
@@ -242,7 +244,9 @@ interface DropCapInfo {
   pad: number;
 }
 
+/** Prepared stories, newest last; bounded by count and by the text they hold (a whole book is megabytes, and each keystroke makes a new key). */
 const storyCache = new Map<string, Prepared>();
+let storyCacheChars = 0;
 
 /*
  * Per-paragraph caches, so an edit re-sets only the paragraphs it touched: the measured items of
@@ -278,7 +282,7 @@ function prepare(text: string, style: TextStyle, firstWidth: number, styles: Sto
   const sk = styles ? JSON.stringify({ p: styles.para, c: styles.char, h: styles.hyphenation, x: styles.hiddenConditions, l: styles.listStart }) + Object.entries(styles.images ?? {}).map(([k, v]) => `${k}:${v.w}x${v.h}`).join(',') : '';
   const key = `${useFontStore.getState().version}|${JSON.stringify(style)}|${Math.round(firstWidth)}|${sk}|${text}`;
   const hit = storyCache.get(key);
-  if (hit) return hit;
+  if (hit) { storyCache.delete(key); storyCache.set(key, hit); return hit; }
   const paras = parseStory(text, style, styles);
   const dict = hyphenDictionary(styles?.hyphenation);
   // Context of the measured items: loaded fonts and the project's styles.
@@ -333,10 +337,12 @@ function prepare(text: string, style: TextStyle, firstWidth: number, styles: Sto
     if (dropCap && i === 0) ps.indent = 0;
     const ragged = ps.align === 'left' || ps.align === 'right' || ps.align === 'center';
     const special = (i === 0 && (!!dropCap || style.firstLineSmallCaps)) || !!pst.lineStyles?.length;
-    const ik = special ? '' : `${ctxId}|${jsonOf(pst)}|${para.kind}|${para.first}|${para.marker}|${para.level}|${JSON.stringify(para.words)}`;
+    // The measure only matters for runs too long to fit it (they may then break anywhere).
+    const measure = Math.round(Math.max(1, firstWidth - ps.left - ps.right));
+    const ik = special ? '' : `${ctxId}|${jsonOf(pst)}|${para.kind}|${para.first}|${para.marker}|${para.level}|${measure < 12 * pst.fontSize ? measure : ''}|${JSON.stringify(para.words)}`;
     let items = special ? undefined : itemCache.get(ik);
     if (!items) {
-      items = buildItems(para, pst, ps, 0, ragged, dict, styles?.images);
+      items = buildItems(para, pst, ps, 0, ragged, dict, styles?.images, measure);
       if (!special) { itemCache.set(ik, items); if (itemCache.size > 30000) itemCache.delete(itemCache.keys().next().value!); }
     }
     if (i === 0 && style.firstLineSmallCaps && para.kind === 'body') {
@@ -352,7 +358,7 @@ function prepare(text: string, style: TextStyle, firstWidth: number, styles: Sto
         if (first.hyphen) count = Math.max(0, count - 1);
         if (count === scCount) break;
         scCount = count;
-        items = buildItems(para, pst, ps, scCount, ragged, dict, styles?.images);
+        items = buildItems(para, pst, ps, scCount, ragged, dict, styles?.images, measure);
       }
     }
     // Line styles: character styles on the first lines in sequence. Which words fall on which line
@@ -366,7 +372,7 @@ function prepare(text: string, style: TextStyle, firstWidth: number, styles: Sto
           const k = ends.findIndex((e) => wi < e);
           return k < 0 ? w : { ...w, pieces: w.pieces.map((pc) => ({ ...pc, st: { ...pc.st, cs: mergeCs([lineSegs[k].props!, ...(pc.st.cs ? [pc.st.cs] : [])]) } })) };
         }) };
-        const its = buildItems(styled, pst, ps, 0, ragged, dict, styles?.images);
+        const its = buildItems(styled, pst, ps, 0, ragged, dict, styles?.images, measure);
         items = its;
         // The first lines are narrower beside a drop cap.
         const widthAt = (ln: number) => (i === 0 && dropCap && ln < dropCap.lines ? fw - (dropCap.boxW + style.dropCap.gap) : fw);
@@ -384,7 +390,12 @@ function prepare(text: string, style: TextStyle, firstWidth: number, styles: Sto
 
   const result: Prepared = { key, paras: prepared, dropCap, styles };
   storyCache.set(key, result);
-  if (storyCache.size > 160) storyCache.delete(storyCache.keys().next().value!);
+  storyCacheChars += key.length;
+  while (storyCache.size > 1 && (storyCache.size > 160 || storyCacheChars > 3_000_000)) {
+    const old = storyCache.keys().next().value!;
+    storyCache.delete(old);
+    storyCacheChars -= old.length;
+  }
   return result;
 }
 
@@ -691,7 +702,7 @@ function layoutFrame(prep: Prepared, style: TextStyle, frame: FrameSpec, cursor:
     const pst = pp.para.style, ps = pp.ps;
     const builder = new ItemBuilder(pst, ps);
     const seenIx = new Set<number>();
-    const parts = new Map<number, { first: number; last: number; slot: Slot; runsFrom: number; runsTo: number; minX: number; maxX: number }>();
+    const parts = new Map<number, { first: number; last: number; slot: Slot; runsFrom: number; runsTo: number; minX: number; maxX: number; maxBase: number }>();
     for (const { li, slot } of placed) {
       const line = pl.lines[li];
       const lineW = pl.widthAt(li);
@@ -840,15 +851,16 @@ function layoutFrame(prep: Prepared, style: TextStyle, frame: FrameSpec, cursor:
 
       const part = parts.get(slot.col);
       const ext = lineRuns.reduce((a, r) => ({ min: Math.min(a.min, r.x), max: Math.max(a.max, r.x + r.width) }), { min: Infinity, max: -Infinity });
-      if (!part) parts.set(slot.col, { first: li, last: li, slot, runsFrom: from, runsTo: to, minX: ext.min, maxX: ext.max });
-      else { part.last = li; part.runsTo = to; part.minX = Math.min(part.minX, ext.min); part.maxX = Math.max(part.maxX, ext.max); }
+      if (!part) parts.set(slot.col, { first: li, last: li, slot, runsFrom: from, runsTo: to, minX: ext.min, maxX: ext.max, maxBase: slot.baseline });
+      else { part.last = li; part.runsTo = to; part.minX = Math.min(part.minX, ext.min); part.maxX = Math.max(part.maxX, ext.max); part.maxBase = Math.max(part.maxBase, slot.baseline); }
     }
 
     // Paragraph rules and shading, per column the paragraph occupies.
     const lastLine = pl.lines.length - 1;
     for (const [col, part] of parts) {
       // A split paragraph's rules and shading cover all its sub-columns, down to its deepest row.
-      const s0 = pl.slot(part.first), s1 = pl.rows ? pl.base(pl.rows - 1) : pl.slot(part.last);
+      // (The deepest line actually set: a split paragraph's last row may not have fitted.)
+      const s0 = pl.slot(part.first), s1 = pl.rows ? { ...pl.base(0), baseline: part.maxBase } : pl.slot(part.last);
       const ws = pl.rows ? pl.base(0) : part.slot;
       const x0 = ws.x + ps.left, x1 = ws.x + ws.w - ps.right;
       const yTop = s0.baseline - body.capHeight * ps.size, yBot = s1.baseline + ps.size * 0.22;
@@ -1120,7 +1132,28 @@ function verticalCells(text: string, font: FontRef, size: number, tcy: boolean):
   return cells;
 }
 
-function layoutVertical(text: string, style: TextStyle, frame: FrameSpec): FrameLayout {
+/**
+ * A vertical story's paragraphs as plain text: markup is read as for horizontal stories (notes,
+ * tracked changes, conditions and codes resolved, tags dropped), and its index entries, anchors and
+ * heads kept for the index, cross-references and contents.
+ */
+interface VPara { text: string; marks: string[]; head: { level: 1 | 2; text: string } | null }
+function verticalParas(text: string, style: TextStyle, styles: StoryStyles | null): VPara[] {
+  return parseStory(text, style, styles).map((p) => {
+    if (p.kind === 'break') return { text: '⁂', marks: [], head: null };
+    const plain = p.words.map((w, i) => (i > 0 && w.before !== 'none' ? ' ' : '') + w.text).join('');
+    const body = (p.marker ? `${p.marker} ` : '') + plain;
+    const marks: string[] = [];
+    for (const w of p.words) {
+      if (w.ix) marks.push(...w.ix);
+      if (w.anchors) for (const a of w.anchors) marks.push(`\u0001${a}\u0001${plain}`);
+    }
+    for (const n of p.styleNames ?? []) marks.push(`\u0002${n}\u0002${plain}`);
+    return { text: body, marks, head: p.kind === 'h1' || p.kind === 'h2' ? { level: p.kind === 'h1' ? 1 : 2, text: plain } : null };
+  });
+}
+
+function layoutVertical(vparas: VPara[], style: TextStyle, frame: FrameSpec): FrameLayout {
   const size = style.fontSize;
   const font = resolveFont({ family: style.fontFamily, weight: style.weight, italic: false, axes: style.axes, features: style.features, size });
   const m = fontMetrics(font);
@@ -1133,7 +1166,9 @@ function layoutVertical(text: string, style: TextStyle, frame: FrameSpec): Frame
   let yy = top;
   let count = 1;
   let overflow = false;
-  const paras = text.replace(/\r\n?/g, '\n').split('\n').filter((p) => p.trim());
+  const paras = vparas.filter((p) => p.text.trim());
+  const heads: { level: 1 | 2; text: string }[] = [];
+  const marks: string[] = [];
   const newColumn = () => {
     colCenter -= pitch;
     yy = top;
@@ -1145,7 +1180,9 @@ function layoutVertical(text: string, style: TextStyle, frame: FrameSpec): Frame
   outer: for (let pi = 0; pi < paras.length; pi++) {
     if (pi > 0 && !newColumn()) { overflow = true; break; }
     yy += size; // one-character paragraph indent (字下げ)
-    const cells = verticalCells(paras[pi].trim(), font, size, style.tateChuYoko);
+    marks.push(...paras[pi].marks);
+    if (paras[pi].head) heads.push(paras[pi].head!);
+    const cells = verticalCells(paras[pi].text.trim(), font, size, style.tateChuYoko);
     for (let ci = 0; ci < cells.length; ci++) {
       const c = cells[ci];
       const fitsHere = yy + c.adv <= bottom + 0.01;
@@ -1180,7 +1217,7 @@ function layoutVertical(text: string, style: TextStyle, frame: FrameSpec): Frame
       if (hang) { if (!newColumn()) { overflow = ci < cells.length - 1; break outer; } }
     }
   }
-  return { prims: runs.length ? [{ t: 'text', runs }] : [], lineCount: count, overflow, baselines: [], lines };
+  return { prims: runs.length ? [{ t: 'text', runs }] : [], lineCount: count, overflow, baselines: [], lines, heads, marks };
 }
 
 
@@ -1204,12 +1241,38 @@ export function frameSpecOf(el: TextElement, grid?: FrameSpec['grid'], wraps?: W
   };
 }
 
+const fin = (v: unknown, d: number, lo = -Infinity, hi = Infinity) => (typeof v === 'number' && Number.isFinite(v) ? Math.min(hi, Math.max(lo, v)) : d);
+
+function saneFrame(f: FrameSpec): FrameSpec {
+  const ins = f.insets ? { top: fin(f.insets.top, 0, 0, 1e5), right: fin(f.insets.right, 0, 0, 1e5), bottom: fin(f.insets.bottom, 0, 0, 1e5), left: fin(f.insets.left, 0, 0, 1e5) } : f.insets;
+  const grid = f.grid && fin(f.grid.increment, 0) > 0.01 ? { origin: fin(f.grid.origin, 0), increment: fin(f.grid.increment, 12, 0.01, 1e4) } : null;
+  return {
+    ...f, w: fin(f.w, 0, 0, 1e6), h: fin(f.h, 0, 0, 1e6), columns: Math.round(fin(f.columns, 1, 1, 60)), columnGap: fin(f.columnGap, 0, 0, 1e5),
+    inset: fin(f.inset, 0, 0, 1e5), insets: ins, grid, colWidth: f.colWidth != null ? fin(f.colWidth, 1, 1, 1e6) : undefined,
+    firstBaselineMin: f.firstBaselineMin != null ? fin(f.firstBaselineMin, 0, 0, 1e5) : undefined,
+  };
+}
+
+function saneStyle(s: TextStyle): TextStyle {
+  const fontSize = fin(s.fontSize, 10, 0.1, 5000);
+  const leading = fin(s.leading, fontSize * 1.2, 0.1, 10000);
+  const tracking = fin(s.tracking, 0, -1000, 5000);
+  const wordSpacing = fin(s.wordSpacing, 0, -90, 2000);
+  if (fontSize === s.fontSize && leading === s.leading && tracking === s.tracking && wordSpacing === s.wordSpacing) return s;
+  return { ...s, fontSize, leading, tracking, wordSpacing };
+}
+
 /** Lay out a story through one or more threaded frames. */
-export function layoutStory(text: string, style: TextStyle, frames: FrameSpec[], tokens: TokenContext, styles: StoryStyles | null = null): FrameLayout[] {
+export function layoutStory(text: string, style0: TextStyle, frames0: FrameSpec[], tokens: TokenContext, styles: StoryStyles | null = null): FrameLayout[] {
+  // Numbers from projects, files and fields can be missing, NaN, negative or absurd: clamp them
+  // here so the composer never sees a value that breaks it (a NaN column count used to throw).
+  const style = saneStyle(style0);
+  const frames = frames0.map(saneFrame);
   const expanded = expandTokens(text, tokens);
   if (style.writingMode === 'vertical') {
     // Vertical stories are set per frame (threading of vertical text is not supported).
-    return frames.map((f, i) => (i === 0 ? layoutVertical(expanded, style, f) : { prims: [], lineCount: 0, overflow: false, baselines: [], lines: [] }));
+    const vparas = verticalParas(expanded, style, styles);
+    return frames.map((f, i) => (i === 0 ? layoutVertical(vparas, style, f) : { prims: [], lineCount: 0, overflow: false, baselines: [], lines: [] }));
   }
   const f0 = frames[0];
   const in0 = f0?.insets ? f0.insets.left + f0.insets.right : (f0?.inset ?? 0) * 2;

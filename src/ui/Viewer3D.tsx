@@ -68,7 +68,6 @@ export default function Viewer3D() {
   const fontVersion = useFontStore((s) => s.version);
   const st = useScene3D();
   const wrapRef = useRef<HTMLDivElement>(null);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
   const sceneRef = useRef<BookScene | null>(null);
   const texRef = useRef<BookTextures | null>(null);
   /** Re-rasterises what the camera sees at the density it needs (pages, front cover, jacket). */
@@ -80,6 +79,8 @@ export default function Viewer3D() {
   const [leaf, setLeaf] = useState(0);
   const [building, setBuilding] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  /** The GPU dropped the WebGL context (driver reset, sleep, too many contexts): nothing draws. */
+  const [lost, setLost] = useState(false);
   const [anims, setAnims] = useState<AnimationInfo[]>([]);
   const [scrub, setScrub] = useState(0);
   const rootRef = useRef<HTMLDivElement>(null);
@@ -106,11 +107,16 @@ export default function Viewer3D() {
 
   // Mount the WebGL scene.
   useEffect(() => {
-    const canvas = canvasRef.current!;
+    // A canvas of its own per scene: the scene gives its context back when it is disposed, and a
+    // canvas whose context was given back cannot draw again (React re-runs this effect in dev).
+    const canvas = document.createElement('canvas');
+    canvas.className = 'block h-full w-full';
+    wrapRef.current!.prepend(canvas);
     let sc: BookScene;
     try {
-      sc = new BookScene(canvas, { background: st.color, preserveDrawingBuffer: true });
+      sc = new BookScene(canvas, { background: st.color, preserveDrawingBuffer: true, onContextChange: setLost });
     } catch (e) {
+      canvas.remove();
       setError(`WebGL is not available in this browser (${(e as Error).message}).`);
       return;
     }
@@ -128,7 +134,7 @@ export default function Viewer3D() {
       if (document.hidden || !sceneRef.current) return;
       refiner.update(sc.getTextureDemand(), sc.isPlaying());
     }, 400);
-    return () => { window.clearInterval(poll); ro.disconnect(); refiner.dispose(); refinerRef.current = null; sc.dispose(); sceneRef.current = null; };
+    return () => { window.clearInterval(poll); ro.disconnect(); refiner.dispose(); refinerRef.current = null; sc.dispose(); sceneRef.current = null; canvas.remove(); };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Quality: texture sharpness and the canvas pixel ratio.
@@ -158,6 +164,8 @@ export default function Viewer3D() {
       try {
         const tex = await buildBookTextures(project, calc, { signal, abort: abort.signal, jacket });
         if (!tex || signal.cancelled) { releaseBookTextures(tex); return; }
+        // A texture error from an earlier edit is over once the art builds again.
+        setError((e) => (e?.startsWith('Could not render textures') ? null : e));
         const old = texRef.current;
         texRef.current = tex;
         scene()?.setTextures(tex);
@@ -211,7 +219,13 @@ export default function Viewer3D() {
         </aside>
       )}
       <div ref={wrapRef} className="relative min-w-0 flex-1" style={{ background: bgCss }}>
-        <canvas ref={canvasRef} className="block h-full w-full" />
+        {lost && !error && (
+          <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-black/40 p-8 text-center text-[12.5px] text-white">
+            <div>The graphics card reset the 3D view. Your book is safe; the view comes back by itself in a moment.</div>
+            {/* If it doesn't, leaving the view and coming back makes a new one. */}
+            <button type="button" className="rounded-md border border-white/40 px-3 py-1.5 text-[12px] hover:bg-white/10" onClick={() => { const s = useStore.getState(); s.setView('spreads'); setTimeout(() => useStore.getState().setView('3d'), 50); }}>Restart the 3D view</button>
+          </div>
+        )}
         {error && <div className="absolute inset-0 flex items-center justify-center p-8 text-center text-[13px] text-ink-900">{error}</div>}
         {building && !error && <div className="absolute left-3 top-3 rounded bg-black/55 px-2 py-1 text-[11px] text-white">Rendering textures…</div>}
         <div className="absolute right-3 top-3 flex items-center gap-1 rounded-lg bg-black/50 p-1 backdrop-blur">
@@ -379,7 +393,7 @@ function ExportPanel({ scene, refiner, wrap, title, onDone }: { scene: React.Mut
     try {
       await sharpen(s.getTextureDemand(w, h));
       const canvas = s.renderStill(w, h);
-      const blob = await new Promise<Blob>((res) => canvas.toBlob((b) => res(b!), 'image/png'));
+      const blob = await new Promise<Blob>((res, rej) => canvas.toBlob((b) => (b ? res(b) : rej(new Error(`a ${w} × ${h} px image is more than this browser can make. Choose a smaller size.`))), 'image/png'));
       downloadBlob(blob, `${safeName(title)}-${orientation}-${w}x${h}.png`);
       useStore.getState().notify(`Still exported — ${w} × ${h} px.`);
     } catch (e) {

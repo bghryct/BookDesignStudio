@@ -64,10 +64,15 @@ export function textToStory(raw: string, opts: TextImportOptions = {}): TextImpo
 
   const out: string[] = [];
   let headings = 0;
+  // Whether any paragraph was actually rejoined from several lines (the summary says so).
+  let joined = false;
   // After a CONTENTS heading, chapter lines are the contents list, not headings.
   let inContents = false;
   const listed = new Set<string>();
   const norm = (l: string) => l.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  // How a contents line and its chapter match: "CHAPTER I.   Down the Rabbit-Hole" and "CHAPTER I."
+  // are both "chapter i" ("chapter the first" for spelled-out ordinals).
+  const headKey = (l: string) => { const w = norm(l).split(' '); return w.slice(0, w[1] === 'the' ? 3 : 2).join(' '); };
   const esc = opts.markdown ? (t: string) => t.replace(/([\\^{}<>])/g, '\\$1') : escPlain;
   const finish = (t: string) => {
     let s = esc(t.replace(/\s+/g, ' ').trim());
@@ -88,17 +93,19 @@ export function textToStory(raw: string, opts: TextImportOptions = {}): TextImpo
         return;
       }
       if (body.every((l) => /^>\s?/.test(l))) { out.push(`[{left:18}] ${finish(body.map((l) => l.replace(/^>\s?/, '')).join(' '))}`); return; }
+      if (body.length > 1) joined = true;
       out.push(finish(body.join(' ')));
       return;
     }
     const headLike = body.length <= 3 && HEAD.test(body[0]) && body.every((l) => l.length < 70);
     // A contents list: chapter lines, one per paragraph.
     if (body.length > 3 && body.filter((l) => HEAD.test(l)).length >= body.length * 0.7) {
-      for (const l of body) out.push(lead(finish(l)));
+      for (const l of body) { out.push(lead(finish(l))); listed.add(headKey(l)); }
+      inContents = true;
       return;
     }
     // …until an entry comes round again: that is the chapter itself.
-    if (inContents && headLike && !/^contents\b/i.test(body[0]) && !listed.has(norm(body[0]))) { listed.add(norm(body[0])); out.push(lead(finish(body.join(' ')))); return; }
+    if (inContents && headLike && !/^contents\b/i.test(body[0]) && !listed.has(headKey(body[0]))) { listed.add(headKey(body[0])); out.push(lead(finish(body.join(' ')))); return; }
     inContents = false;
     // A short block led by CHAPTER / BOOK / … is a heading (with its title line, if any).
     if (headLike) {
@@ -118,12 +125,12 @@ export function textToStory(raw: string, opts: TextImportOptions = {}): TextImpo
     }
     const shortLines = body.length > 1 && body.slice(0, -1).some((l) => l.length < W * 0.55);
     if (shortLines) para = body.map(finish).join('{br}');      // verse, letters, contents lists
-    else para = finish(body.join(' '));                           // wrapped prose
+    else { para = finish(body.join(' ')); if (body.length > 1) joined = true; } // wrapped prose
     out.push((indented ? '[{left:18}] ' : '') + lead(para));
   };
   // A literal paragraph-start marker (#, -, 1.) would be read as markup in plain text.
   const lead = (s: string) => (!opts.markdown && /^(#|- |• |\d+[.)] |[a-z]\) |\[|---\s*$)/.test(s) ? '\\' + s : s);
   for (const b of blocks) emit(b);
   const story = out.filter(Boolean).join('\n');
-  return { text: story, paragraphs: out.length, headings, unwrapped: wrapped, gutenberg };
+  return { text: story, paragraphs: out.length, headings, unwrapped: joined, gutenberg };
 }

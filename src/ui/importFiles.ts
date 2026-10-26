@@ -31,6 +31,44 @@ function toBase64(bytes: Uint8Array): string {
   for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
   return btoa(s);
 }
+
+/** How many times an asset id is used by the book's elements and stories ({img:…}). */
+function assetUses(p: Project, id: string): number {
+  const json = JSON.stringify([p.pages, p.masters, p.cover, p.jacket ?? null]);
+  let n = 0;
+  for (let i = json.indexOf(id); i >= 0; i = json.indexOf(id, i + id.length)) n++;
+  return n;
+}
+
+/**
+ * Show page `page` of a placed PDF in image element `elementId`. Every page asset of a file carries
+ * the whole PDF, so the file is not copied again for each page tried: the element's asset becomes
+ * the new page when nothing else uses it, a page placed before is reused, and pages of the file
+ * that nothing uses any more are removed.
+ */
+export async function switchPdfPage(elementId: string, page: number): Promise<void> {
+  const s = useStore.getState();
+  const loc = findElement(s.project, elementId);
+  const asset = loc?.el.type === 'image' && loc.el.assetId ? s.project.assets[loc.el.assetId] : undefined;
+  const pdf = asset?.pdf;
+  if (!asset || !pdf || page === pdf.page) return;
+  let target = Object.values(s.project.assets).find((a) => a.pdf && a.pdf.src === pdf.src && a.pdf.page === page);
+  if (!target) {
+    const bytes = new Uint8Array(await (await fetch(pdf.src)).arrayBuffer());
+    target = await pdfPageAsset(bytes, asset.name.replace(/ · p\. \d+$/, ''), page, pdf.src);
+    if (assetUses(useStore.getState().project, asset.id) <= 1) target = { ...target, id: asset.id };
+  }
+  const next = target;
+  s.update((d) => {
+    d.assets[next.id] = next as typeof d.assets[string];
+    const el = surfaceElementsDraft(d as Project, loc!.key)?.find((x) => x.id === elementId);
+    if (el && el.type === 'image') { el.assetId = next.id; el.placeholder = false; }
+  });
+  // Pages of this PDF that nothing shows any more.
+  const now = useStore.getState().project;
+  const unused = Object.values(now.assets).filter((a) => a.id !== next.id && a.pdf?.src === pdf.src && assetUses(now, a.id) === 0).map((a) => a.id);
+  if (unused.length) s.update((d) => { for (const id of unused) delete d.assets[id]; }, { history: false });
+}
 import { autoFlow } from '../model/pageOps';
 import { spreadsOf, pageSide, pageKey } from '../model/surfaces';
 import { textBlock } from '../engine/grid';
@@ -57,14 +95,17 @@ const readAsDataUrl = (f: Blob) => new Promise<string>((res, rej) => {
   r.readAsDataURL(f);
 });
 
-const imageSize = (src: string) => new Promise<{ w: number; h: number }>((res) => {
+/** The image's pixel size; null when the browser cannot decode it (empty, damaged, not an image). */
+const imageSize = (src: string) => new Promise<{ w: number; h: number } | null>((res) => {
   const img = new Image();
-  img.onload = () => res({ w: img.naturalWidth || 100, h: img.naturalHeight || 100 });
-  img.onerror = () => res({ w: 100, h: 100 });
+  img.onload = () => res(img.naturalWidth > 0 && img.naturalHeight > 0 ? { w: img.naturalWidth, h: img.naturalHeight } : null);
+  img.onerror = () => res(null);
   img.src = src;
 });
 
 const FONT_EXT = /\.(ttf|otf|woff2?|ttc)$/i;
+/** Largest table a dropped CSV / TSV may make (cells). */
+const MAX_TABLE_CELLS = 10000;
 
 /** Import dropped/picked files: images, SVG, fonts, text, project files. */
 export async function importFiles(files: File[], opts: ImportOptions = {}): Promise<{ messages: string[]; errors: string[] }> {
@@ -75,8 +116,12 @@ export async function importFiles(files: File[], opts: ImportOptions = {}): Prom
   for (const file of files) {
     try {
       if (FONT_EXT.test(file.name) || /font/.test(file.type)) {
-        const bytes = new Uint8Array(await file.arrayBuffer());
-        const r = await registerUploadedFont(bytes, file.name);
+        let bytes: Uint8Array = new Uint8Array(await file.arrayBuffer());
+        const sig = String.fromCharCode(...bytes.subarray(0, 4));
+        if (sig === 'ttcf') { errors.push(`${file.name}: a font collection (.ttc) holds several fonts; export the face you want as .ttf or .otf.`); continue; }
+        // WOFF2 is unpacked here (the font engine's own decoder never starts in a browser).
+        if (sig === 'wOF2') bytes = await (await import('../lib/woff2')).woff2ToSfnt(bytes);
+        const r = await registerUploadedFont(bytes, file.name).catch((e: Error) => { throw new Error(`not a font this app can read (${e.message})`); });
         const meta: UploadedFontMeta = { id: r.faceKey, family: r.family, fileName: file.name, weight: r.weight, italic: r.italic };
         s.update((d) => { d.fonts.push(meta); });
         messages.push(`Font “${r.family}”${r.variable ? ' (variable)' : ''} added.`);
@@ -88,16 +133,27 @@ export async function importFiles(files: File[], opts: ImportOptions = {}): Prom
         continue;
       }
       if (/\.(csv|tsv|tab)$/i.test(file.name) || file.type === 'text/csv' || file.type === 'text/tab-separated-values') {
-        const el = opts.place ? tableFromText(await file.text(), opts.place, file.name.replace(/\.[^.]+$/, '')) : null;
-        if (el) { s.addElement(opts.place!.surfaceKey, el); messages.push(`Table made from ${file.name}: ${el.rows.length} rows × ${el.cols.length} columns.`); }
-        else errors.push(`${file.name}: no rows found (drop it on a page to make a table).`);
+        // Picked from the File menu (no drop point): centre it in the current spread's text block.
+        const dp = opts.place ? null : defaultPlace();
+        const place = opts.place ?? (dp && { surfaceKey: dp.surfaceKey, x: dp.x + dp.w / 2, y: dp.y + dp.h / 2 });
+        if (!place) { errors.push(`${file.name}: open a page to place the table on.`); continue; }
+        const el = tableFromText(await file.text(), place, file.name.replace(/\.[^.]+$/, ''));
+        // Thousands of rows in one frame take the table engine many seconds per redraw, and the
+        // autosave would bring the freeze back on every reload: refuse instead of hanging.
+        const cells = el ? el.rows.length * el.cols.length : 0;
+        if (el && cells > MAX_TABLE_CELLS) { errors.push(`${file.name}: ${el.rows.length.toLocaleString()} rows × ${el.cols.length} columns is more than one table can hold (${MAX_TABLE_CELLS.toLocaleString()} cells). Split the file and place the parts on separate pages.`); continue; }
+        if (el) { s.addElement(place.surfaceKey, el); messages.push(`Table made from ${file.name}: ${el.rows.length} rows × ${el.cols.length} columns.`); }
+        else errors.push(`${file.name}: no rows found.`);
         continue;
       }
       if (MANUSCRIPT_EXT.test(file.name) || file.type === 'text/plain' || file.type === 'text/markdown') {
-        const { text, summary } = await loadManuscript(file, (s.project.paragraphStyles ?? []).map((p) => p.name));
-        // A book-length text picked without a drop point flows into new pages.
+        const { text, summary } = await loadManuscript(file, (useStore.getState().project.paragraphStyles ?? []).map((p) => p.name));
+        if (!text.trim()) { errors.push(`${file.name}: no text found.`); continue; }
+        // A book-length text picked without a drop point flows into new pages (after any flowed
+        // by an earlier file of the same drop: the project as it is now, not as it was).
         if (!opts.place && text.length > 12000) {
-          const n = autoFlow(text, { afterIndex: s.project.pages.length - 1, masterId: s.project.masters[0]?.id ?? null, startRecto: true });
+          const now = useStore.getState().project;
+          const n = autoFlow(text, { afterIndex: now.pages.length - 1, masterId: now.masters[0]?.id ?? null, startRecto: true });
           messages.push(`${file.name}: ${summary} — flowed into ${n} new page${n === 1 ? '' : 's'}.`);
           continue;
         }
@@ -133,8 +189,13 @@ export async function importFiles(files: File[], opts: ImportOptions = {}): Prom
       let size = await imageSize(src);
       if (isSvg) {
         const parsed = parseSvg(await file.text());
-        if (parsed) size = { w: parsed.viewBox.w, h: parsed.viewBox.h };
+        if (!parsed) { errors.push(`${file.name}: not an SVG drawing this app can read.`); continue; }
+        // A viewBox like "0 0 -10 NaN" must not give the frame a NaN size (it would never draw).
+        if (parsed.viewBox.w > 0 && parsed.viewBox.h > 0 && Number.isFinite(parsed.viewBox.w * parsed.viewBox.h)) size = { w: parsed.viewBox.w, h: parsed.viewBox.h };
+        size ??= { w: 100, h: 100 };
       }
+      // Empty or damaged pictures used to be placed as frames that never draw.
+      if (!size) { errors.push(`${file.name}: the picture is empty or damaged, or not in a format the browser can show.`); continue; }
       const asset: Asset = { id: uid('as'), kind: isSvg ? 'svg' : 'image', name: file.name, mime: file.type || (isSvg ? 'image/svg+xml' : 'image/png'), src, width: size.w, height: size.h };
       s.update((d) => { d.assets[asset.id] = asset; });
       if (opts.replaceImageId) {

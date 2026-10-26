@@ -169,7 +169,7 @@ export function layoutTable(el: TableElement, ctx: TableContext): TableLayout {
     if (hit && hit.key === key) return hit.layouts[th.index];
     let layouts: TableLayout[];
     try {
-      layouts = computeThread(head, th.frames.map((f) => f.el), hctx);
+      layouts = computeThread(saneTable(head), th.frames.map((f) => saneTable(f.el)), hctx);
     } catch (err) {
       console.error('Table layout failed', err);
       layouts = th.frames.map((f) => emptyLayout(f.el));
@@ -182,7 +182,7 @@ export function layoutTable(el: TableElement, ctx: TableContext): TableLayout {
   if (hit && hit.key === key) return hit.layout;
   let layout: TableLayout;
   try {
-    layout = computeSingle(el, ctx);
+    layout = computeSingle(saneTable(el), ctx);
   } catch (err) {
     console.error('Table layout failed', err);
     layout = emptyLayout(el);
@@ -193,6 +193,30 @@ export function layoutTable(el: TableElement, ctx: TableContext): TableLayout {
 
 export function compileTable(el: TableElement, ctx: TableContext): Prim[] {
   return layoutTable(el, ctx).prims;
+}
+
+/**
+ * Counts and sizes from a project file or a field can be NaN, infinite, negative or fractional. An
+ * infinite header-row count once looped forever adding rows until the tab ran out of memory, so the
+ * table is clamped before layout. Returns the element itself when nothing needs fixing (caches key on it).
+ */
+function saneTable(el: TableElement): TableElement {
+  const num = (v: unknown, d: number, lo: number, hi: number) => (typeof v === 'number' && Number.isFinite(v) ? Math.min(hi, Math.max(lo, v)) : d);
+  const R = el.rows.length;
+  const hr = Math.round(num(el.headerRows, 0, 0, R));
+  const fr = Math.round(num(el.footerRows, 0, 0, R - hr));
+  const w = num(el.w, 0, 0, 1e6), h = num(el.h, 0, 0, 1e6);
+  const rowsOk = el.rows.every((r) => Number.isFinite(r.h) && r.h >= 0);
+  const colsOk = el.cols.every((c) => c.w == null || (Number.isFinite(c.w) && c.w >= 0));
+  const styleOk = Number.isFinite(el.style.fontSize) && el.style.fontSize > 0 && Number.isFinite(el.style.leading) && el.style.leading > 0;
+  if (hr === el.headerRows && fr === el.footerRows && w === el.w && h === el.h && rowsOk && colsOk && styleOk && el.cells.length >= R) return el;
+  const cells = el.cells.length >= R ? el.cells : [...el.cells, ...Array.from({ length: R - el.cells.length }, () => el.cols.map(() => ({ text: '' })))];
+  return {
+    ...el, headerRows: hr, footerRows: fr, w, h, cells,
+    rows: rowsOk ? el.rows : el.rows.map((r) => ({ ...r, h: num(r.h, 0, 0, 1e5) })),
+    cols: colsOk ? el.cols : el.cols.map((c) => ({ ...c, w: num(c.w, c.mode === 'fr' ? 1 : 0, 0, 1e5) })),
+    style: styleOk ? el.style : { ...el.style, fontSize: num(el.style.fontSize, 9, 0.1, 5000), leading: num(el.style.leading, 11, 0.1, 10000) },
+  };
 }
 
 /** An empty frame (a continuation not threaded to any table): nothing printed. */

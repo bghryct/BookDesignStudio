@@ -125,8 +125,8 @@ export class BookScene {
   private readonly scene = new Scene();
   private readonly camera = new PerspectiveCamera(30, 1, 0.5, 1200);
   private readonly controls: OrbitControls;
-  private readonly pmrem: PMREMGenerator;
-  private readonly envTarget: WebGLRenderTarget;
+  private pmrem: PMREMGenerator;
+  private envTarget: WebGLRenderTarget;
   private readonly lights = new LightRig();
   private readonly ground: Mesh<PlaneGeometry, ShadowMaterial>;
   private readonly groundFade = { value: 30 };
@@ -203,10 +203,10 @@ export class BookScene {
 
     this.backdropState = { ...DEFAULT_BACKDROP, color: opts?.background ?? DEFAULT_BACKGROUND };
     this.pmrem = new PMREMGenerator(r);
-    const room = new RoomEnvironment();
-    this.envTarget = this.pmrem.fromScene(room, 0.04);
-    room.dispose();
-    this.scene.environment = this.envTarget.texture;
+    this.envTarget = this.makeEnvironment();
+    this.onContextChange = opts?.onContextChange;
+    canvas.addEventListener('webglcontextlost', this.contextLost);
+    canvas.addEventListener('webglcontextrestored', this.contextRestored);
     this.scene.add(...this.lights.objects);
 
     this.ground = new Mesh(new PlaneGeometry(400, 400).rotateX(-Math.PI / 2), new ShadowMaterial({ opacity: 0.22 }));
@@ -927,6 +927,7 @@ export class BookScene {
    * width × height into the scene canvas and return it. The caller restores the size with resize().
    */
   renderFrame(t: number, width: number, height: number): HTMLCanvasElement {
+    this.assertContext();
     // Hold the live loop until the caller restores the size with resize().
     this.offline = true;
     const w = Math.max(2, Math.round(width));
@@ -952,6 +953,7 @@ export class BookScene {
    * view is restored before returning.
    */
   renderStill(width: number, height: number): HTMLCanvasElement {
+    this.assertContext();
     const w = Math.max(2, Math.round(width));
     const h = Math.max(2, Math.round(height));
     const wasOffline = this.offline;
@@ -1113,9 +1115,50 @@ export class BookScene {
     if (this.dirty) this.renderNow();
   };
 
+  /** Exports from a lost context would be blank images: fail instead. */
+  private assertContext(): void {
+    if (this.disposed) throw new Error('the 3D view was closed before the export finished');
+    if (this.renderer.getContext().isContextLost()) throw new Error('the 3D view lost its graphics context. Wait for it to come back, or restart the 3D view');
+  }
+
+  /** The room's reflections, rendered into the scene's environment map. */
+  private makeEnvironment(): WebGLRenderTarget {
+    const room = new RoomEnvironment();
+    const target = this.pmrem.fromScene(room, 0.04);
+    room.dispose();
+    this.scene.environment = target.texture;
+    return target;
+  }
+
+  private readonly onContextChange?: (lost: boolean) => void;
+
+  /** three.js keeps the context restorable (it calls preventDefault); the canvas shows nothing meanwhile. */
+  private readonly contextLost = (): void => {
+    if (this.disposed) return;
+    this.onContextChange?.(true);
+  };
+
+  /**
+   * three.js rebuilds its GL state and re-uploads meshes and textures as they are drawn; what was
+   * rendered into targets is gone: the environment map is made again, and the contact shadow and
+   * shadow map on the next frame.
+   */
+  private readonly contextRestored = (): void => {
+    if (this.disposed) return;
+    this.envTarget.dispose();
+    this.pmrem.dispose();
+    this.pmrem = new PMREMGenerator(this.renderer);
+    this.envTarget = this.makeEnvironment();
+    this.poseDirty = true;
+    this.dirty = true;
+    this.onContextChange?.(false);
+  };
+
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    this.canvas.removeEventListener('webglcontextlost', this.contextLost);
+    this.canvas.removeEventListener('webglcontextrestored', this.contextRestored);
     cancelAnimationFrame(this.raf);
     this.controls.dispose();
     this.disposeModel();
@@ -1128,5 +1171,8 @@ export class BookScene {
     this.pmrem.dispose();
     this.scene.clear();
     this.renderer.dispose();
+    // Give the context back now: browsers keep only ~16, and switching views would pile them up
+    // until garbage collection (the oldest, possibly a live one, is then lost).
+    this.renderer.forceContextLoss();
   }
 }

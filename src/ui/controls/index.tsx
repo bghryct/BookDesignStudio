@@ -342,6 +342,8 @@ export function ColorField({ label, value, onChange, allowNone, hint }: {
   const btnRef = useRef<HTMLButtonElement>(null);
   const popRef = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState<{ left: number; top: number; maxH: number } | null>(null);
+  // A value that isn't a colour string (a damaged project) shows as no colour instead of throwing.
+  if (typeof value !== 'string') value = null;
   const lastColor = useRef(value ?? '#000000');
   if (value) lastColor.current = value;
 
@@ -393,7 +395,8 @@ export function ColorField({ label, value, onChange, allowNone, hint }: {
     };
   }, [open, place]);
 
-  const swatch = value ? swatches.find((s) => s.hex.toLowerCase() === value.toLowerCase()) : null;
+  const v = value;
+  const swatch = v ? swatches.find((s) => typeof s?.hex === 'string' && s.hex.toLowerCase() === v.toLowerCase()) : null;
   return (
     <div className="relative min-w-0" title={hint}>
       {label && <Label>{label}</Label>}

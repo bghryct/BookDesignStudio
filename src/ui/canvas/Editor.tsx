@@ -327,7 +327,7 @@ export function Editor({ mode }: { mode: 'spreads' | 'cover' | 'jacket' }) {
         }
       }
       if (tool === 'node' && single && single.el.type === 'path') {
-        const nh = nodeAt(single.el as PathElement, single.surface, p);
+        const nh = nodeAt(single.el as PathElement, single.surface, p, e.altKey);
         if (nh) {
           s.checkpoint();
           inter.current = { k: 'node', id: single.el.id, seg: nh.seg, which: nh.which, segs: parsePath((single.el as PathElement).d), surface: single.surface };
@@ -559,10 +559,19 @@ export function Editor({ mode }: { mode: 'spreads' | 'cover' | 'jacket' }) {
         if (sg.c === 'Z') return;
         if (it.which === 'p') {
           const ddx = px - sg.x, ddy = py - sg.y;
+          // A closed path starts and ends on one point (M … C to the start, Z): move both ends.
+          const last = segs.length - 1;
+          const twin = segs[last]?.c === 'Z' && last > 1 ? (it.seg === 0 ? segs[last - 1] : it.seg === last - 1 ? segs[0] : null) : null;
+          const together = twin && twin.c !== 'Z' && Math.abs(twin.x - sg.x) < 1e-6 && Math.abs(twin.y - sg.y) < 1e-6 ? twin : null;
           sg.x = px; sg.y = py;
           if (sg.c === 'C') { sg.x2 += ddx; sg.y2 += ddy; }
           const nx = segs[it.seg + 1];
           if (nx && nx.c === 'C') { nx.x1 += ddx; nx.y1 += ddy; }
+          if (together) {
+            together.x += ddx; together.y += ddy;
+            if (together.c === 'C') { together.x2 += ddx; together.y2 += ddy; }
+            else { const n1 = segs[1]; if (n1 && n1.c === 'C') { n1.x1 += ddx; n1.y1 += ddy; } }
+          }
         } else if (sg.c === 'C') {
           if (it.which === 'c1') { sg.x1 = px; sg.y1 = py; } else { sg.x2 = px; sg.y2 = py; }
         }
@@ -680,23 +689,27 @@ export function Editor({ mode }: { mode: 'spreads' | 'cover' | 'jacket' }) {
     return { x, y };
   }
 
-  function nodeAt(el: PathElement, surface: SurfaceDesc, p: Pt): { seg: number; which: 'p' | 'c1' | 'c2' } | null {
+  /** The node under the pointer. Anchors win over handles lying on them (a corner's retracted
+   *  handles sit exactly on it), so dragging a corner moves it; with Alt the handle is pulled out. */
+  function nodeAt(el: PathElement, surface: SurfaceDesc, p: Pt, handlesFirst = false): { seg: number; which: 'p' | 'c1' | 'c2' } | null {
     const segs = parsePath(el.d);
     const m = multiply(sceneMatrix(el, surface, calc), scaleM(el.w / el.vw, el.h / el.vh));
     const tol = 6 / zoom;
-    for (let i = segs.length - 1; i >= 0; i--) {
-      const sg = segs[i];
-      if (sg.c === 'Z') continue;
-      if (sg.c === 'C') {
-        const [a, b] = applyMatrix(m, sg.x2, sg.y2);
-        if (Math.hypot(p.x - a, p.y - b) < tol) return { seg: i, which: 'c2' };
-        const [c, d] = applyMatrix(m, sg.x1, sg.y1);
-        if (Math.hypot(p.x - c, p.y - d) < tol) return { seg: i, which: 'c1' };
+    const near = (x: number, y: number) => { const [a, b] = applyMatrix(m, x, y); return Math.hypot(p.x - a, p.y - b) < tol; };
+    const anchor = () => {
+      for (let i = segs.length - 1; i >= 0; i--) { const sg = segs[i]; if (sg.c !== 'Z' && near(sg.x, sg.y)) return { seg: i, which: 'p' as const }; }
+      return null;
+    };
+    const handle = () => {
+      for (let i = segs.length - 1; i >= 0; i--) {
+        const sg = segs[i];
+        if (sg.c !== 'C') continue;
+        if (near(sg.x2, sg.y2)) return { seg: i, which: 'c2' as const };
+        if (near(sg.x1, sg.y1)) return { seg: i, which: 'c1' as const };
       }
-      const [x, y] = applyMatrix(m, sg.x, sg.y);
-      if (Math.hypot(p.x - x, p.y - y) < tol) return { seg: i, which: 'p' };
-    }
-    return null;
+      return null;
+    };
+    return handlesFirst ? handle() ?? anchor() : anchor() ?? handle();
   }
 
   /** Dragging an item onto the other page of the spread moves it to that page. */

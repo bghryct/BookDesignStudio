@@ -247,7 +247,8 @@ export function ensureFamily(id: string): Promise<void> {
   if (def.system) return Promise.resolve();
   let p = familyLoads.get(def.id);
   if (!p) {
-    p = Promise.all(def.faces.map((f) => loadFace(def, faces.get(f.key)!))).then(() => undefined);
+    // Started on a microtask: compile calls this while React renders, and loading updates the font store.
+    p = Promise.resolve().then(() => Promise.all(def.faces.map((f) => loadFace(def, faces.get(f.key)!)))).then(() => undefined);
     familyLoads.set(def.id, p);
   }
   return p;
@@ -304,10 +305,8 @@ async function woff1ToSfnt(buf: Uint8Array): Promise<Uint8Array> {
 export async function toSfnt(bytes: Uint8Array): Promise<Uint8Array> {
   const sig = String.fromCharCode(...bytes.subarray(0, 4));
   if (sig === 'wOFF') return woff1ToSfnt(bytes);
-  if (sig === 'wOF2') {
-    const { default: decompress } = await import('wawoff2/decompress.js');
-    return new Uint8Array(await decompress(bytes));
-  }
+  // wawoff2's own entry point waits for a Node-only export and never settles in a browser.
+  if (sig === 'wOF2') return (await import('../lib/woff2')).woff2ToSfnt(bytes);
   return bytes;
 }
 
@@ -387,7 +386,7 @@ function faceWeightDistance(f: FaceDef, w: number) {
 /** Pick the best face and build complete variation coordinates. */
 export function resolveFont(req: FontRequest): FontRef {
   const fam = getFamily(req.family);
-  const weight = req.weight ?? 400;
+  const weight = Number.isFinite(+(req.weight ?? NaN)) ? Math.max(1, Math.min(1000, +req.weight!)) : 400;
   const italic = !!req.italic;
   const candidates = fam.faces.filter((f) => f.italic === italic);
   const pool = candidates.length ? candidates : fam.faces;
@@ -400,7 +399,8 @@ export function resolveFont(req: FontRequest): FontRef {
       if (a.tag === 'wght') v = weight;
       if (a.tag === 'opsz' && req.size) v = req.size;
       if (req.axes && req.axes[a.tag] != null) v = req.axes[a.tag];
-      axes[a.tag] = Math.max(a.min, Math.min(a.max, v));
+      v = +v;
+      axes[a.tag] = Number.isFinite(v) ? Math.max(a.min, Math.min(a.max, v)) : a.default;
     }
   } else if (Array.isArray(face.weight)) {
     // Not loaded yet: remember the requested weight so CSS is right once it arrives.
@@ -430,7 +430,7 @@ export function fontFeatureCss(features: Record<string, boolean>): string {
 }
 
 export function fontVariationCss(axes: Record<string, number>): string {
-  const parts = Object.entries(axes).map(([k, v]) => `"${k}" ${+v.toFixed(2)}`);
+  const parts = Object.entries(axes).filter(([, v]) => Number.isFinite(+v)).map(([k, v]) => `"${k}" ${+(+v).toFixed(2)}`);
   return parts.length ? parts.join(', ') : 'normal';
 }
 
@@ -448,7 +448,7 @@ export function faceSupports(ref: FontRef, feature: string): boolean {
 
 const variationCache = new Map<string, FontkitFont>();
 
-const axesKey = (axes: Record<string, number>) => Object.keys(axes).sort().map((k) => `${k}${axes[k].toFixed(2)}`).join(',');
+const axesKey = (axes: Record<string, number>) => Object.keys(axes).sort().map((k) => `${k}${(+axes[k]).toFixed(2)}`).join(',');
 
 /** The fontkit instance for this exact variation (shared, cached). */
 export function shaperFor(ref: FontRef): FontkitFont | null {

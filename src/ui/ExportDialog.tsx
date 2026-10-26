@@ -22,7 +22,7 @@ export default function ExportDialog() {
           <h2 className="font-serif text-[18px] text-ink-100" style={{ fontFamily: '"BDS EB Garamond", Georgia, serif' }}>Export</h2>
           <div className="ml-2 flex gap-1">
             {([['pdf', 'Print PDF', <FileDown key="a" size={13} />], ['svg', 'SVG · PNG', <ImageIcon key="b" size={13} />], ['video', 'Video', <Film key="c" size={13} />], ['project', 'Project', <Save key="d" size={13} />]] as const).map(([id, label, icon]) => (
-              <button key={id} type="button" onClick={() => setTab(id)} className={clsx('flex h-7 items-center gap-1.5 rounded-md px-2.5 text-[12px]', tab === id ? 'bg-ink-600 text-ink-100' : 'text-ink-400 hover:text-ink-100')}>{icon}{label}</button>
+              <button key={id} type="button" title={label} onClick={() => setTab(id)} className={clsx('flex h-7 items-center gap-1.5 rounded-md px-2.5 text-[12px]', tab === id ? 'bg-ink-600 text-ink-100' : 'text-ink-400 hover:text-ink-100')}>{icon}<span className="hidden sm:inline">{label}</span></button>
             ))}
           </div>
           <button type="button" title="Close" onClick={close} className="ml-auto rounded p-1 text-ink-400 hover:bg-ink-700 hover:text-ink-100"><X size={16} /></button>
@@ -49,7 +49,7 @@ function PdfTab() {
     setBusy({ p: 0, label: 'Preparing' });
     try {
       const bytes = await exportPdf(project, { ...o, spreadIndex: spread, onProgress: (p, label) => setBusy({ p, label }) });
-      const suffix = o.scope === 'cover' ? 'cover' : o.scope === 'spread' ? `spread-${spread}` : 'interior';
+      const suffix = o.scope === 'cover' ? 'cover' : o.scope === 'jacket' ? 'jacket' : o.scope === 'spread' ? `spread-${spread}` : 'interior';
       downloadBlob(new Blob([bytes.slice().buffer as ArrayBuffer], { type: 'application/pdf' }), `${safeName(project.book.title)}-${suffix}.pdf`);
       useStore.getState().notify('PDF exported.');
     } catch (e) {

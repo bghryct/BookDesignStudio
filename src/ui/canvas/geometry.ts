@@ -65,9 +65,11 @@ export function hitElement(el: Element, surface: SurfaceDesc, calc: BindingCalc 
 }
 
 export function surfaceAt(surfaces: SurfaceDesc[], p: Pt, pad = 0): SurfaceDesc | null {
-  for (const s of surfaces) {
-    if (p.x >= s.x - s.bleed - pad && p.x <= s.x + s.w + s.bleed + pad && p.y >= s.y - s.bleed - pad && p.y <= s.y + s.h + s.bleed + pad) return s;
-  }
+  const near = (s: SurfaceDesc) => p.x >= s.x - s.bleed - pad && p.x <= s.x + s.w + s.bleed + pad && p.y >= s.y - s.bleed - pad && p.y <= s.y + s.h + s.bleed + pad;
+  // Facing pages' bleed and padding overlap at the gutter: the page the point is over wins, so an
+  // item drawn just right of the gutter lands on the right-hand page, not the left.
+  for (const s of surfaces) if (p.x >= s.x && p.x <= s.x + s.w && near(s)) return s;
+  for (const s of surfaces) if (near(s)) return s;
   return null;
 }
 

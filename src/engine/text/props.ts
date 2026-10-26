@@ -126,6 +126,23 @@ function entries(src: string): [string, unknown][] {
   });
 }
 
+const CHAR_NUMS = new Set<string>(['weight', 'size', 'sizeScale', 'tracking', 'baselineShift', 'underlineWeight', 'underlineOffset', 'strikeWeight', 'hScale', 'vScale', 'skew', 'strokeWidth', 'rotate']);
+const PARA_NUMS = new Set<string>(['fontSize', 'leading', 'weight', 'tracking', 'firstLineIndent', 'leftIndent', 'rightIndent', 'spaceBefore', 'spaceAfter', 'ragAmount', 'widows', 'orphans', 'wordSpaceMin', 'wordSpaceMax', 'letterSpaceMin', 'letterSpaceMax', 'glyphScaleMin', 'glyphScaleMax', 'splitGap', 'keepWithNext']);
+const LIMITS: Record<string, [number, number]> = {
+  weight: [1, 1000], level: [0, 8], splitColumns: [1, 20], size: [0.1, 5000], fontSize: [0.1, 5000], leading: [0, 20000], sizeScale: [1, 10000], hScale: [1, 10000], vScale: [1, 10000],
+  underlineWeight: [0.05, 200], strikeWeight: [0.05, 200], strokeWidth: [0, 200], widows: [1, 50], orphans: [1, 50], keepWithNext: [0, 50],
+};
+const WEIGHTS: Record<string, number> = { thin: 100, hairline: 100, extralight: 200, ultralight: 200, light: 300, normal: 400, regular: 400, book: 400, medium: 500, semibold: 600, demibold: 600, bold: 700, extrabold: 800, ultrabold: 800, black: 900, heavy: 900 };
+
+/** A number from a markup value ("12", "12pt", "14.", "bold" for a weight), clamped to a sane range; undefined when there is none. */
+function num(key: string, v: unknown): number | undefined {
+  let x = typeof v === 'number' ? v : typeof v === 'string' ? parseFloat(v) : NaN;
+  if (!Number.isFinite(x) && key === 'weight' && typeof v === 'string') x = WEIGHTS[v.toLowerCase().replace(/[\s-]/g, '')] ?? NaN;
+  if (!Number.isFinite(x)) return undefined;
+  const [lo, hi] = LIMITS[key] ?? [-1e5, 1e5];
+  return Math.max(lo, Math.min(hi, x));
+}
+
 function features(v: unknown): Record<string, boolean> {
   const out: Record<string, boolean> = {};
   for (const t of String(v).split(/[\s+]+/).filter(Boolean)) out[t.replace(/^-/, '')] = !t.startsWith('-');
@@ -150,7 +167,12 @@ export function parseCharProps(src: string): CharacterStyleProps {
     else if (k === 'underline' || k === 'strike') {
       if (typeof v === 'string') { out[k] = true; out[k === 'underline' ? 'underlineColor' : 'strikeColor'] = v; } else out[k] = !!v;
     } else if (k === 'stroke' && v === true) out[k] = 'currentColor';
-    else out[k] = v;
+    else if (CHAR_NUMS.has(k)) { const x = num(k, v); if (x != null) out[k] = x; }
+    else if (k === 'italic' || k === 'noBreak') out[k] = typeof v === 'string' ? !/^(0|false|no|off)?$/i.test(v) : !!v;
+    // Everything else is text (a colour, font, language, link, mark): a bare flag means the default where there is one.
+    else if (typeof v === 'string' || typeof v === 'number') { if (String(v)) out[k] = String(v); }
+    else if (v === true && k === 'highlight') out[k] = '#f6e27a';
+    else if (v === true && k === 'emphasis') out[k] = 'dot';
   }
   return out as CharacterStyleProps;
 }
@@ -163,7 +185,7 @@ export function parseParaProps(src: string): ParagraphStyleProps {
     if (k0 === 'swiss' || k0 === 'balanced' || k0 === 'wedge') { out.rag = k0; continue; }
     if (k0 === 'bullet' || k0 === 'bullets') { out.list = { type: 'bullet', bullet: typeof v === 'string' ? v : '•' }; continue; }
     if (k0 === 'number' || k0 === 'numbered' || k0 === 'list') { out.list = { ...(out.list as object ?? {}), type: 'number', format: typeof v === 'string' && v !== 'number' ? v : 'decimal' }; continue; }
-    if (k0 === 'level') { out.list = { type: 'number', ...(out.list as object ?? {}), level: Number(v) || 0 }; continue; }
+    if (k0 === 'level') { out.list = { type: 'number', ...(out.list as object ?? {}), level: Math.round(num('level', v) ?? 0) }; continue; }
     if (k0 === 'multi' || k0 === 'hierarchical') { out.list = { type: 'number', ...(out.list as object ?? {}), hierarchical: v !== false }; continue; }
     if (k0 === 'continue') { out.list = { type: 'number', ...(out.list as object ?? {}), continueAcross: v !== false }; continue; }
     const k = PARA_KEYS[k0];
@@ -171,9 +193,11 @@ export function parseParaProps(src: string): ParagraphStyleProps {
     if (k === 'align' || k === 'lastLineAlign' || k === 'singleWordJustify') out[k] = ALIGNS[String(v).toLowerCase()] === 'justify-all' && k !== 'align' ? 'justify' : ALIGNS[String(v).toLowerCase()] ?? v;
     else if (k === 'textTransform') out[k] = CASES[String(v).toLowerCase()] ?? 'none';
     else if (k === 'keepWithPrevious' || k === 'keepTogether' || k === 'hyphenate' || k === 'opticalMargin' || k === 'baselineGrid' || k === 'spanColumns' || k === 'hyphenateAcrossColumns') out[k] = !!v;
-    else if (k === 'splitColumns') out[k] = v === true ? 2 : Number(v) || 1;
+    else if (k === 'splitColumns') out[k] = v === true ? 2 : Math.round(num(k, v) ?? 1);
     else if (k === 'keepWithNext' && v === true) out[k] = 2;
-    else out[k] = v;
+    else if (PARA_NUMS.has(k)) { const x = num(k, v); if (x != null) out[k] = x; }
+    else if (k === 'italic') out[k] = typeof v === 'string' ? !/^(0|false|no|off)?$/i.test(v) : !!v;
+    else if (typeof v === 'string' || typeof v === 'number') { if (String(v)) out[k] = String(v); }
   }
   return out as ParagraphStyleProps;
 }

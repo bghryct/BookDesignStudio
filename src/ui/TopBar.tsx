@@ -3,9 +3,8 @@ import clsx from 'clsx';
 import { Undo2, Redo2, Download, PanelLeft, PanelRight, FolderOpen, Save, FilePlus, BookOpen, Box, LayoutGrid, Book, BookBookmark, ChevronDown, RotateCcw, Upload } from 'lucide-react';
 import { useStore, type View } from '../store/store';
 import { createDefaultProject } from '../model/defaults';
-import { saveProjectFile, loadProjectFile } from './projectIO';
+import { saveProjectFile, loadProjectFile, blankProject } from './projectIO';
 import { importFiles } from './importFiles';
-import { makePage } from '../model/factory';
 
 const VIEWS: { id: View; label: string; icon: React.ReactNode; title: string }[] = [
   { id: 'spreads', label: 'Spreads', icon: <BookOpen size={14} />, title: 'Interior spreads & masters' },
@@ -23,7 +22,7 @@ export function TopBar({ onToggleLeft, onToggleRight, leftOpen, rightOpen }: { o
   const s = useStore.getState;
 
   return (
-    <header className="flex h-11 shrink-0 items-center gap-2 border-b border-ink-700 bg-ink-900 px-2">
+    <header className="flex h-11 shrink-0 items-center gap-1 border-b border-ink-700 bg-ink-900 px-1 sm:gap-2 sm:px-2">
       <button type="button" onClick={onToggleLeft} title="Toggle left panel" className={clsx('inline-flex h-7 w-7 items-center justify-center rounded text-ink-300 hover:bg-ink-700', leftOpen && 'text-ink-100')}>
         <PanelLeft size={15} />
       </button>
@@ -100,14 +99,7 @@ function FileMenu() {
       {open && (
         <div className="absolute left-0 top-full z-50 mt-1 w-60 rounded-md border border-ink-600 bg-ink-800 p-1 shadow-2xl">
           <button type="button" className={item} onClick={() => {
-            if (confirm('Start a new book? The current project is autosaved in this browser until replaced.')) {
-              const p = createDefaultProject();
-              p.pages = [makePage(), makePage(), makePage(), makePage()];
-              p.name = 'Untitled book';
-              p.book.title = 'Untitled';
-              p.cover.elements = [];
-              s().replaceProject(p);
-            }
+            if (confirm('Start a new book? The current project is autosaved in this browser until replaced.')) s().replaceProject(blankProject());
             setOpen(false);
           }}><FilePlus size={14} /> New blank book</button>
           <button type="button" className={item} onClick={() => {

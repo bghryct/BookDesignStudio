@@ -6,6 +6,7 @@ import { findElement, surfaceElementsDraft, spreadsOf } from '../model/surfaces'
 import { cloneElement } from '../model/factory';
 import { releaseTableFrames } from '../model/table';
 import { idbGet, idbSet } from '../lib/idb';
+import { normalizeProject } from '../model/normalize';
 
 export type View = 'spreads' | 'cover' | 'jacket' | '3d' | 'matrix';
 
@@ -134,11 +135,14 @@ export const useStore = create<State>((set, get) => ({
     if (changed === project) return;
     // Every change stamps the modification time ({modified}).
     const next = produce(changed, (d) => { d.modifiedAt = Date.now(); if (d.createdAt == null) d.createdAt = Date.now(); });
+    // Live edits (drags, typing) ride on the caller's checkpoint and leave the burst timer alone,
+    // so a real change made just after one still gets its own undo step.
+    if (opts?.history === false) { set({ project: next, future: [], rev: get().rev + 1 }); return; }
     const now = performance.now();
     // A burst of changes (dragging in a colour picker, holding an arrow key) is one undo step.
     const burst = now - lastHistoryAt < 300;
     lastHistoryAt = now;
-    if (opts?.history === false || (burst && past.length)) set({ project: next, future: [], rev: get().rev + 1 });
+    if (burst && past.length) set({ project: next, future: [], rev: get().rev + 1 });
     else set({ project: next, past: [...past.slice(-HISTORY_LIMIT), project], future: [], rev: get().rev + 1 });
   },
   checkpoint: () => {
@@ -160,7 +164,13 @@ export const useStore = create<State>((set, get) => ({
     if (!future.length) return;
     set({ project: future[0], past: [...past, project], future: future.slice(1), rev: get().rev + 1 });
   },
-  replaceProject: (p) => set({ project: p, past: [], future: [], selection: [], spread: 0, masterEdit: null, rev: get().rev + 1 }),
+  replaceProject: (p) => {
+    // Projects from outside (files, older versions) are repaired first; throws when it has no pages.
+    const repairs = { count: 0 };
+    const project = normalizeProject(p, repairs);
+    set({ project, past: [], future: [], selection: [], spread: 0, masterEdit: null, textEditing: null, rev: get().rev + 1 });
+    if (repairs.count) tellRepairs(repairs.count);
+  },
 
   setView: (view) => set({ view, selection: [], textEditing: null }),
   setSpread: (i) => {
@@ -287,13 +297,43 @@ export const useStore = create<State>((set, get) => ({
 const AUTOSAVE_KEY = 'autosave';
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
 
+/** The stored autosave as it is: safe mode hands it over as a file instead of opening it. */
+export async function rawAutosave(): Promise<unknown> {
+  try { return await idbGet<unknown>('projects', AUTOSAVE_KEY); } catch { return null; }
+}
+
+/*
+ * Safe mode. A book that freezes or crashes the tab while it opens would do so again on every
+ * reload, so opening is marked as in progress until the book is on screen. If the last opening
+ * never finished (or the address ends in ?safe), the next start does not open the autosave.
+ */
+const OPENING = 'bds.opening';
+export function startInSafeMode(): boolean {
+  if (/[?&]safe\b/.test(location.search)) return true;
+  try {
+    const t = Number(localStorage.getItem(OPENING));
+    return t > 0 && Date.now() - t < 10 * 60_000;
+  } catch { return false; }
+}
+export function markOpening(on: boolean) {
+  try { if (on) localStorage.setItem(OPENING, String(Date.now())); else localStorage.removeItem(OPENING); } catch { /* storage blocked */ }
+}
+
 export async function loadAutosave(): Promise<Project | null> {
   try {
-    const p = await idbGet<Project>('projects', AUTOSAVE_KEY);
-    return p && p.version === 1 && Array.isArray(p.pages) ? p : null;
+    const raw = await idbGet<unknown>('projects', AUTOSAVE_KEY);
+    if (!raw) return null;
+    const repairs = { count: 0 };
+    const p = normalizeProject(raw, repairs);
+    if (repairs.count) tellRepairs(repairs.count);
+    return p;
   } catch {
     return null;
   }
+}
+
+function tellRepairs(n: number) {
+  useStore.getState().notify(`Repaired ${n} problem${n === 1 ? '' : 's'} in this project.`);
 }
 
 export function startAutosave() {
@@ -302,8 +342,21 @@ export function startAutosave() {
     if (s.project === last) return;
     last = s.project;
     if (saveTimer) clearTimeout(saveTimer);
-    saveTimer = setTimeout(() => { void idbSet('projects', AUTOSAVE_KEY, last).catch(() => undefined); }, 700);
+    saveTimer = setTimeout(() => { void idbSet('projects', AUTOSAVE_KEY, last).catch(autosaveFailed); }, 700);
   });
+}
+
+/** Autosave failures are told once per kind (storage full, unstorable data, …), not on every save. */
+const autosaveWarned = new Set<string>();
+function autosaveFailed(err: unknown) {
+  const kind = (err as Error | undefined)?.name || 'Error';
+  if (autosaveWarned.has(kind)) return;
+  autosaveWarned.add(kind);
+  console.warn('Book Design Studio autosave failed:', err);
+  const why = kind === 'QuotaExceededError' ? 'this browser’s storage is full'
+    : kind === 'DataCloneError' ? 'part of the project could not be stored'
+    : (err as Error | undefined)?.message || 'the browser refused to store it';
+  useStore.getState().notify(`Autosave failed (${why}). Save a project file (File › Save project file) to keep your work.`, 'error');
 }
 
 export const getState = () => useStore.getState();

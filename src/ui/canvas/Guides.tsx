@@ -15,6 +15,8 @@ const FOLD = 'rgba(40, 170, 120, 0.95)';
 const SECOND = 'rgba(240, 140, 30, 0.85)';
 
 const hair = { vectorEffect: 'non-scaling-stroke' as const, strokeWidth: 1, fill: 'none' };
+/** Grid cells can come out negative for impossible settings (margins wider than the page); SVG rejects those. */
+const nn = (v: number) => (v > 0 ? v : 0);
 
 export function SurfaceGuides({ project, surface }: { project: Project; surface: SurfaceDesc }) {
   const g = project.book.grid;
@@ -38,15 +40,15 @@ export function SurfaceGuides({ project, surface }: { project: Project; surface:
       {g.showGrid && grid.microX.map((x, i) => <line key={`mx${i}`} x1={x} x2={x} y1={block.y} y2={block.y + block.h} stroke={MICRO} {...hair} strokeDasharray="2 3" />)}
       {g.showGrid && grid.microY.map((y, i) => <line key={`my${i}`} x1={block.x} x2={block.x + block.w} y1={y} y2={y} stroke={MICRO} {...hair} strokeDasharray="2 3" />)}
       {g.showGrid && grid.rows.length > 1 && grid.rows.map((r, i) => (
-        <rect key={`r${i}`} x={block.x} y={r.y} width={block.w} height={r.h} stroke={ROW} {...hair} />
+        <rect key={`r${i}`} x={block.x} y={r.y} width={nn(block.w)} height={nn(r.h)} stroke={ROW} {...hair} />
       ))}
       {g.showGrid && grid.cols.length > 1 && !spreadGrid(project.book) && grid.cols.map((c, i) => (
-        <rect key={`c${i}`} x={c.x} y={block.y} width={c.w} height={block.h} stroke={COLUMN} {...hair} />
+        <rect key={`c${i}`} x={c.x} y={block.y} width={nn(c.w)} height={nn(block.h)} stroke={COLUMN} {...hair} />
       ))}
       {g.showGrid && grid.cols2.map((c, i) => (
-        <rect key={`c2${i}`} x={c.x} y={block.y} width={c.w} height={block.h} stroke={SECOND} {...hair} strokeDasharray="6 3" />
+        <rect key={`c2${i}`} x={c.x} y={block.y} width={nn(c.w)} height={nn(block.h)} stroke={SECOND} {...hair} strokeDasharray="6 3" />
       ))}
-      {g.showMargins && <rect x={block.x} y={block.y} width={block.w} height={block.h} stroke={MARGIN} {...hair} />}
+      {g.showMargins && <rect x={block.x} y={block.y} width={nn(block.w)} height={nn(block.h)} stroke={MARGIN} {...hair} />}
     </g>
   );
 }
@@ -57,9 +59,9 @@ export function SpreadGridGuides({ project, x, y }: { project: Project; x: numbe
   if (!sg || !project.book.grid.showGrid) return null;
   return (
     <g transform={`translate(${x} ${y})`} pointerEvents="none">
-      {sg.cols.map((c, i) => <rect key={i} x={c.x} y={c.y} width={c.w} height={c.h} stroke={COLUMN} {...hair} />)}
+      {sg.cols.map((c, i) => <rect key={i} x={c.x} y={c.y} width={nn(c.w)} height={nn(c.h)} stroke={COLUMN} {...hair} />)}
       {sg.cols.filter((c) => c.x < sg.fold && c.x + c.w > sg.fold).map((c, i) => (
-        <rect key={`f${i}`} x={c.x} y={c.y} width={c.w} height={c.h} fill={COLUMN} opacity={0.06} />
+        <rect key={`f${i}`} x={c.x} y={c.y} width={nn(c.w)} height={nn(c.h)} fill={COLUMN} opacity={0.06} />
       ))}
     </g>
   );
@@ -84,9 +86,9 @@ function PanelGridGuides({ panels, grid, height }: { panels: { id: string; x: nu
   return (
     <g>
       {g.baselines.map((b, i) => <line key={`pb${i}`} x1={b.x} x2={b.x + b.w} y1={b.y} y2={b.y} stroke={BASELINE} {...hair} />)}
-      {g.rows.map((r, i) => <rect key={`pr${i}`} x={r.x} y={r.y} width={r.w} height={r.h} stroke={ROW} {...hair} />)}
-      {g.cols.map((c, i) => <rect key={`pc${i}`} x={c.x} y={c.y} width={c.w} height={c.h} stroke={COLUMN} {...hair} />)}
-      {g.blocks.map((b, i) => <rect key={`pm${i}`} x={b.x} y={b.y} width={b.w} height={b.h} stroke={MARGIN} {...hair} />)}
+      {g.rows.map((r, i) => <rect key={`pr${i}`} x={r.x} y={r.y} width={nn(r.w)} height={nn(r.h)} stroke={ROW} {...hair} />)}
+      {g.cols.map((c, i) => <rect key={`pc${i}`} x={c.x} y={c.y} width={nn(c.w)} height={nn(c.h)} stroke={COLUMN} {...hair} />)}
+      {g.blocks.map((b, i) => <rect key={`pm${i}`} x={b.x} y={b.y} width={nn(b.w)} height={nn(b.h)} stroke={MARGIN} {...hair} />)}
     </g>
   );
 }

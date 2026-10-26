@@ -2,6 +2,9 @@ import type { Project } from '../model/types';
 import { useStore } from '../store/store';
 import { faceBytes, restoreUploadedFont, getFace } from '../engine/fonts';
 import { uid } from '../lib/random';
+import { createDefaultProject } from '../model/defaults';
+import { makePage } from '../model/factory';
+import { normalizeProject } from '../model/normalize';
 
 interface ProjectFile {
   format: 'book-design-studio';
@@ -38,24 +41,102 @@ export function downloadBlob(blob: Blob, name: string) {
 
 export const safeName = (s: string) => (s || 'book').replace(/[^\w\-]+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '').toLowerCase() || 'book';
 
+/** File › New blank book: four empty pages with the sample's masters, styles and swatches. */
+export function blankProject(): Project {
+  const p = createDefaultProject();
+  p.pages = [makePage(), makePage(), makePage(), makePage()];
+  p.name = 'Untitled book';
+  p.book.title = 'Untitled';
+  p.cover.elements = [];
+  return p;
+}
+
 /** Save the project — including uploaded fonts and images — as one portable file. */
-export function saveProjectFile(project: Project) {
-  const fonts = project.fonts
-    .map((f) => {
-      const bytes = faceBytes(f.id);
-      return bytes ? { id: f.id, fileName: f.fileName, data: toBase64(bytes) } : null;
-    })
-    .filter(Boolean) as ProjectFile['fonts'];
-  const file: ProjectFile = { format: 'book-design-studio', version: 1, savedAt: new Date().toISOString(), project, fonts };
-  downloadBlob(new Blob([JSON.stringify(file)], { type: 'application/json' }), `${safeName(project.name)}.bds.json`);
+export function saveProjectFile(project: Project): boolean {
+  try {
+    const fonts = project.fonts
+      .map((f) => {
+        const bytes = faceBytes(f.id);
+        return bytes ? { id: f.id, fileName: f.fileName, data: toBase64(bytes) } : null;
+      })
+      .filter(Boolean) as ProjectFile['fonts'];
+    const file: ProjectFile = { format: 'book-design-studio', version: 1, savedAt: new Date().toISOString(), project: sharePdfSources(project), fonts };
+    downloadBlob(new Blob([JSON.stringify(file)], { type: 'application/json' }), `${safeName(project.name)}.bds.json`);
+    return true;
+  } catch (e) {
+    // JSON.stringify gives up at ~512 MB (RangeError): say so, or the student believes it was saved.
+    const big = e instanceof RangeError;
+    useStore.getState().notify(big
+      ? 'The project is too large to save as one file. Remove pictures, placed PDFs or fonts you no longer use, then save again.'
+      : `The project could not be saved: ${(e as Error).message}`, 'error');
+    return false;
+  }
+}
+
+/**
+ * Placed PDF pages of one file all carry the whole PDF (pdf.src). In the saved file the PDF is
+ * written once: the other pages point at the first asset that holds it (`#asset-id`).
+ */
+function sharePdfSources(project: Project): Project {
+  const first = new Map<string, string>();
+  let assets: Project['assets'] | null = null;
+  for (const [id, a] of Object.entries(project.assets)) {
+    const src = a.pdf?.src;
+    if (!src || src.startsWith('#')) continue;
+    const owner = first.get(src);
+    if (!owner) { first.set(src, id); continue; }
+    assets ??= { ...project.assets };
+    assets[id] = { ...a, pdf: { ...a.pdf!, src: `#${owner}` } };
+  }
+  return assets ? { ...project, assets } : project;
+}
+
+/** The PDF bytes of a placed page whose file was saved once (`#asset-id`), as one shared string again. */
+function resolvePdfSources(project: Project): void {
+  for (const a of Object.values(project.assets)) {
+    const src = a.pdf?.src;
+    if (!src?.startsWith('#')) continue;
+    const owner = project.assets[src.slice(1)]?.pdf?.src;
+    if (owner && !owner.startsWith('#')) a.pdf!.src = owner;
+  }
+}
+
+/** Parse a project file (or a bare project), repaired so that nothing in it can blank the app. */
+async function readProjectFile(file: File, repairs?: { count: number }): Promise<{ project: Project; fonts: ProjectFile['fonts'] }> {
+  const data = JSON.parse(await file.text()) as ProjectFile | Project | null;
+  const pf = data && typeof data === 'object' && 'format' in data ? data : { project: data, fonts: [] };
+  const project = normalizeProject(pf.project, repairs);
+  resolvePdfSources(project);
+  return { project, fonts: Array.isArray(pf.fonts) ? pf.fonts : [] };
+}
+
+/** Uploaded fonts carried in the file; a damaged one falls back to the default face instead of
+ *  keeping the book from opening. Returns how many could not be read. */
+async function restoreFileFonts(fonts: ProjectFile['fonts']): Promise<number> {
+  let bad = 0;
+  for (const f of fonts) {
+    try { await restoreUploadedFont(f.id, { bytes: fromBase64(f.data), fileName: f.fileName }); } catch { bad++; }
+  }
+  return bad;
 }
 
 export async function loadProjectFile(file: File) {
-  const data = JSON.parse(await file.text()) as ProjectFile | Project;
-  const pf: ProjectFile = 'format' in data ? data : { format: 'book-design-studio', version: 1, savedAt: '', project: data, fonts: [] };
-  if (!pf.project || !Array.isArray(pf.project.pages)) throw new Error('Not a Book Design Studio project.');
-  for (const f of pf.fonts ?? []) await restoreUploadedFont(f.id, { bytes: fromBase64(f.data), fileName: f.fileName });
-  useStore.getState().replaceProject(pf.project);
+  const repairs = { count: 0 };
+  const { project, fonts } = await readProjectFile(file, repairs);
+  // A book needs a page to show.
+  if (!project.pages.length) project.pages.push(makePage({ masterId: project.masters[0]?.id ?? null }));
+  const badFonts = await restoreFileFonts(fonts);
+  const s = useStore.getState();
+  const previous = s.project;
+  s.replaceProject(project);
+  // The browser keeps one book: opening a file can be undone, back to the book it replaced.
+  useStore.setState({ past: [previous] });
+  const notes = [
+    repairs.count ? `repaired ${repairs.count} problem${repairs.count === 1 ? '' : 's'} in this project` : '',
+    badFonts ? `${badFonts} uploaded font${badFonts === 1 ? '' : 's'} could not be read (the default face stands in)` : '',
+  ].filter(Boolean);
+  // After the caller's own "Opened …" message.
+  if (notes.length) setTimeout(() => useStore.getState().notify(`Opened ${file.name}: ${notes.join('; ')}.`), 0);
 }
 
 /** Re-register the uploaded fonts a project references (bytes from IndexedDB). */
@@ -73,11 +154,10 @@ export async function restoreProjectFonts(project: Project) {
  * Optionally the inserted pages start a section named after the file.
  */
 export async function insertProjectFile(file: File, afterIndex: number, opts: { section?: boolean } = {}): Promise<{ pages: number; styles: number; masters: number }> {
-  const data = JSON.parse(await file.text()) as ProjectFile | Project;
-  const pf: ProjectFile = 'format' in data ? data : { format: 'book-design-studio', version: 1, savedAt: '', project: data, fonts: [] };
-  const src = pf.project;
-  if (!src || !Array.isArray(src.pages)) throw new Error('Not a Book Design Studio project.');
-  for (const f of pf.fonts ?? []) await restoreUploadedFont(f.id, { bytes: fromBase64(f.data), fileName: f.fileName });
+  const { project: src, fonts } = await readProjectFile(file);
+  await restoreFileFonts(fonts);
+  // “chapter-2.bds.json” → “chapter-2”.
+  const baseName = file.name.replace(/(\.bds)?\.json$|\.[^.]+$/i, '');
   const book = useStore.getState().project;
 
   // Every id in the incoming pages, masters, styles and assets gets a fresh one.
@@ -109,7 +189,7 @@ export async function insertProjectFile(file: File, afterIndex: number, opts: { 
   const re = ids.length ? new RegExp(ids.map((x) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'), 'g') : null;
   const remap = <T,>(v: T): T => (re ? JSON.parse(JSON.stringify(v).replace(re, (m) => map.get(m) ?? m)) : structuredClone(v));
   const pages = remap(src.pages);
-  const masters = remap(src.masters).map((m) => ({ ...m, name: book.masters.some((x) => x.name === m.name) ? `${m.name} (${file.name.replace(/\.[^.]+$/, '')})` : m.name }));
+  const masters = remap(src.masters).map((m) => ({ ...m, name: book.masters.some((x) => x.name === m.name) ? `${m.name} (${baseName})` : m.name }));
   const take = <D extends { id: string }>(list: D[] | undefined, mine: D[] | undefined) => remap((list ?? []).filter((d) => !(mine ?? []).some((x) => x.id === map.get(d.id))));
   const assets = remap(src.assets ?? {});
 
@@ -122,7 +202,7 @@ export async function insertProjectFile(file: File, afterIndex: number, opts: { 
     d.cellStyles = [...(d.cellStyles ?? []), ...take(src.cellStyles, book.cellStyles)] as typeof d.cellStyles;
     Object.assign(d.assets, assets);
     for (const f of src.fonts ?? []) if (!d.fonts.some((x) => x.id === f.id)) d.fonts.push(f);
-    if (opts.section && pages.length) d.sections = [...(d.sections ?? []).filter((x) => x.pageId !== pages[0].id), { pageId: pages[0].id, start: 1, style: 'arabic', marker: src.book?.title || file.name.replace(/\.[^.]+$/, '') }];
+    if (opts.section && pages.length) d.sections = [...(d.sections ?? []).filter((x) => x.pageId !== pages[0].id), { pageId: pages[0].id, start: 1, style: 'arabic', marker: src.book?.title || baseName }];
   });
   return { pages: pages.length, styles: newStyles, masters: masters.length };
 }

@@ -15,7 +15,7 @@ import {
   pushGraphicsState, popGraphicsState, concatTransformationMatrix, moveTo, lineTo, appendBezierCurve, closePath, fill, stroke,
   fillAndStroke, endPath, setFillingRgbColor, setFillingCmykColor, setStrokingRgbColor, setStrokingCmykColor, setLineWidth,
   setDashPattern, setLineCap, setLineJoin, setGraphicsState, drawObject, setCharacterSpacing, LineCapStyle, LineJoinStyle, cmyk, rgb,
-  setTextRenderingMode, TextRenderingMode,
+  setTextRenderingMode, TextRenderingMode, beginText, endText, setFontAndSize, showText,
   type PDFImage,
 } from 'pdf-lib';
 import fontkit from '@pdf-lib/fontkit';
@@ -228,7 +228,11 @@ class PageWriter {
     const ctx = this.doc.context;
     const cmykMode = this.opts.colorMode === 'cmyk';
     const col = (s: GradientStop) => (cmykMode ? this.cmykOf(s.color) : (() => { const c = parseColor(s.color); return [c.r / 255, c.g / 255, c.b / 255]; })());
-    const stops = [...p.stops].sort((a, b) => a.offset - b.offset);
+    // PDF wants at least two stops, inside 0–1 (a one-stop or out-of-range gradient wrote a
+    // shading viewers refuse).
+    const stops = p.stops.map((s) => ({ ...s, offset: Math.max(0, Math.min(1, Number.isFinite(s.offset) ? s.offset : 0)) })).sort((a, b) => a.offset - b.offset);
+    if (!stops.length) return null;
+    if (stops.length === 1) stops.push({ ...stops[0], offset: 1 });
     const fns = [];
     for (let i = 0; i < stops.length - 1; i++) fns.push(ctx.obj({ FunctionType: 2, Domain: [0, 1], C0: col(stops[i]), C1: col(stops[i + 1]), N: 1 }));
     const func = fns.length === 1
@@ -299,7 +303,15 @@ async function emitPrim(w: PageWriter, p: Prim, st: EmitState) {
   }
 }
 
+/** The alpha a colour string carries itself (rgba(), #rrggbbaa, transparent); 1 for gradients. */
+function colorAlpha(c: Paint | null | undefined): number {
+  if (typeof c !== 'string') return 1;
+  const a = parseColor(c).a;
+  return Number.isFinite(a) ? Math.max(0, Math.min(1, a)) : 1;
+}
+
 function emitPath(w: PageWriter, p: PathPrim, alpha: number, blend: BlendMode | undefined, st: EmitState) {
+  if (p.role === 'placeholder') return;
   const isDie = p.role === 'dieline';
   if (isDie && !w.opts.dieLines) return;
   const spot = isDie ? 'dieline' : st.spot;
@@ -327,11 +339,12 @@ function emitPath(w: PageWriter, p: PathPrim, alpha: number, blend: BlendMode | 
   }
 
   w.push(pushGraphicsState());
-  const g = w.gs(alpha, blend, !!p.overprint || isDie);
+  // A colour's own alpha (rgba(), #rrggbbaa) is a constant alpha in PDF, as it is on the canvas.
+  const g = w.gs(alpha * colorAlpha(fillPaint), blend, !!p.overprint || isDie, alpha * colorAlpha(strokePaint));
   if (g) w.push(setGraphicsState(g));
-  if (fillPaint) w.setColor(typeof fillPaint === 'string' ? fillPaint : fillPaint.stops[0].color, false, spot);
+  if (fillPaint) w.setColor(typeof fillPaint === 'string' ? fillPaint : fillPaint.stops[0]?.color ?? '#000000', false, spot);
   if (hasStroke) {
-    w.setColor(typeof strokePaint === 'string' ? strokePaint : strokePaint!.stops[0].color, true, spot);
+    w.setColor(typeof strokePaint === 'string' ? strokePaint : strokePaint!.stops[0]?.color ?? '#000000', true, spot);
     w.push(setLineWidth(isDie ? 0.5 : p.strokeWidth ?? 1));
     const dash = (p.dash ?? []).filter((v) => v >= 0);
     w.push(setDashPattern(dash.length && dash.some((v) => v > 0) ? dash : [], 0));
@@ -375,6 +388,19 @@ async function fontFor(w: PageWriter, r: TextRun): Promise<PDFFont | null> {
   }
 }
 
+/**
+ * Whether pdf-lib can set the run as live text where the layout put it. Its drawText turns tabs into
+ * spaces, drops backspaces, breaks lines at line / page breaks (control characters in general don't
+ * survive it) and places glyphs by their advances only (no mark positioning, so é from e + ◌́ lands
+ * beside the e): such runs are outlined instead.
+ */
+const DRAWTEXT_UNSAFE = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/;
+function embeddable(r: TextRun): boolean {
+  if (DRAWTEXT_UNSAFE.test(r.text)) return false;
+  const s = shape(r.text, r.font);
+  return !!s && s.glyphs.every((g) => !g.xOffset && !g.yOffset);
+}
+
 async function emitRun(w: PageWriter, r: TextRun, alpha: number, blend: BlendMode | undefined, st: EmitState) {
   w.push(pushGraphicsState());
   // Run-level transforms (sideways Latin in tategaki, tate-chū-yoko compression).
@@ -385,11 +411,11 @@ async function emitRun(w: PageWriter, r: TextRun, alpha: number, blend: BlendMod
   }
   const rm = runMatrix(r);
   if (rm) w.push(concatTransformationMatrix(rm[0], rm[1], rm[2], rm[3], rm[4], rm[5]));
-  const g = w.gs(alpha, blend, false);
+  const g = w.gs(alpha * colorAlpha(r.color), blend, false, alpha * colorAlpha(r.stroke?.color ?? r.color));
   if (g) w.push(setGraphicsState(g));
   const ls = r.letterSpacing ?? 0;
 
-  const pdfFont = canOutline(r.text, r.font) ? await fontFor(w, r) : null;
+  const pdfFont = canOutline(r.text, r.font) && embeddable(r) ? await fontFor(w, r) : null;
   if (pdfFont) {
     w.push(concatTransformationMatrix(1, 0, 0, -1, r.x, r.y));
     if (ls) w.push(setCharacterSpacing(ls));
@@ -439,6 +465,8 @@ async function emitRun(w: PageWriter, r: TextRun, alpha: number, blend: BlendMod
       }
       x += gl.xAdvance * r.size + ls + (gk ? gk[gi] : 0);
     }
+    // Outlines carry no text: the PDF could not be searched, copied from or read aloud.
+    if (w.opts.textMode === 'auto') await invisibleText(w, r, x);
   } else {
     // System font / uncovered script: rasterise the run at print resolution.
     const pad = r.size * 0.4;
@@ -448,6 +476,57 @@ async function emitRun(w: PageWriter, r: TextRun, alpha: number, blend: BlendMod
     return;
   }
   w.push(popGraphicsState());
+}
+
+/**
+ * The face embedded as a text layer for outlined runs (variable instances, synthetic obliques): its
+ * default instance, subset. Only its character mapping and advances matter; it is never painted.
+ */
+async function textLayerFont(w: PageWriter, r: TextRun): Promise<PDFFont | null> {
+  const key = `${r.font.face}|text-layer`;
+  if (w.fonts.has(key)) return w.fonts.get(key)!;
+  const bytes = faceBytes(r.font.face);
+  let f: PDFFont | null = null;
+  // TrueType outlines only: pdf-lib subsets CFF2 (variable OpenType) fonts badly, and a subset that
+  // fails while the file is saved would fail the whole export.
+  const trueType = !!bytes && bytes.length > 4 && String.fromCharCode(bytes[0], bytes[1], bytes[2], bytes[3]) !== 'OTTO';
+  if (bytes && trueType) {
+    try { f = await w.doc.embedFont(bytes, { subset: true, features: { liga: false, clig: false, dlig: false, calt: false } }); } catch { f = null; }
+  }
+  w.fonts.set(key, f);
+  return f;
+}
+
+/** Per text-layer font: each word's width at 1 pt and its encoding (words recur through a book). */
+const textLayerWords = new WeakMap<PDFFont, Map<string, { w: number; hex: PDFHexString }>>();
+const textLayerNames = new WeakMap<PDFPage, Map<PDFFont, PDFName>>();
+
+/**
+ * The run's text laid invisibly (render mode 3) over its outlines, stretched to the outlines' width,
+ * so the words can be found, selected and copied where they are printed.
+ */
+async function invisibleText(w: PageWriter, r: TextRun, advance: number) {
+  if (!r.text.trim()) return;
+  const font = await textLayerFont(w, r);
+  if (!font) return;
+  let words = textLayerWords.get(font);
+  if (!words) { words = new Map(); textLayerWords.set(font, words); }
+  let word = words.get(r.text);
+  if (!word) {
+    try { word = { w: font.widthOfTextAtSize(r.text, 1), hex: font.encodeText(r.text) }; } catch { return; }
+    words.set(r.text, word);
+  }
+  let names = textLayerNames.get(w.page);
+  if (!names) { names = new Map(); textLayerNames.set(w.page, names); }
+  let name = names.get(font);
+  if (!name) { name = w.page.node.newFontDictionary(font.name, font.ref); names.set(font, name); }
+  const natural = word.w * r.size;
+  const tz = natural > 0 && advance > 0 ? Math.max(1, Math.min(1000, (100 * advance) / natural)) : 100;
+  w.push(
+    pushGraphicsState(), concatTransformationMatrix(1, 0, 0, -1, r.x, r.y), beginText(), setFontAndSize(name, r.size),
+    setTextRenderingMode(TextRenderingMode.Invisible), PDFOperator.of(Op.SetTextHorizontalScaling, [PDFNumber.of(+tz.toFixed(2))]),
+    showText(word.hex), endText(), popGraphicsState(),
+  );
 }
 
 async function dataUrlBytes(src: string): Promise<{ bytes: Uint8Array; mime: string }> {
@@ -466,12 +545,14 @@ function isOpaque(c: HTMLCanvasElement): boolean {
   return true;
 }
 
+const tooLarge = (c: HTMLCanvasElement) => new Error(`a ${c.width} × ${c.height} px raster is more than this browser can encode. Choose a lower raster resolution.`);
+
 async function embedCanvas(w: PageWriter, c: HTMLCanvasElement): Promise<PDFImage> {
   if (isOpaque(c)) {
-    const jpg = await new Promise<Blob>((res) => c.toBlob((b) => res(b!), 'image/jpeg', 0.93));
+    const jpg = await new Promise<Blob>((res, rej) => c.toBlob((b) => (b ? res(b) : rej(tooLarge(c))), 'image/jpeg', 0.93));
     return w.doc.embedJpg(new Uint8Array(await jpg.arrayBuffer()));
   }
-  const blob = await new Promise<Blob>((res) => c.toBlob((b) => res(b!), 'image/png'));
+  const blob = await new Promise<Blob>((res, rej) => c.toBlob((b) => (b ? res(b) : rej(tooLarge(c))), 'image/png'));
   return w.doc.embedPng(new Uint8Array(await blob.arrayBuffer()));
 }
 
@@ -674,7 +755,9 @@ async function pageInfo(w: PageWriter, text: string, x: number, y: number) {
   if (!w.opts.pageInfo) return;
   await w.pendingImages();
   w.flush();
-  const font = await w.doc.embedFont(StandardFonts.Helvetica);
+  // One Helvetica for the whole file (each embedFont call writes another font dictionary).
+  let font = w.fonts.get('std:Helvetica');
+  if (!font) { font = await w.doc.embedFont(StandardFonts.Helvetica); w.fonts.set('std:Helvetica', font); }
   w.push(pushGraphicsState(), concatTransformationMatrix(1, 0, 0, -1, x, y));
   w.flush();
   w.page.drawText(text.replace(/[^\x20-\x7e]/g, '·'), { x: 0, y: 0, size: 6, font, color: cmyk(0, 0, 0, 1) });
@@ -704,6 +787,8 @@ export async function exportPdf(project: Project, opts: PdfOptions): Promise<Uin
   const stamp = new Date().toISOString().slice(0, 16).replace('T', ' ');
 
   if (opts.scope === 'jacket') {
+    // Without a jacket the file would be a blank sheet with marks.
+    if (!b.jacket?.enabled) throw new Error('this book has no dust jacket yet. Add one in the Jacket view.');
     const jc = computeJacket(b);
     const bl = opts.bleed ? jc.bleed : 0;
     const W = jc.width, H = jc.height;
@@ -785,7 +870,9 @@ export async function exportPdf(project: Project, opts: PdfOptions): Promise<Uin
   // Interior: single pages or reader spreads.
   type Sheet = { pages: (number | null)[] };
   const sheets: Sheet[] = [];
-  const from = Math.max(1, opts.from ?? 1), to = Math.min(project.pages.length, opts.to ?? project.pages.length);
+  // A range typed backwards (from 7 to 2) means pages 2–7.
+  const r0 = opts.from ?? 1, r1 = opts.to ?? project.pages.length;
+  const from = Math.max(1, Math.min(r0, r1)), to = Math.min(project.pages.length, Math.max(r0, r1));
   if (opts.scope === 'spread') {
     const sp = spreadsOf(project)[opts.spreadIndex ?? 0];
     if (sp) sheets.push({ pages: b.facing ? [sp.left, sp.right] : [sp.right] });
@@ -798,8 +885,15 @@ export async function exportPdf(project: Project, opts: PdfOptions): Promise<Uin
     for (let i = from - 1; i < to; i++) sheets.push({ pages: [i] });
   }
 
+  // Nothing to write: say so, rather than saving pdf-lib's blank A4 page as the "export".
+  if (!sheets.length) throw new Error(opts.scope === 'spread' ? 'that spread no longer exists.' : 'no pages in that range.');
+
   const allLinks: { page: PDFPage; links: PageWriter['links'] }[] = [];
+  // Text-only pages never wait on anything: give the browser a moment now and then, so the
+  // progress bar moves and the tab doesn't look frozen through a long book.
+  let lastBreath = performance.now();
   for (let si = 0; si < sheets.length; si++) {
+    if (performance.now() - lastBreath > 80) { await new Promise((r) => setTimeout(r, 0)); lastBreath = performance.now(); }
     const sheet = sheets[si];
     const n = sheet.pages.length;
     const contentW = b.trimW * n;

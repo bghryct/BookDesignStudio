@@ -18,7 +18,7 @@ const TABS: { id: RightTab; label: string }[] = [
 export function RightPanel() {
   const tab = useStore((s) => s.rightTab);
   return (
-    <aside className="flex w-[296px] shrink-0 flex-col border-l border-ink-700 bg-ink-850">
+    <aside className="flex w-[296px] shrink-0 flex-col border-l border-ink-700 bg-ink-850 max-md:absolute max-md:inset-y-0 max-md:right-0 max-md:z-40 max-md:shadow-2xl">
       <div className="flex h-9 shrink-0 items-end gap-0.5 border-b border-ink-700 px-1.5">
         {TABS.map((t) => (
           <button

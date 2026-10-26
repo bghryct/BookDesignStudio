@@ -249,6 +249,11 @@ three.js with PBR materials: cloth weave, buckram, leather grain, matte / gloss 
 ## Browser support
 Current Chrome, Edge, Safari and Firefox on desktop. MP4/WebM encoding uses WebCodecs where available (Chrome, Edge, Safari 16.4+, Firefox 130+), otherwise MediaRecorder; GIF works everywhere. A pen tablet or Apple Pencil gives real pressure for the brushes.
 
+## If the app won't open your book
+- **Something can't be drawn:** a panel or view that fails shows *Undo last change*. If the whole app fails, it offers *Download the autosaved project* and *Start a blank project*.
+- **Damaged projects:** a project with missing or broken values is repaired when it opens, and a message says how many problems were fixed.
+- **Freezes or crashes while opening:** if the tab froze or crashed while opening the autosaved book, the next start is in **safe mode**. The book is downloaded as `autosaved-book.bds.json` instead of being opened again. To start in safe mode on purpose, add `?safe` to the address.
+
 ## Keyboard
 `V` select · `A` direct selection · `T` text · `R` rectangle · `E` ellipse · `L` rule · `P` pen · `B` brush · `X` eraser · `K` pattern · `O` ornament · `G` gradient · `D` die-cut · `M` dimension · `H`/Space hand · `Z` zoom · `[ ]` brush size · `⌘Z / ⇧⌘Z` undo/redo · `⌘D` duplicate · `⌘0` fit · `⌘= / ⌘-` zoom · `⌘] / ⌘[` arrange · `⌥⌘I` hidden characters · arrows nudge (⇧ ×10).
 

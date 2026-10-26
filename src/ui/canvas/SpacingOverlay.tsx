@@ -62,9 +62,9 @@ export function SpacingOverlay({ project, items, calc }: { project: Project; ite
               const tight = r < -0.35;
               return (
                 <g key={i}>
-                  {loose && <rect x={l.x} y={top} width={l.w} height={h} fill="#e5483a" opacity={Math.min(0.42, 0.1 + (r - 0.6) * 0.25)} />}
-                  {tight && <rect x={l.x} y={top} width={l.w} height={h} fill="#3b82f6" opacity={Math.min(0.4, 0.1 + (-r - 0.35) * 0.5)} />}
-                  {l.hyphenated && <rect x={l.x + l.w + 2} y={top + h * 0.3} width={ladderSet.has(i) ? 4 : 2} height={h * 0.4} fill={ladderSet.has(i) ? '#e5483a' : '#f0a020'} />}
+                  {loose && <rect x={l.x} y={top} width={Math.max(0, l.w)} height={Math.max(0, h)} fill="#e5483a" opacity={Math.min(0.42, 0.1 + (r - 0.6) * 0.25)} />}
+                  {tight && <rect x={l.x} y={top} width={Math.max(0, l.w)} height={Math.max(0, h)} fill="#3b82f6" opacity={Math.min(0.4, 0.1 + (-r - 0.35) * 0.5)} />}
+                  {l.hyphenated && <rect x={l.x + l.w + 2} y={top + h * 0.3} width={ladderSet.has(i) ? 4 : 2} height={Math.max(0, h * 0.4)} fill={ladderSet.has(i) ? '#e5483a' : '#f0a020'} />}
                 </g>
               );
             })}

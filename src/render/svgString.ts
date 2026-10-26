@@ -15,10 +15,12 @@ export interface SvgOptions {
   outlineText?: boolean;
   /** Hide die lines (3D textures / clean exports). */
   hideDieLines?: boolean;
+  /** Leave out empty-frame placeholders (exports: they are for the screen only). */
+  hidePlaceholders?: boolean;
 }
 
 const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-const n = (v: number) => (Math.abs(v) < 1e-6 ? '0' : String(+v.toFixed(3)));
+const n = (v: number) => { const x = +v; return !Number.isFinite(x) || Math.abs(x) < 1e-6 ? '0' : String(+x.toFixed(3)); };
 
 class Writer {
   defs: string[] = [];
@@ -31,6 +33,7 @@ class Writer {
   paint(p: Paint | null | undefined): string {
     if (!p) return 'none';
     if (typeof p === 'string') return p;
+    if (typeof p !== 'object' || !Array.isArray(p.stops)) return 'none';
     const id = this.id('g');
     const stops = p.stops.map((s) => `<stop offset="${n(s.offset)}" stop-color="${s.color}"${s.opacity != null && s.opacity < 1 ? ` stop-opacity="${n(s.opacity)}"` : ''}/>`).join('');
     if (p.kind === 'linear') {
@@ -52,6 +55,7 @@ function common(p: { opacity?: number; blend?: string }): string {
 
 function pathSvg(p: PathPrim, w: Writer): string {
   if (p.role === 'dieline' && w.opts.hideDieLines) return '';
+  if (p.role === 'placeholder' && w.opts.hidePlaceholders) return '';
   const fill = w.paint(p.fill);
   const stroke = w.paint(p.stroke);
   let a = `<path d="${p.d}" fill="${fill}"`;

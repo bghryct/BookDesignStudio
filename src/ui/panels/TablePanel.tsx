@@ -153,7 +153,7 @@ function StructureSection({ el, project, T, L, mut, threaded }: { el: TableEleme
     if (!data.length) { s().notify('No rows found in that data.', 'error'); return; }
     if (into === 'selection' && g) mut((t) => { fillCells(t, data, { r: g.r0, c: g.c0 }); });
     else mut((t) => { Object.assign(t, tableFromMatrix(data)); });
-    s().notify(`${data.length} rows × ${Math.max(...data.map((r) => r.length))} columns ${into === 'selection' && g ? `filled from ${rangeLabel(g)}` : 'loaded'}. Numeric columns are aligned on the decimal in tabular figures.`);
+    s().notify(`${data.length} rows × ${data.reduce((m, r) => Math.max(m, r.length), 0)} columns ${into === 'selection' && g ? `filled from ${rangeLabel(g)}` : 'loaded'}. Numeric columns are aligned on the decimal in tabular figures.`);
   };
   const saveStyle = (redefine: boolean) => {
     const base = named?.props ?? {};
@@ -392,7 +392,7 @@ function RowsSection({ el, L, g, mut }: { el: TableElement; L: ReturnType<typeof
     <Section title={g ? `Rows ${from + 1}–${to + 1}` : 'Rows'} id="el-table-rows" defaultOpen={false}>
       {g && (
         <div className="grid grid-cols-2 gap-1">
-          <Button title="Give the selected rows the height of the tallest" onClick={() => mut((t) => { const h = Math.max(...idx.map((r) => L.rowH[r] ?? 0)); for (const r of idx) { const row = t.rows[r]; if (row.mode === 'fixed') row.h = h; else { row.mode = 'min'; row.h = +h.toFixed(2); } } })}>Equalise</Button>
+          <Button title="Give the selected rows the height of the tallest" onClick={() => mut((t) => { const h = idx.reduce((m, r) => Math.max(m, L.rowH[r] ?? 0), 0); for (const r of idx) { const row = t.rows[r]; if (row.mode === 'fixed') row.h = h; else { row.mode = 'min'; row.h = +h.toFixed(2); } } })}>Equalise</Button>
           <Button title="Heights from content again" onClick={() => mut((t) => { for (const r of idx) { t.rows[r].mode = 'auto'; t.rows[r].h = 0; } })}>Auto height</Button>
         </div>
       )}
@@ -601,7 +601,7 @@ function ThreadSection({ frame, head, th, mut }: { frame: TableElement; head: Ta
   return (
     <Section title="Flow across frames" id="el-table-flow">
       <div className="flex items-center justify-between rounded-md border border-ink-700 bg-ink-900 px-2 py-1.5 text-[11px] text-ink-300">
-        <span>{n > 1 ? `Frame ${i + 1} of ${n}` : 'One frame'}{body.length ? ` · body rows ${Math.min(...body) + 1}–${Math.max(...body) + 1}` : ''}</span>
+        <span>{n > 1 ? `Frame ${i + 1} of ${n}` : 'One frame'}{body.length ? ` · body rows ${body.reduce((m, r) => Math.min(m, r), Infinity) + 1}–${body.reduce((m, r) => Math.max(m, r), -Infinity) + 1}` : ''}</span>
         {last?.overset && <span className="font-medium text-[#e5483a]" title="Rows that fit no frame are not printed">Overset rows</span>}
       </div>
       {stuckAt && (

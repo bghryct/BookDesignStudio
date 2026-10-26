@@ -596,7 +596,7 @@ export function parseDelimited(src: string, delimiter?: string): string[][] {
   }
   row.push(field);
   rows.push(row);
-  const w = Math.max(...rows.map((r) => r.length));
+  const w = rows.reduce((m, r) => Math.max(m, r.length), 0);
   return rows.map((r) => [...r.map((x) => x.trim()), ...new Array<string>(w - r.length).fill('')]);
 }
 
@@ -630,7 +630,7 @@ export function fillCells(t: TableElement, data: string[][], at: { r: number; c:
 
 /** Structure of a new table from a matrix: first row as heads, numeric columns decimal-aligned in tabular figures. */
 export function tableFromMatrix(data: string[][], opts: { header?: boolean } = {}): Pick<TableElement, 'rows' | 'cols' | 'cells' | 'headerRows' | 'footerRows'> {
-  const R = Math.max(1, data.length), C = Math.max(1, ...data.map((d) => d.length));
+  const R = Math.max(1, data.length), C = data.reduce((m, d) => Math.max(m, d.length), 1);
   const header = opts.header ?? (R > 1 && data[0].some((v) => v && !looksNumeric(v)));
   const body = data.slice(header ? 1 : 0);
   const cols = Array.from({ length: C }, (_, c) => {

@@ -10,6 +10,10 @@ import { useStore } from '../../store/store';
 import type { TextStyle, RagMode, ParagraphRule, ListSpec, TabStop, GrepStyle, NestedStyle } from '../../model/types';
 import { Section, Row, NumberField, Slider, Select, Toggle, ColorField, Segmented, Hint, Button, IconButton, TextInput } from '../controls';
 import { HYPHEN_LANGUAGES } from '../../engine/hyphenate';
+import { riskyPattern } from '../../engine/text/story';
+
+/** Shown for a GREP pattern the text engine refuses (catastrophic backtracking). */
+export const RISKY_PATTERN = 'This pattern can take minutes on a long paragraph (a repeated group inside a repeat), so it is not applied.';
 
 type Setter = (fn: (d: Draft<TextStyle>) => void, history?: boolean) => void;
 interface P { st: TextStyle; set: Setter; begin: () => void }
@@ -287,14 +291,14 @@ export function RuleStylesSection({ st, set }: P) {
       {grep.map((g, i) => (
         <div key={i} className="flex items-end gap-1">
           <div className="min-w-0 flex-1"><TextInput label="Pattern" mono value={g.pattern} onChange={(v) => {
-            try { new RegExp(v); setErr(null); } catch (e) { setErr((e as Error).message); }
+            try { new RegExp(v); setErr(riskyPattern(v) ? RISKY_PATTERN : null); } catch (e) { setErr((e as Error).message); }
             set((d) => { d.grepStyles = grep.map((x, k) => (k === i ? { ...x, pattern: v } : x)); });
           }} /></div>
           <div className="w-[96px]"><Select label="Style" value={g.style} options={names} onChange={(v) => set((d) => { d.grepStyles = grep.map((x, k) => (k === i ? { ...x, style: v } : x)); })} /></div>
           <IconButton title="Remove" onClick={() => set((d) => { d.grepStyles = grep.filter((_, k) => k !== i); })}><Trash size={12} /></IconButton>
         </div>
       ))}
-      {err && <p className="text-[10.5px] text-[#e5483a]">{err}</p>}
+      {(err ?? (grep.some((g) => riskyPattern(g.pattern)) ? RISKY_PATTERN : null)) && <p className="text-[10.5px] text-[#e5483a]">{err ?? RISKY_PATTERN}</p>}
       <div className="flex flex-wrap gap-1">
         {GREP_PRESETS.map((g) => (
           <button key={g.label} type="button" disabled={!chars.length} className="rounded border border-ink-700 px-1.5 py-0.5 text-[10px] text-ink-300 hover:text-ink-100 disabled:opacity-40"

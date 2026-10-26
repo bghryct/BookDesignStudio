@@ -9,6 +9,7 @@ import { toRoman } from './units';
 export interface PageNumber { n: number; label: string; marker: string }
 
 const alpha = (n: number, upper: boolean) => {
+  if (!Number.isFinite(n) || n > 1e9) return String(n);
   let s = '';
   for (let k = n; k > 0; k = Math.floor((k - 1) / 26)) s = String.fromCharCode(97 + ((k - 1) % 26)) + s;
   return upper ? s.toUpperCase() : s || 'a';

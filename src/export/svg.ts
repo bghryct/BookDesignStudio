@@ -31,6 +31,7 @@ function build(project: Project, o: SvgExportOptions): Built {
     return { prims: compileCover(project, calc), box: { x: -wrap, y: -wrap, w: calc.coverW + 2 * wrap, h: calc.coverH + 2 * wrap }, name: 'cover' };
   }
   if (o.target === 'jacket') {
+    if (!b.jacket?.enabled) throw new Error('this book has no dust jacket yet. Add one in the Jacket view.');
     const jc = computeJacket(b);
     const bl = o.includeBleed ? jc.bleed : 0;
     return { prims: compileJacket(project, jc), box: { x: -bl, y: -bl, w: jc.width + 2 * bl, h: jc.height + 2 * bl }, name: 'jacket' };
@@ -43,6 +44,8 @@ function build(project: Project, o: SvgExportOptions): Built {
       return { prims: [placedElement(el, ctx)], box: { x: 0, y: 0, w: el.w, h: el.h }, name: el.name.toLowerCase().replace(/\s+/g, '-') };
     }
   }
+  // Nothing selected (or it was deleted): not the spread under another name.
+  if (o.target === 'selection') throw new Error('select an item first.');
   if (o.target === 'page') {
     return { prims: compilePage(project, o.pageIndex, { dieLines: true }), box: { x: -bleed, y: -bleed, w: b.trimW + 2 * bleed, h: b.trimH + 2 * bleed }, name: `page-${o.pageIndex + 1}` };
   }
@@ -62,7 +65,7 @@ function build(project: Project, o: SvgExportOptions): Built {
 export async function exportSvg(project: Project, o: SvgExportOptions): Promise<{ blob: Blob; name: string }> {
   const { prims, box, name } = build(project, o);
   await preloadImages(prims);
-  const body = primsToSvg(prims, { pxPerPt: o.rasterScale, idPrefix: 'bds', outlineText: o.outlineText });
+  const body = primsToSvg(prims, { pxPerPt: o.rasterScale, idPrefix: 'bds', outlineText: o.outlineText, hidePlaceholders: true });
   const pt = (v: number) => +v.toFixed(3);
   const svg = `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="${pt(box.w)}pt" height="${pt(box.h)}pt" viewBox="${pt(box.x)} ${pt(box.y)} ${pt(box.w)} ${pt(box.h)}">
@@ -78,7 +81,8 @@ export async function exportPng(project: Project, o: SvgExportOptions & { dpi: n
   await preloadImages(prims);
   const ppp = Math.min(o.dpi / 72, 12000 / Math.max(box.w, box.h));
   const canvas = renderToCanvas(prims, box, ppp, { hideDieLines: true, background: '#ffffff' });
-  const blob = await new Promise<Blob>((res) => canvas.toBlob((b) => res(b!), 'image/png'));
+  // A canvas the browser could not allocate gives no blob: say so rather than fail on null.
+  const blob = await new Promise<Blob>((res, rej) => canvas.toBlob((b) => (b ? res(b) : rej(new Error(`a ${canvas.width} × ${canvas.height} px image is more than this browser can make. Choose a lower resolution.`))), 'image/png'));
   return { blob, name: `${name}.png` };
 }
 

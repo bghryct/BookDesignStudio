@@ -13,11 +13,21 @@
 export interface ZipEntry { name: string; method: number; size: number; offset: number }
 
 export function zipEntries(buf: Uint8Array): ZipEntry[] {
+  try {
+    return readZipDirectory(buf);
+  } catch (e) {
+    // A cut-off or damaged file reads past its end: say what that means.
+    if (e instanceof RangeError) throw new Error('the file is damaged or incomplete (its zip directory cannot be read)');
+    throw e;
+  }
+}
+
+function readZipDirectory(buf: Uint8Array): ZipEntry[] {
   const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
   // End of central directory: scan back from the end for its signature.
   let eocd = -1;
   for (let i = buf.length - 22; i >= Math.max(0, buf.length - 65557); i--) if (dv.getUint32(i, true) === 0x06054b50) { eocd = i; break; }
-  if (eocd < 0) throw new Error('not a .docx (zip) file');
+  if (eocd < 0) throw new Error('not a .docx / .idml file (no zip directory found)');
   const count = dv.getUint16(eocd + 10, true);
   let p = dv.getUint32(eocd + 16, true);
   const out: ZipEntry[] = [];
@@ -41,7 +51,12 @@ export async function readEntry(buf: Uint8Array, e: ZipEntry): Promise<string> {
   if (e.method === 0) return new TextDecoder().decode(data);
   if (e.method !== 8) throw new Error(`unsupported compression in ${e.name}`);
   const stream = new Blob([data.slice()]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
-  return new Response(stream).text();
+  try {
+    return await new Response(stream).text();
+  } catch {
+    // The browser reports bad deflate data as "Failed to fetch".
+    throw new Error(`the file is damaged (${e.name} cannot be unpacked)`);
+  }
 }
 
 const W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';

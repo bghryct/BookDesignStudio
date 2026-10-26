@@ -10,10 +10,25 @@ export const MANUSCRIPT_EXT = /\.(docx|txt|text|md|markdown|rtf|idml)$/i;
 /** The Flow text loader also takes PDFs, for their text. */
 export const MANUSCRIPT_ACCEPT = '.docx,.rtf,.idml,.txt,.text,.md,.markdown,.pdf,text/plain,text/markdown,application/pdf,application/rtf';
 
+/**
+ * A text file's characters: UTF-8 (the usual), UTF-16 with a byte-order mark, or else Windows-1252
+ * (older Windows and Mac text files), which UTF-8 would turn into "Caf�".
+ */
+export async function readText(file: Blob): Promise<string> {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  if (bytes[0] === 0xff && bytes[1] === 0xfe) return new TextDecoder('utf-16le').decode(bytes);
+  if (bytes[0] === 0xfe && bytes[1] === 0xff) return new TextDecoder('utf-16be').decode(bytes);
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  } catch {
+    return new TextDecoder('windows-1252').decode(bytes);
+  }
+}
+
 export async function loadManuscript(file: File, paraStyleNames: string[] = [], onProgress?: (msg: string) => void): Promise<{ text: string; summary: string }> {
   if (/\.rtf$/i.test(file.name) || file.type === 'application/rtf' || file.type === 'text/rtf') {
     const { rtfToStory } = await import('../lib/rtf');
-    const r = rtfToStory(await file.text(), paraStyleNames);
+    const r = rtfToStory(await readText(file), paraStyleNames);
     return { text: r.text, summary: `${r.paragraphs.toLocaleString()} paragraphs${r.notes ? `, ${r.notes} note${r.notes === 1 ? '' : 's'}` : ''} from RTF` };
   }
   if (/\.idml$/i.test(file.name)) {
@@ -35,7 +50,7 @@ export async function loadManuscript(file: File, paraStyleNames: string[] = [], 
     return { text: r.text, summary: `${r.paragraphs.toLocaleString()} paragraphs${r.notes ? `, ${r.notes} note${r.notes === 1 ? '' : 's'}` : ''} from Word` };
   }
   const markdown = /\.(md|markdown)$/i.test(file.name) || file.type === 'text/markdown';
-  const r = textToStory(await file.text(), { markdown });
+  const r = textToStory(await readText(file), { markdown });
   const bits = [`${r.paragraphs.toLocaleString()} paragraphs`];
   if (r.headings) bits.push(`${r.headings} heading${r.headings === 1 ? '' : 's'}`);
   if (r.gutenberg) bits.push('Project Gutenberg licence text left out');

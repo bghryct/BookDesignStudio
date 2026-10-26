@@ -236,8 +236,10 @@ async function encodeMediaRecorder(format: 'mp4' | 'webm', job: Job): Promise<Bl
   };
   const stopped = new Promise<void>((resolve, reject) => {
     recorder.onstop = () => resolve();
-    recorder.onerror = () => reject(new Error('MediaRecorder failed'));
+    recorder.onerror = () => reject(new Error(`the browser's recorder could not encode ${format.toUpperCase()} at ${w} × ${h}`));
   });
+  // It may fail while frames are still being drawn: handled when awaited below, not reported as unhandled.
+  stopped.catch(() => undefined);
   recorder.start(250);
   const frameMs = 1000 / fps;
   const t0 = performance.now();
@@ -338,6 +340,11 @@ export async function exportVideo(scene: BookScene, opts: VideoOptions): Promise
     if (format === 'gif') return await encodeGif(job);
     const viaCodecs = await encodeWebCodecs(format, job);
     if (viaCodecs) return viaCodecs;
+    // WebCodecs encodes this format, only not this large (H.264 stops near 8.9 MP): the recorder
+    // would hand the frames to the same encoder and fail after rendering them all.
+    if (await findEncoderConfig(codecList(format, 1280, 720), 1280, 720, fps, 5e6)) {
+      throw new Error(`${format.toUpperCase()} cannot be encoded at ${width} × ${height} in this browser. Choose a smaller size${format === 'mp4' ? ', or WebM' : ''}.`);
+    }
     const viaRecorder = await encodeMediaRecorder(format, job);
     if (viaRecorder) return viaRecorder;
     throw new Error(`${format.toUpperCase()} video export is not supported in this browser.`);

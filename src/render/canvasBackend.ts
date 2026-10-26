@@ -87,7 +87,7 @@ function drawPrim(ctx: CanvasRenderingContext2D, p: Prim, opts: CanvasOptions) {
   try {
     switch (p.t) {
       case 'path': {
-        if (p.role === 'dieline' && opts.hideDieLines) break;
+        if ((p.role === 'dieline' && opts.hideDieLines) || p.role === 'placeholder') break;
         const path = path2d(p.d);
         if (p.fill) {
           ctx.fillStyle = paintStyle(ctx, p.fill);
@@ -292,7 +292,7 @@ export async function lowerPrims(prims: Prim[], box: { x: number; y: number; w: 
       const b = p.blend && p.blend !== 'normal' ? p.blend : undefined;
       switch (p.t) {
         case 'path':
-          if (p.role === 'dieline' && opts.hideDieLines) break;
+          if ((p.role === 'dieline' && opts.hideDieLines) || p.role === 'placeholder') break;
           out.push({
             o: 'path', a, b, d: pid(p.d), fill: p.fill, stroke: p.stroke, sw: p.strokeWidth, dash: p.dash, cap: p.cap, join: p.join,
             rule: p.fillRule === 'evenodd' ? 'evenodd' : undefined,

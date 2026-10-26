@@ -43,7 +43,7 @@ export function maskMarkup(text: string): string {
     for (let i = 0; i < t.length; i++) {
       if (t[i] !== '{') { out += t[i]; continue; }
       let depth = 0, j = i;
-      for (; j < t.length; j++) { if (t[j] === '{') depth++; else if (t[j] === '}' && --depth === 0) break; }
+      for (; j < t.length; j++) { if (t[j] === '\\') j++; else if (t[j] === '{') depth++; else if (t[j] === '}' && --depth === 0) break; }
       const whole = t.slice(i, j + 1);
       const m = /^\{([a-z]+):/.exec(whole);
       if (m && (m[1] === 'fn' || m[1] === 'en' || m[1] === 'wari' || m[1] === 'ruby')) {

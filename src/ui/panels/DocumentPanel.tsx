@@ -10,8 +10,7 @@ import { cmykToHex, rgbToCmyk } from '../../lib/color';
 import { PanelGridEditor, JacketSettings, GuidesSection } from './SurfaceSettings';
 import { generateContents, generateIndex, conditionNames } from '../contents';
 import { checkSpelling, type Misspelling } from '../../engine/spelling';
-import { FindObjectsSection } from './FindChange';
-import { spreadsOf } from '../../model/surfaces';
+import { FindObjectsSection, revealStory } from './FindChange';
 import { uid } from '../../lib/random';
 
 export const TRIM_PRESETS: { id: string; label: string; w: number; h: number; group: string }[] = [
@@ -81,11 +80,11 @@ export function DocumentPanel() {
         <Hint>Use {'{title}'} {'{author}'} {'{chapter}'} {'{page}'} {'{page:roman}'} {'{lastpage}'} {'{date}'} in any text frame — running heads and folios update everywhere. {'{xref:name}'} prints the page of {'{anchor:name}'}.</Hint>
         <Button className="w-full" onClick={() => {
           const r = generateContents();
-          s().notify(r.entries ? `${r.updated ? 'Updated' : 'Created'} the contents: ${r.entries} entries with their page numbers.` : 'No chapter titles or # headings found yet.');
+          s().notify(r.entries ? `${r.updated ? 'Updated' : 'Created'} the contents: ${r.entries} entr${r.entries === 1 ? 'y' : 'ies'} with their page numbers.` : 'No chapter titles or # headings found yet.');
         }}>Generate contents page</Button>
         <Button className="w-full" onClick={() => {
           const r = generateIndex();
-          s().notify(r.entries ? `${r.updated ? 'Updated' : 'Created'} the index: ${r.entries} terms with their page numbers.` : 'No index entries yet — mark words with {ix:term} in the story editor.');
+          s().notify(r.entries ? `${r.updated ? 'Updated' : 'Created'} the index: ${r.entries} term${r.entries === 1 ? '' : 's'} with their page numbers.` : 'No index entries yet — mark words with {ix:term} in the story editor.');
         }}>Generate index</Button>
       </Section>
 
@@ -286,11 +285,7 @@ function SpellingSection() {
   };
   const find = (m: Misspelling) => {
     const w = m.where[0];
-    const s = useStore.getState();
-    const pi = s.project.pages.findIndex((p) => p.elements.some((e) => e.id === w.elementId));
-    if (pi >= 0) { const sp = spreadsOf(s.project).findIndex((x) => x.left === pi || x.right === pi); if (sp >= 0) s.setSpread(sp); }
-    s.select([w.elementId]);
-    s.setTextEditing(w.elementId);
+    revealStory(w.elementId);
     setTimeout(() => window.dispatchEvent(new CustomEvent('bds:select', { detail: { start: w.index, end: w.index + m.word.length } })), 120);
   };
   return (

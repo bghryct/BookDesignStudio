@@ -33,7 +33,13 @@ function pdfjs(): Promise<PdfJs> {
 export async function openPdf(bytes: Uint8Array): Promise<{ doc: PDFDocumentProxy; close: () => Promise<void> }> {
   const m = await pdfjs();
   const task = m.getDocument({ data: bytes.slice(), fontExtraProperties: true });
-  return { doc: await task.promise, close: () => task.destroy() };
+  try {
+    return { doc: await task.promise, close: () => task.destroy() };
+  } catch (e) {
+    // Not a PDF pdf.js can read: free its worker before reporting.
+    await task.destroy().catch(() => undefined);
+    throw e;
+  }
 }
 
 export interface RenderedPage { dataUrl: string; widthPt: number; heightPt: number; pxW: number; pxH: number }
@@ -50,9 +56,12 @@ export async function renderPdfPage(doc: PDFDocumentProxy, n: number, maxPx = 30
   // Our own context with alpha: given only the canvas, pdf.js opens an opaque one and a clear
   // background comes out black.
   const ctx = canvas.getContext('2d', { alpha: true })!;
-  await page.render({ canvas: null, canvasContext: ctx, viewport: vp, background: 'rgba(0,0,0,0)' }).promise;
+  try {
+    await page.render({ canvas: null, canvasContext: ctx, viewport: vp, background: 'rgba(0,0,0,0)' }).promise;
+  } finally {
+    page.cleanup();
+  }
   const dataUrl = canvas.toDataURL('image/png');
-  page.cleanup();
   return { dataUrl, widthPt: vp1.width, heightPt: vp1.height, pxW: canvas.width, pxH: canvas.height };
 }
 
@@ -142,13 +151,16 @@ export interface PdfTextResult { text: string; pages: number; paragraphs: number
 export async function pdfToStory(bytes: Uint8Array, onProgress?: (page: number, pages: number) => void): Promise<PdfTextResult> {
   const { doc, close: closeDoc } = await openPdf(bytes);
   const pages: Line[][] = [];
-  for (let n = 1; n <= doc.numPages; n++) {
-    const page = await doc.getPage(n);
-    pages.push(await pageLines(page, n));
-    page.cleanup();
-    onProgress?.(n, doc.numPages);
+  try {
+    for (let n = 1; n <= doc.numPages; n++) {
+      const page = await doc.getPage(n);
+      try { pages.push(await pageLines(page, n)); } finally { page.cleanup(); }
+      onProgress?.(n, doc.numPages);
+    }
+  } finally {
+    // A page that throws must not leave the document and its worker open.
+    await closeDoc().catch(() => undefined);
   }
-  await closeDoc();
 
   // Running heads and folios: bare page numbers, or the first / last line of a page whose text
   // (numbers aside) recurs on many pages.

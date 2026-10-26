@@ -108,7 +108,7 @@ export const nameKey = (n: string) => n.trim().toLowerCase();
 /* Numbering                                                                   */
 /* -------------------------------------------------------------------------- */
 
-const alpha = (n: number) => { let s = ''; for (let k = n; k > 0; k = Math.floor((k - 1) / 26)) s = String.fromCharCode(97 + ((k - 1) % 26)) + s; return s || 'a'; };
+const alpha = (n: number) => { if (!Number.isFinite(n) || n > 1e9) return String(n); let s = ''; for (let k = n; k > 0; k = Math.floor((k - 1) / 26)) s = String.fromCharCode(97 + ((k - 1) % 26)) + s; return s || 'a'; };
 
 export function formatNumber(n: number, format: ListSpec['format'] = 'decimal'): string {
   switch (format) {
@@ -174,6 +174,7 @@ function applyRuleStyles(body: string, eff: TextStyle, cmap: Map<string, Charact
   // GREP styles: every match of the pattern outside markup.
   for (const g of grep) {
     let re: RegExp;
+    if (riskyPattern(g.pattern)) continue;
     try { re = new RegExp(g.pattern, (g.flags ?? '').replace(/g/g, '') + 'g'); } catch { continue; }
     let m: RegExpExecArray | null;
     let guard = 0;
@@ -206,6 +207,29 @@ function applyRuleStyles(body: string, eff: TextStyle, cmap: Map<string, Charact
 
 const LIST_RE = /^((?: {2}|\t)*)(?:([-•▪◦])|(\d{1,3}[.)]|[a-zA-Z]\)))[ \t]+(?=\S)/;
 
+/**
+ * True for a pattern with a repeated group that itself repeats, like (a+)+ or (\w*)*: on a long
+ * paragraph such a pattern can backtrack for minutes and freeze the page, so it is not run.
+ */
+export function riskyPattern(src: string): boolean {
+  const open: boolean[] = [];
+  let inClass = false;
+  const quant = (k: number) => src[k] === '+' || src[k] === '*' || (src[k] === '{' && /^\{\d*,/.test(src.slice(k, k + 12)));
+  for (let i = 0; i < src.length; i++) {
+    const c = src[i];
+    if (c === '\\') { i++; continue; }
+    if (inClass) { if (c === ']') inClass = false; continue; }
+    if (c === '[') inClass = true;
+    else if (c === '(') open.push(false);
+    else if (c === ')') {
+      const inner = open.pop() ?? false, q = quant(i + 1);
+      if (inner && q) return true;
+      if (open.length && (inner || q)) open[open.length - 1] = true;
+    } else if (open.length && quant(i)) open[open.length - 1] = true;
+  }
+  return false;
+}
+
 /** Notes ({note:…}, nestable braces) are kept in the story but never set. */
 export function stripNotes(text: string): string {
   if (!text.includes('{note:')) return text;
@@ -213,7 +237,7 @@ export function stripNotes(text: string): string {
   for (let i = 0; i < text.length; i++) {
     if (text.startsWith('{note:', i)) {
       let depth = 0, j = i;
-      for (; j < text.length; j++) { if (text[j] === '{') depth++; else if (text[j] === '}' && --depth === 0) break; }
+      for (; j < text.length; j++) { if (text[j] === '\\') j++; else if (text[j] === '{') depth++; else if (text[j] === '}' && --depth === 0) break; }
       i = j;
       continue;
     }
@@ -275,7 +299,7 @@ export function parseStory(text: string, style: TextStyle, styles: StoryStyles |
     }
     let marker: string | null = null;
     if (list) {
-      const lv = level + (list.level ?? 0);
+      const lv = Math.max(0, Math.min(20, Math.round(level + (Number.isFinite(+list.level!) ? +list.level! : 0))));
       level = lv;
       counters.length = lv + 1;
       if (list.type === 'number') {
@@ -402,7 +426,7 @@ function parseInline(s: string, style: TextStyle, cmap: Map<string, CharacterSty
       }
       if (s.startsWith('{fn:', i) || s.startsWith('{en:', i) || s.startsWith('{ix:', i) || s.startsWith('{img:', i) || s.startsWith('{anchor:', i) || s.startsWith('{ruby:', i) || s.startsWith('{wari:', i)) {
         let depth = 0, j = i;
-        for (; j < s.length; j++) { if (s[j] === '{') depth++; else if (s[j] === '}' && --depth === 0) break; }
+        for (; j < s.length; j++) { if (s[j] === '\\') j++; else if (s[j] === '{') depth++; else if (s[j] === '}' && --depth === 0) break; }
         const kind = s.slice(i + 1, s.indexOf(':', i));
         const content = s.slice(s.indexOf(':', i) + 1, j).trim();
         i = j;
@@ -447,10 +471,11 @@ function parseInline(s: string, style: TextStyle, cmap: Map<string, CharacterSty
             const a = /^(anchor|pos)\s*:\s*(left|right|outside|inside)$/i.exec(p);
             if (a) { obj.anchor = a[2].toLowerCase() as InlineObj['anchor']; continue; }
             const o = /^(dx|dy)\s*:\s*(-?[\d.]+)$/i.exec(p);
-            if (o) { if (o[1].toLowerCase() === 'dx') obj.dx = parseFloat(o[2]); else obj.dy = parseFloat(o[2]); continue; }
+            if (o) { const d = parseFloat(o[2]); if (Number.isFinite(d)) { if (o[1].toLowerCase() === 'dx') obj.dx = d; else obj.dy = d; } continue; }
             const m = /^(w|width|h|height|shift)\s*:\s*([\d.]+)(%?)$/i.exec(p);
             if (!m) continue;
-            const v = parseFloat(m[2]);
+            const v = Math.min(1e5, parseFloat(m[2]));
+            if (!Number.isFinite(v)) continue;
             if (/^w/i.test(m[1])) { if (m[3]) obj.pct = v; else obj.w = v; }
             else if (/^h/i.test(m[1])) obj.h = v;
             else obj.shift = v;

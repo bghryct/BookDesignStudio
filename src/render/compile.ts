@@ -25,6 +25,7 @@ import { findElement, pageSide, facingOf, surfaceElements } from '../model/surfa
 import { getImage } from './images';
 import { mix, parseColor } from '../lib/color';
 import { compileTable, tableContextKey } from './table';
+import { makeElement } from '../model/factory';
 import { pathTextPrims } from './pathText';
 
 /* -------------------------------------------------------------------------- */
@@ -66,8 +67,8 @@ function chapterAt(project: Project, pageIndex: number | null): string {
     let cur = '';
     for (const p of project.pages) {
       for (const e of p.elements) {
-        if (e.type !== 'text') continue;
-        if (/chapter/i.test(e.name) && !/number|no\.?$/i.test(e.name) && e.text.trim()) cur = plainText(e.text.split('\n')[0]);
+        if (e.type !== 'text' || typeof e.text !== 'string') continue;
+        if (/chapter/i.test(e.name ?? '') && !/number|no\.?$/i.test(e.name) && e.text.trim()) cur = plainText(e.text.split('\n')[0]);
         for (const line of e.text.split('\n')) if (/^#\s/.test(line)) cur = plainText(line.slice(2));
       }
       list.push(cur);
@@ -393,13 +394,20 @@ function stylesWithList(styles: StoryStyles | null, project: Project, head: Text
 }
 
 /** The width a frame needs for its longest line (frames that fit their width to the text). */
-export function naturalWidth(el: TextElement, ctx: CompileContext): number {
-  const ss = storyStyles(ctx.project);
-  const f = frameFor(el, null, []);
-  const ins = f.insets ?? { top: f.inset, right: f.inset, bottom: f.inset, left: f.inset };
-  const [lay] = layoutStory(el.text, { ...el.style, align: 'left', lastLineAlign: undefined }, [{ ...f, w: 20000, h: 20000, columns: 1, colWidth: undefined, verticalAlign: 'top' }], tokensFor(ctx.project, ctx.pageIndex, el.text), ss.styles);
-  const right = lay.lines.reduce((m, l) => Math.max(m, l.xEnd ?? l.x), ins.left);
-  return Math.ceil(right + ins.right + 1);
+export function naturalWidth(el0: TextElement, ctx: CompileContext): number {
+  const el = saneElement(el0) as TextElement;
+  try {
+    const ss = storyStyles(ctx.project);
+    const f = frameFor(el, null, []);
+    const ins = f.insets ?? { top: f.inset, right: f.inset, bottom: f.inset, left: f.inset };
+    const [lay] = layoutStory(el.text, { ...el.style, align: 'left', lastLineAlign: undefined }, [{ ...f, w: 20000, h: 20000, columns: 1, colWidth: undefined, verticalAlign: 'top' }], tokensFor(ctx.project, ctx.pageIndex, el.text), ss.styles);
+    const right = lay.lines.reduce((m, l) => Math.max(m, l.xEnd ?? l.x), ins.left);
+    const w = Math.ceil(right + ins.right + 1);
+    return Number.isFinite(w) ? w : el.w;
+  } catch (err) {
+    console.error('Book Design Studio could not measure the text of', el.name || el.id, err);
+    return el.w;
+  }
 }
 
 /**
@@ -513,8 +521,8 @@ function compileImage(el: ImageElement, project: Project): Prim[] {
   if (!asset) {
     // Classic placeholder: a light box with a diagonal cross.
     return [
-      { t: 'path', d: rectPath(0, 0, el.w, el.h), fill: '#e7e1d4', stroke: '#b9b0a0', strokeWidth: 0.5 },
-      { t: 'path', d: `M0 0L${el.w} ${el.h}M${el.w} 0L0 ${el.h}`, stroke: '#b9b0a0', strokeWidth: 0.5 },
+      { t: 'path', d: rectPath(0, 0, el.w, el.h), fill: '#e7e1d4', stroke: '#b9b0a0', strokeWidth: 0.5, role: 'placeholder' },
+      { t: 'path', d: `M0 0L${el.w} ${el.h}M${el.w} 0L0 ${el.h}`, stroke: '#b9b0a0', strokeWidth: 0.5, role: 'placeholder' },
     ];
   }
   const iw = asset.width || 1, ih = asset.height || 1;
@@ -577,7 +585,66 @@ function compileDrawing(el: DrawingElement): Prim[] {
   }];
 }
 
-export function compileElementLocal(el: Element, ctx: CompileContext): Prim[] {
+/**
+ * An element as the renderers may safely use it: every NaN or infinite number (from a damaged file,
+ * or a field given 1e999) replaced by that element type's default, and its box kept to a sane size.
+ * Generators (initials, patterns, rules…) once looped without end on an infinite height. Returns the
+ * element itself when it is already sound, so caches keyed on it still hit.
+ */
+const saneCache = new WeakMap<Element, Element>();
+const RANGES: Partial<Record<Element['type'], Record<string, [number, number]>>> = {
+  ornament: { density: [0, 1], band: [0.5, 2000] },
+  initial: { weight: [1, 1000] },
+  overprint: { texture: [0, 1], misregister: [-200, 200] },
+  gradient: { grain: [0, 1], softness: [0, 1] },
+  gridtype: { weight: [0.01, 1], tracking: [0, 4] },
+  shape: { sides: [3, 64] },
+};
+export function saneElement(el: Element): Element {
+  const hit = saneCache.get(el);
+  if (hit) return hit;
+  let defaults: Record<string, unknown> | null = null;
+  try { defaults = makeElement(el.type) as unknown as Record<string, unknown>; } catch { defaults = null; }
+  let changed = false;
+  const fix = (v: unknown, d: unknown, depth: number): unknown => {
+    if (typeof v === 'number') {
+      if (Number.isFinite(v)) return v;
+      changed = true;
+      return typeof d === 'number' && Number.isFinite(d) ? d : 0;
+    }
+    if (depth > 4 || !v || typeof v !== 'object') return v;
+    if (Array.isArray(v)) {
+      let out: unknown[] | null = null;
+      v.forEach((x, i) => { const y = fix(x, Array.isArray(d) ? d[i] : undefined, depth + 1); if (y !== x) { out ??= [...v]; out[i] = y; } });
+      return out ?? v;
+    }
+    let out: Record<string, unknown> | null = null;
+    const o = v as Record<string, unknown>, dd = (d && typeof d === 'object' ? d : {}) as Record<string, unknown>;
+    for (const k of Object.keys(o)) { const y = fix(o[k], dd[k], depth + 1); if (y !== o[k]) { out ??= { ...o }; out[k] = y; } }
+    return out ?? v;
+  };
+  let out = fix(el, defaults, 0) as Element;
+  const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
+  // Generator inputs the panels keep in range: a file can hold anything, and some drive loop counts.
+  const ranges = RANGES[out.type];
+  if (ranges) {
+    const o = out as unknown as Record<string, unknown>;
+    for (const [k, [lo, hi]] of Object.entries(ranges)) {
+      const v = o[k];
+      if (typeof v === 'number' && (v < lo || v > hi)) { out = { ...out, [k]: clamp(v, lo, hi) } as Element; changed = true; }
+    }
+  }
+  if (out.w < 0 || out.w > 1e5 || out.h < 0 || out.h > 1e5 || Math.abs(out.x) > 1e6 || Math.abs(out.y) > 1e6 || Math.abs(out.rotation ?? 0) > 1e6) {
+    out = { ...out, w: clamp(out.w, 0, 1e5), h: clamp(out.h, 0, 1e5), x: clamp(out.x, -1e6, 1e6), y: clamp(out.y, -1e6, 1e6), rotation: (out.rotation ?? 0) % 360 } as Element;
+    changed = true;
+  }
+  const result = changed ? out : el;
+  saneCache.set(el, result);
+  return result;
+}
+
+export function compileElementLocal(el0: Element, ctx: CompileContext): Prim[] {
+  const el = saneElement(el0);
   switch (el.type) {
     case 'text': {
       const layout = layoutText(el, ctx);
@@ -593,7 +660,7 @@ export function compileElementLocal(el: Element, ctx: CompileContext): Prim[] {
     case 'path': return compilePath(el);
     case 'svg': {
       const asset = el.assetId ? ctx.project.assets[el.assetId] : null;
-      if (!asset) return [{ t: 'path', d: rectPath(0, 0, el.w, el.h), stroke: '#b9b0a0', strokeWidth: 0.5, dash: [3, 3] }];
+      if (!asset) return [{ t: 'path', d: rectPath(0, 0, el.w, el.h), stroke: '#b9b0a0', strokeWidth: 0.5, dash: [3, 3], role: 'placeholder' }];
       const parsed = parseSvgCached(asset.id, svgMarkupFromDataUrl(asset.src));
       if (parsed && parsed.paths.length) return svgPrims(parsed, el.w, el.h, el.fillOverride, el.strokeOverride);
       return [{ t: 'image', href: asset.src, x: 0, y: 0, w: el.w, h: el.h }];
@@ -608,13 +675,13 @@ export function compileElementLocal(el: Element, ctx: CompileContext): Prim[] {
     case 'drawing': return compileDrawing(el);
     case 'motif': {
       const def = getMotif(el.kind);
-      if (!def) return [{ t: 'path', d: rectPath(0, 0, el.w, el.h), stroke: '#b9b0a0', strokeWidth: 0.5, dash: [3, 3] }];
+      if (!def) return [{ t: 'path', d: rectPath(0, 0, el.w, el.h), stroke: '#b9b0a0', strokeWidth: 0.5, dash: [3, 3], role: 'placeholder' }];
       if (el.fontFamily) void ensureFamily(el.fontFamily);
       const mctx: MotifContext = { ...genContext, unit: ctx.project.book.unit, book: ctx.project.book };
       try {
         return def.generate(el, mctx);
       } catch {
-        return [{ t: 'path', d: rectPath(0, 0, el.w, el.h), stroke: '#e5483a', strokeWidth: 0.5, dash: [3, 3] }];
+        return [{ t: 'path', d: rectPath(0, 0, el.w, el.h), stroke: '#e5483a', strokeWidth: 0.5, dash: [3, 3], role: 'placeholder' }];
       }
     }
     case 'table': return compileTable(el, ctx);
@@ -625,7 +692,8 @@ export function compileElementLocal(el: Element, ctx: CompileContext): Prim[] {
 /* Placement & memoisation                                                     */
 /* -------------------------------------------------------------------------- */
 
-export function elementMatrix(el: Element, offsetX = 0, offsetY = 0): Matrix {
+export function elementMatrix(el0: Element, offsetX = 0, offsetY = 0): Matrix {
+  const el = saneElement(el0);
   let m: Matrix = translate(el.x + offsetX, el.y + offsetY);
   if (el.rotation) m = multiply(m, rotate(el.rotation, el.w / 2, el.h / 2));
   if (el.flipX || el.flipY) m = multiply(m, [el.flipX ? -1 : 1, 0, 0, el.flipY ? -1 : 1, el.flipX ? el.w : 0, el.flipY ? el.h : 0]);

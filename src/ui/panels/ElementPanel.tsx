@@ -15,7 +15,7 @@ import { Section, Row, NumberField, Slider, Select, Toggle, ColorField, TextInpu
 import { PATTERN_PARAMS, OVERPRINT_PARAMS, ORNAMENT_PARAMS } from '../../engine/generators';
 import { getFamilies } from '../../engine/fonts';
 import { threadOf, layoutText, contextForElement, crossesGutter } from '../../render/compile';
-import { importFiles, pdfPageAsset } from '../importFiles';
+import { importFiles, switchPdfPage } from '../importFiles';
 import { autoFlow } from '../../model/pageOps';
 import { parseSvgCached, svgMarkupFromDataUrl, svgPrims } from '../../render/svgImport';
 import { makePath } from '../../model/factory';
@@ -689,16 +689,9 @@ function PdfPageControls({ e }: { e: ImageElement }) {
   if (!pdf) return null;
   const bytes = async () => new Uint8Array(await (await fetch(pdf.src)).arrayBuffer());
   const goTo = async (page: number) => {
-    const s = useStore.getState();
-    const name = asset!.name.replace(/ · p\. \d+$/, '');
-    // Another page of the same file: reuse its asset if it was placed before.
-    const found = Object.values(s.project.assets).find((a) => a.pdf && a.pdf.src === pdf.src && a.pdf.page === page);
     setBusy(`Rendering page ${page}…`);
-    try {
-      const a = found ?? await pdfPageAsset(await bytes(), name, page, pdf.src);
-      if (!found) s.update((d) => { d.assets[a.id] = a; });
-      s.updateElement(e.id, { assetId: a.id } as Partial<ImageElement>);
-    } finally { setBusy(null); }
+    // Keeps one copy of the PDF (see switchPdfPage).
+    try { await switchPdfPage(e.id, page); } finally { setBusy(null); }
   };
   const flowText = async () => {
     setBusy('Reading the PDF’s text…');

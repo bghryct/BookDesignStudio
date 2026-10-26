@@ -83,6 +83,19 @@ export interface HereItem { t: 'here' }
 export type Item = Box | Glue | Pen | TabItem | HereItem;
 
 export const INF = 10000;
+/** Breaking inside a run with no break opportunity: allowed, but dearer than any other line. */
+const EMERGENCY_PEN = 5000;
+const EMERGENCY_EM = 12;
+/** May a run be cut before text[k]? Not inside a surrogate pair, before a combining mark or variation selector, or next to a joiner. */
+const cuttable = (text: string, k: number) => {
+  const c = text.charCodeAt(k);
+  if (c >= 0xdc00 && c <= 0xdfff) return false;
+  return !/[\p{M}\u200d\ufe00-\ufe0f]/u.test(text[k]) && text[k - 1] !== '\u200d';
+};
+
+/** A text-valued property (colour, font, link) only when it really is text: styles from a damaged file may hold anything. */
+const txt = (v: unknown): string | undefined => (typeof v === 'string' && v ? v : undefined);
+const ULINE_KINDS = new Set<string>(['double', 'dashed', 'dotted', 'wavy']);
 
 export interface ParaStyle {
   size: number;
@@ -176,7 +189,7 @@ export class ItemBuilder {
     if (s.textTransform === 'uppercase' || cs?.textTransform === 'uppercase') features.case = true;
     // Optical kerning replaces the font's pairs; "none" sets the type unkerned.
     if ((s.kerning ?? 'metrics') !== 'metrics') features.kern = false;
-    const family = cs?.fontFamily ?? s.fontFamily;
+    const family = txt(cs?.fontFamily) ?? s.fontFamily;
     return resolveFont({ family, weight, italic, axes: family === s.fontFamily ? s.axes : {}, features, size });
   }
 
@@ -224,18 +237,18 @@ export class ItemBuilder {
       if (faceSupports(this.font(st, { [tag]: true }), tag)) extra = { [tag]: true };
       else { dy += cs.position === 'superscript' ? size * 0.33 : -size * 0.14; size *= 0.62; }
     }
-    const color = cs?.color ?? this.style.color;
+    const color = txt(cs?.color) ?? this.style.color;
     const ls = ((ps.tracking + (cs?.tracking ?? 0) + (this.style.opticalTracking ? opticalTrack(size) : 0)) / 1000) * size;
     const look: Partial<Seg> = { dy: dy || undefined, fn: st.fn || undefined };
     if (cs?.hScale && cs.hScale !== 100) look.sx = cs.hScale / 100;
     if (cs?.vScale && cs.vScale !== 100) look.sy = cs.vScale / 100;
     if (cs?.skew) look.skew = cs.skew;
-    if (cs?.stroke) look.stroke = { color: cs.stroke === 'currentColor' ? color : cs.stroke, width: cs.strokeWidth ?? size * 0.03 };
+    if (cs?.stroke) look.stroke = { color: cs.stroke === 'currentColor' ? color : txt(cs.stroke) ?? color, width: cs.strokeWidth ?? size * 0.03 };
     if (cs?.underline || cs?.strike || cs?.highlight) {
       look.deco = {
-        u: cs.underline ? { w: cs.underlineWeight ?? Math.max(0.3, size * 0.055), o: cs.underlineOffset ?? size * 0.13, c: cs.underlineColor ?? color, k: cs.underlineStyle && cs.underlineStyle !== 'solid' ? cs.underlineStyle : undefined, g: cs.underlineGap || undefined } : undefined,
-        s: cs.strike ? { w: cs.strikeWeight ?? Math.max(0.3, size * 0.055), c: cs.strikeColor ?? color } : undefined,
-        hl: cs.highlight,
+        u: cs.underline ? { w: cs.underlineWeight ?? Math.max(0.3, size * 0.055), o: cs.underlineOffset ?? size * 0.13, c: txt(cs.underlineColor) ?? color, k: cs.underlineStyle && cs.underlineStyle !== 'solid' && ULINE_KINDS.has(cs.underlineStyle) ? cs.underlineStyle as 'double' | 'dashed' | 'dotted' | 'wavy' : undefined, g: txt(cs.underlineGap) } : undefined,
+        s: cs.strike ? { w: cs.strikeWeight ?? Math.max(0.3, size * 0.055), c: txt(cs.strikeColor) ?? color } : undefined,
+        hl: (cs.highlight as unknown) === true ? '#f6e27a' : txt(cs.highlight),
       };
     }
     if (st.wari) {
@@ -247,8 +260,8 @@ export class ItemBuilder {
       const w = Math.max(wa, wb) + size * 0.12;
       return [{ text: '', font, size, ls: 0, width: w, glyphW: w, color, deco: { ...look.deco, wari: { a, b, s: ws, wa, wb } } }];
     }
-    if (cs?.emphasis) look.deco = { ...look.deco, em: { m: cs.emphasis, s: size * 0.42 } };
-    if (cs?.link) look.deco = { ...look.deco, link: cs.link };
+    if (cs?.emphasis) look.deco = { ...look.deco, em: { m: txt(cs.emphasis) ?? 'dot', s: size * 0.42 } };
+    if (txt(cs?.link)) look.deco = { ...look.deco, link: cs!.link };
     if (st.ruby) {
       // Ruby: the annotation at half size; a base narrower than its annotation is spaced out to match.
       const font = this.font(st, extra, size);
@@ -360,7 +373,9 @@ export function hyphenDictionary(list: string[] | undefined): Map<string, number
   return d;
 }
 
-export function buildItems(p: Paragraph, style: TextStyle, ps: ParaStyle, scWords: number, ragged: boolean, dict: Map<string, number[] | null> | null, images?: StoryStyles['images']): Item[] {
+export function buildItems(p: Paragraph, style: TextStyle, ps: ParaStyle, scWords: number, ragged: boolean, dict: Map<string, number[] | null> | null, images?: StoryStyles['images'], measure = Infinity): Item[] {
+  // Runs wider than this may break anywhere (see run below): 12 em, or the column if it is narrower.
+  const longRun = Math.max(style.fontSize, Math.min(EMERGENCY_EM * style.fontSize, measure));
   const b = new ItemBuilder(style, ps, images);
   const items: Item[] = [];
   const sp = b.space();
@@ -443,18 +458,31 @@ export function buildItems(p: Paragraph, style: TextStyle, ps: ParaStyle, scWord
       }
     }
     breaks.sort((x, y) => x.at - y.at);
+    // A run with nowhere to break that is wider than 12 em or its column (a URL, a long code) may also break
+    // between any two characters, at a cost so high that it only happens when the run would
+    // otherwise stick out of its column. No hyphen is added.
+    const run = (from: number, to: number) => {
+      const segs = b.wordSegs(word, from, to, sc);
+      if (noBreak || sumW(segs) <= longRun) { items.push(box(segs, wi)); return; }
+      let at = from;
+      for (let k = from + 1; k <= to; k++) {
+        if (k < to && !cuttable(text, k)) continue;
+        if (at > from) items.push({ t: 'pen', w: 0, p: EMERGENCY_PEN, f: false, hyphen: null });
+        items.push(box(b.wordSegs(word, at, k, sc), wi));
+        at = k;
+      }
+    };
     let prevAt = 0;
     for (const br of breaks) {
       if (br.at <= prevAt) continue;
-      const segs = b.wordSegs(word, prevAt, br.at, sc);
-      items.push(box(segs, wi));
+      run(prevAt, br.at);
       if (br.hyph) {
         const h = b.hyphen(word, br.at);
         items.push({ t: 'pen', w: h.width, p: hyphPen, f: true, hyphen: h });
       } else items.push({ t: 'pen', w: 0, p: 50, f: true, hyphen: null });
       prevAt = br.at;
     }
-    items.push(box(b.wordSegs(word, prevAt, text.length, sc), wi));
+    run(prevAt, text.length);
   });
   items.push({ t: 'glue', w: 0, st: INF, sh: 0 });
   items.push({ t: 'pen', w: 0, p: -INF, f: true });
@@ -556,15 +584,18 @@ function knuthPlass(items: Item[], widthAt: (line: number) => number, tolerance:
 /** First fit: the single-line composer, and the fallback when no total-fit solution exists. */
 export function greedy(items: Item[], widthAt: (line: number) => number): number[] {
   const out: number[] = [];
-  let w = 0, line = 0, lastBreak = -1, lastBreakW = 0;
+  // Where the line could end: the last ordinary break, else the last emergency break inside a long run.
+  let w = 0, line = 0, lastBreak = -1, lastEmergency = -1;
   for (let i = 0; i < items.length; i++) {
     const it = items[i];
     if (it.t === 'box') {
-      if (w + it.w > widthAt(line) && lastBreak >= 0) {
-        out.push(lastBreak);
+      const at = lastBreak >= 0 ? lastBreak : lastEmergency;
+      if (w + it.w > widthAt(line) && at >= 0) {
+        out.push(at);
         line++;
-        const restart = lastBreak;
+        const restart = at;
         lastBreak = -1;
+        lastEmergency = -1;
         w = 0;
         i = restart;
         // Skip discardables after the break.
@@ -573,19 +604,28 @@ export function greedy(items: Item[], widthAt: (line: number) => number): number
       }
       w += it.w;
     } else if (it.t === 'glue') {
-      if (i > 0 && items[i - 1].t === 'box') { lastBreak = i; lastBreakW = w; }
+      if (i > 0 && items[i - 1].t === 'box') lastBreak = i;
       if (w > 0) w += it.w;
     } else if (it.t === 'pen') {
-      if (it.p === -INF) { out.push(i); line++; w = 0; lastBreak = -1; continue; }
-      if (it.p < INF && w + it.w <= widthAt(line)) { lastBreak = i; lastBreakW = w; }
+      if (it.p === -INF) { out.push(i); line++; w = 0; lastBreak = -1; lastEmergency = -1; continue; }
+      // A line already too full (a run wider than the column) still ends at its first chance.
+      if (it.p < INF && (w + it.w <= widthAt(line) || (lastBreak < 0 && lastEmergency < 0))) { if (it.p >= EMERGENCY_PEN) lastEmergency = i; else lastBreak = i; }
     }
   }
-  void lastBreakW;
   if (!out.length || out[out.length - 1] !== items.length - 1) out.push(items.length - 1);
   return out;
 }
 
-function breakLines(items: Item[], widthAt: (line: number) => number, o: BreakOptions): number[] {
+function breakLines(items: Item[], widthAt0: (line: number) => number, o: BreakOptions): number[] {
+  // A non-finite width anywhere would make every line infeasible and the search run to the end each time.
+  for (const it of items) {
+    if (it.t === 'box' || it.t === 'glue') {
+      if (!Number.isFinite(it.w)) it.w = 0;
+      if (!Number.isFinite(it.st)) it.st = 0;
+      if (!Number.isFinite(it.sh)) it.sh = 0;
+    } else if (it.t === 'pen' && !Number.isFinite(it.w)) it.w = 0;
+  }
+  const widthAt = (line: number) => { const w = widthAt0(line); return Number.isFinite(w) ? w : 0; };
   return knuthPlass(items, widthAt, 2, o) ?? knuthPlass(items, widthAt, 8, o) ?? knuthPlass(items, widthAt, 8) ?? greedy(items, widthAt);
 }
 

@@ -10,7 +10,7 @@ import { useFontStore } from '../../engine/fonts';
 import type { Element, PaperMaterial, Project, PageSection } from '../../model/types';
 import { pageLabel } from '../../model/sections';
 import { insertPages, deletePage, duplicatePage, movePage, addMaster, deleteMaster, autoFlow } from '../../model/pageOps';
-import { Button, Select, TextInput, Toggle, Hint } from '../controls';
+import { Button, NumberField, Select, TextInput, Toggle, Hint } from '../controls';
 import { PresetsPanel } from './PresetsPanel';
 import { LibraryPanel } from '../library/LibraryPanel';
 import { importFiles } from '../importFiles';
@@ -30,7 +30,7 @@ const TABS: { id: LeftTab; label: string }[] = [
 export function LeftPanel() {
   const tab = useStore((s) => s.leftTab);
   return (
-    <aside className="flex w-[248px] shrink-0 flex-col border-r border-ink-700 bg-ink-850">
+    <aside className="flex w-[248px] shrink-0 flex-col border-r border-ink-700 bg-ink-850 max-md:absolute max-md:inset-y-0 max-md:left-0 max-md:z-40 max-md:shadow-2xl">
       <div className="flex h-9 shrink-0 items-end gap-0.5 border-b border-ink-700 px-2">
         {TABS.map((t) => (
           <button
@@ -76,9 +76,13 @@ export function PageThumb({ project, index, width }: { project: Project; index: 
 function MasterThumb({ project, id, side, width }: { project: Project; id: string; side: 'left' | 'right'; width: number }) {
   const version = useFontStore((s) => s.version);
   const html = useMemo(() => {
-    const els = surfaceElements(project, masterKey(id, side));
-    const ctx = { project, surface: masterKey(id, side), pageIndex: null, side } as const;
-    return primsToSvg(els.map((e) => placedElement(e, ctx)), { pxPerPt: 0.35, idPrefix: `m${id}${side}x` });
+    try {
+      const els = surfaceElements(project, masterKey(id, side));
+      const ctx = { project, surface: masterKey(id, side), pageIndex: null, side } as const;
+      return primsToSvg(els.map((e) => placedElement(e, ctx)), { pxPerPt: 0.35, idPrefix: `m${id}${side}x` });
+    } catch {
+      return '';
+    }
   }, [project, id, side, version]);
   const W = project.book.trimW, H = project.book.trimH;
   return (
@@ -422,7 +426,7 @@ function SectionControls({ pageId, index }: { pageId: string; index: number }) {
       {sec && (
         <>
           <div className="grid grid-cols-2 gap-1.5">
-            <TextInput label="Start at" value={String(sec.start)} onChange={(v) => { const n = parseInt(v, 10); if (n > 0) edit((x) => { x.start = n; }); }} />
+            <NumberField label="Start at" value={sec.start} min={1} decimals={0} onChange={(v) => edit((x) => { x.start = Math.max(1, Math.round(v)); })} />
             <Select label="Numbers" value={sec.style} options={[{ value: 'arabic', label: '1 2 3' }, { value: 'roman', label: 'i ii iii' }, { value: 'ROMAN', label: 'I II III' }, { value: 'alpha', label: 'a b c' }, { value: 'ALPHA', label: 'A B C' }]} onChange={(v) => edit((x) => { x.style = v as PageSection['style']; })} />
           </div>
           <div className="grid grid-cols-2 gap-1.5">

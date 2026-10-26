@@ -1,4 +1,4 @@
-import React, { useMemo } from 'react';
+import React, { useEffect, useMemo } from 'react';
 import { Shuffle } from 'lucide-react';
 import { useStore } from '../store/store';
 import { PRESET_FAMILIES, defaultContent, previewProject, type PresetResult } from '../engine/presets';
@@ -29,8 +29,8 @@ export default function LayoutMatrix() {
     return out;
   }, [family, seed, content]);
 
-  // Make sure every family used by the previews is loading.
-  useMemo(() => { for (const id of ['eb-garamond', 'cinzel', 'inter', 'space-grotesk', 'ibm-plex-mono', 'unifraktur', 'fraunces']) void ensureFamily(id); }, []);
+  // Make sure every family used by the previews is loading (after render: it updates the font store).
+  useEffect(() => { for (const id of ['eb-garamond', 'cinzel', 'inter', 'space-grotesk', 'ibm-plex-mono', 'unifraktur', 'fraunces']) void ensureFamily(id); }, []);
 
   return (
     <div className="scroll-thin h-full overflow-y-auto bg-ink-900">

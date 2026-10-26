@@ -48,8 +48,9 @@ export interface PathPrim extends PrimBase {
   fillRule?: 'nonzero' | 'evenodd';
   /** Ask the PDF writer to set overprint for this fill/stroke. */
   overprint?: boolean;
-  /** Technical line: die-cut contour (spot colour in PDF, hidden in 3D textures). */
-  role?: 'dieline';
+  /** Technical line: die-cut contour (spot colour in PDF, hidden in 3D textures). Placeholder: a
+   *  frame with nothing to show (no picture yet), drawn on screen and never printed or exported. */
+  role?: 'dieline' | 'placeholder';
 }
 
 /** A font instance as the text engine resolved it. */
