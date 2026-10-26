@@ -46,37 +46,57 @@ function smartType(value: string, caret: number, before: string, autocorrect: { 
 const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 const span = (cls: string, s: string) => `<span class="${cls}">${esc(s)}</span>`;
 
-/** Colour the story markup so tags, codes and paragraph styles read at a glance. */
-function highlight(text: string): string {
-  return text.split('\n').map((line) => {
-    let out = '';
-    let rest = line;
-    const lead = /^((?:\[[^\]\n]{1,400}\]\s*)+)/.exec(rest);
-    if (lead) { out += span('hl-para', lead[1]); rest = rest.slice(lead[1].length); }
-    const list = /^((?: {2}|\t)*(?:[-•▪◦]|\d{1,3}[.)]|[a-zA-Z]\))[ \t]+)/.exec(rest);
-    if (list) { out += span('hl-list', list[1]); rest = rest.slice(list[1].length); }
-    else if (/^#{1,2}\s/.test(rest)) { out += span('hl-head', rest); rest = ''; }
-    else if (/^(-{3,}|\*\s\*\s\*|⁂|\{(col|column|frame)\})\s*$/.test(rest)) { out += span('hl-code', rest); rest = ''; }
-    const re = /(\{fn:(?:[^{}]|\{[^{}]*\})*\})|(\{k:[^}]*\})|(\{[a-z]+(?::[^}]*)?\})|(<\/?\{[^}]*\}>|<\/?[^<>\n]{0,40}>)|(\\.)|(\*\*|\*|\^)|(\t)|(\{\+\+[\s\S]*?\+\+\})|(\{--[\s\S]*?--\})/g;
-    let last = 0;
-    let m: RegExpExecArray | null;
-    while ((m = re.exec(rest))) {
-      out += esc(rest.slice(last, m.index));
-      if (m[1]) out += span('hl-fn', m[1]);
-      else if (m[2]) out += span('hl-kern', m[2]);
-      else if (m[3]) out += span('hl-code', m[3]);
-      else if (m[4]) out += span('hl-tag', m[4]);
-      else if (m[5]) out += span('hl-mute', m[5]);
-      else if (m[6]) out += span('hl-mark', m[6]);
-      else if (m[7]) out += span('hl-tab', '\t');
-      else if (m[8]) out += span('hl-ins', m[8]);
-      else if (m[9]) out += span('hl-del', m[9]);
-      last = m.index + m[0].length;
-    }
-    out += esc(rest.slice(last));
-    return out;
-  }).join('\n') + '\n';
+/** Colour one line of story markup so tags, codes and paragraph styles read at a glance. */
+function highlightOne(line: string): string {
+  let out = '';
+  let rest = line;
+  const lead = /^((?:\[[^\]\n]{1,400}\]\s*)+)/.exec(rest);
+  if (lead) { out += span('hl-para', lead[1]); rest = rest.slice(lead[1].length); }
+  const list = /^((?: {2}|\t)*(?:[-•▪◦]|\d{1,3}[.)]|[a-zA-Z]\))[ \t]+)/.exec(rest);
+  if (list) { out += span('hl-list', list[1]); rest = rest.slice(list[1].length); }
+  else if (/^#{1,2}\s/.test(rest)) { out += span('hl-head', rest); rest = ''; }
+  else if (/^(-{3,}|\*\s\*\s\*|⁂|\{(col|column|frame)\})\s*$/.test(rest)) { out += span('hl-code', rest); rest = ''; }
+  const re = /(\{fn:(?:[^{}]|\{[^{}]*\})*\})|(\{k:[^}]*\})|(\{[a-z]+(?::[^}]*)?\})|(<\/?\{[^}]*\}>|<\/?[^<>\n]{0,40}>)|(\\.)|(\*\*|\*|\^)|(\t)|(\{\+\+[\s\S]*?\+\+\})|(\{--[\s\S]*?--\})/g;
+  let last = 0;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(rest))) {
+    out += esc(rest.slice(last, m.index));
+    if (m[1]) out += span('hl-fn', m[1]);
+    else if (m[2]) out += span('hl-kern', m[2]);
+    else if (m[3]) out += span('hl-code', m[3]);
+    else if (m[4]) out += span('hl-tag', m[4]);
+    else if (m[5]) out += span('hl-mute', m[5]);
+    else if (m[6]) out += span('hl-mark', m[6]);
+    else if (m[7]) out += span('hl-tab', '\t');
+    else if (m[8]) out += span('hl-ins', m[8]);
+    else if (m[9]) out += span('hl-del', m[9]);
+    last = m.index + m[0].length;
+  }
+  out += esc(rest.slice(last));
+  return out;
 }
+
+/** Highlighted lines by their text: a keystroke re-colours only the line it changed. */
+const lineHtml = new Map<string, string>();
+function highlightLine(line: string): string {
+  let h = lineHtml.get(line);
+  if (h == null) {
+    h = highlightOne(line);
+    if (lineHtml.size > 20000) lineHtml.clear();
+    lineHtml.set(line, h);
+  }
+  return h;
+}
+
+/**
+ * One line of the colour layer. Each line is its own element, so a keystroke in a book-length
+ * story updates one line instead of re-parsing the whole layer (which took ~80 ms at 600k
+ * characters). The text and newlines are exactly the story's, so the layer still lines up with
+ * the text box.
+ */
+const HlLine = React.memo(function HlLine({ html }: { html: string }) {
+  return <><span dangerouslySetInnerHTML={{ __html: html }} />{'\n'}</>;
+});
 
 /* -------------------------------------------------------------------------- */
 /* Insert menu                                                                 */
@@ -152,7 +172,7 @@ export function TextStoryEditor({ elementId, anchor, viewport }: { elementId: st
     pendingCaret.current = null;
     ref.current.setSelectionRange(p, p);
   });
-  const html = useMemo(() => (head ? highlight(head.text) : ''), [head?.text]); // eslint-disable-line react-hooks/exhaustive-deps
+  const lines = useMemo(() => (head ? head.text.split('\n').map(highlightLine) : []), [head?.text]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     ref.current?.focus();
@@ -372,7 +392,7 @@ export function TextStoryEditor({ elementId, anchor, viewport }: { elementId: st
         </div>
       )}
       <div className="relative h-64 resize-y overflow-hidden" style={{ minHeight: 120 }}>
-        <pre ref={hlRef} aria-hidden className="scroll-thin pointer-events-none absolute inset-0 m-0 overflow-hidden text-ink-100" style={font} dangerouslySetInnerHTML={{ __html: html }} />
+        <pre ref={hlRef} aria-hidden className="scroll-thin pointer-events-none absolute inset-0 m-0 overflow-hidden text-ink-100" style={font}>{lines.map((h, i) => <HlLine key={i} html={h} />)}</pre>
         <textarea
           ref={ref}
           value={head.text}

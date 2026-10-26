@@ -1,4 +1,4 @@
-import React, { useDeferredValue, useMemo, useRef, useState } from 'react';
+import React, { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
 import clsx from 'clsx';
 import { Plus, Trash, Copy, MoreHorizontal, Eye, EyeOff, Lock, LockOpen, ChevronUp, ChevronDown, FileText, Upload, Image as ImageIcon, BookPlus } from 'lucide-react';
 import { insertProjectFile } from '../projectIO';
@@ -6,6 +6,7 @@ import { useStore, type LeftTab } from '../../store/store';
 import { spreadsOf, pageKey, masterKey, surfaceElements } from '../../model/surfaces';
 import { compilePage, placedElement } from '../../render/compile';
 import { primsToSvg } from '../../render/svgString';
+import type { Prim } from '../../render/primitives';
 import { useFontStore } from '../../engine/fonts';
 import type { Element, PaperMaterial, Project, PageSection } from '../../model/types';
 import { pageLabel } from '../../model/sections';
@@ -58,20 +59,54 @@ export function LeftPanel() {
 /* Thumbnails                                                                  */
 /* -------------------------------------------------------------------------- */
 
-export function PageThumb({ project, index, width }: { project: Project; index: number; width: number }) {
+/** What a compiled page is made of: each placed element's prims (shared while unchanged) and placement. */
+const partsOf = (prims: Prim[]): unknown[] => prims.flatMap((p) => (p.t === 'group' ? [p.children, p.matrix?.join(','), p.opacity, p.blend, p.clip] : p.t === 'path' ? [`${p.d}|${String(p.fill)}`] : [p]));
+
+/** Whether an element is on screen or close to it. */
+function useNearViewport(ref: React.RefObject<globalThis.Element>): boolean {
+  const [near, setNear] = useState(false);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el || typeof IntersectionObserver === 'undefined') { setNear(true); return; }
+    const io = new IntersectionObserver(([e]) => setNear(e.isIntersecting), { rootMargin: '600px 0px' });
+    io.observe(el);
+    return () => io.disconnect();
+  }, [ref]);
+  return near;
+}
+
+/**
+ * A page thumbnail. Only thumbnails on or near the screen follow the book as it changes: in a book
+ * of hundreds of pages, redrawing (even re-rendering) them all made every keystroke slow. One
+ * scrolled away keeps its last drawing and is redrawn when it comes back.
+ */
+export const PageThumb = React.memo(function PageThumb({ index, width }: { index: number; width: number }) {
   const version = useFontStore((s) => s.version);
+  const ref = useRef<SVGSVGElement>(null);
+  const near = useNearViewport(ref);
+  const book = useStore((s) => s.project.book);
+  const project = useDeferredValue(useStore((s) => (near ? s.project : null)));
+  const drawn = useRef<{ index: number; parts: unknown[]; html: string }>({ index, parts: [], html: '' });
   const html = useMemo(() => {
+    if (!near || !project) return drawn.current.html;
     try {
-      return primsToSvg(compilePage(project, index, { dieLines: false }), { pxPerPt: 0.35, idPrefix: `t${index}x`, hideDieLines: true });
+      const prims = compilePage(project, index, { dieLines: false });
+      // Pages the change did not reach compile to the same parts: keep their drawing.
+      const parts = partsOf(prims);
+      const d = drawn.current;
+      if (d.index === index && d.parts.length === parts.length && parts.every((x, i) => x === d.parts[i])) return d.html;
+      const html = primsToSvg(prims, { pxPerPt: 0.35, idPrefix: `t${index}x`, hideDieLines: true });
+      drawn.current = { index, parts, html };
+      return html;
     } catch {
       return '';
     }
-  }, [project, index, version]);
-  const W = project.book.trimW, H = project.book.trimH;
+  }, [project, index, version, near]);
+  const W = book.trimW, H = book.trimH;
   return (
-    <svg viewBox={`0 0 ${W} ${H}`} width={width} height={(width * H) / W} className="block" dangerouslySetInnerHTML={{ __html: html }} />
+    <svg ref={ref} viewBox={`0 0 ${W} ${H}`} width={width} height={(width * H) / W} className="block" dangerouslySetInnerHTML={{ __html: html }} />
   );
-}
+});
 
 function MasterThumb({ project, id, side, width }: { project: Project; id: string; side: 'left' | 'right'; width: number }) {
   const version = useFontStore((s) => s.version);
@@ -164,7 +199,7 @@ function PagesPanel() {
                   <div key={k} className="relative" style={{ width: thumbW }}>
                     {pi != null ? (
                       <button type="button" className="block w-full shadow-[0_1px_3px_rgba(0,0,0,0.5)]" onClick={() => { s().setView('spreads'); s().setSpread(si); }} title={`Page ${pi + 1}`}>
-                        <PageThumb project={project} index={pi} width={thumbW} />
+                        <PageThumb index={pi} width={thumbW} />
                       </button>
                     ) : <div />}
                   </div>

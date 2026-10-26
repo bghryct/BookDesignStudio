@@ -205,6 +205,24 @@ function applyRuleStyles(body: string, eff: TextStyle, cmap: Map<string, Charact
 /* Paragraphs                                                                  */
 /* -------------------------------------------------------------------------- */
 
+/*
+ * Parsed paragraphs, by their text, the frame style, the character styles and the note numbers
+ * they start from (their notes are numbered after the ones before them). Cached words are shared
+ * between parses, so nothing may change them afterwards.
+ */
+interface InlineHit { words: Word[]; footnotes: Footnote[]; hasTabs: boolean; count: number; en: number; endnotes: Footnote[] }
+const inlineCache = new Map<string, InlineHit>();
+const contextIds = new Map<string, number>();
+function contextId(key: string): number {
+  let id = contextIds.get(key);
+  if (id == null) {
+    if (contextIds.size > 500) { contextIds.clear(); inlineCache.clear(); }
+    id = contextIds.size + 1;
+    contextIds.set(key, id);
+  }
+  return id;
+}
+
 const LIST_RE = /^((?: {2}|\t)*)(?:([-•▪◦])|(\d{1,3}[.)]|[a-zA-Z]\)))[ \t]+(?=\S)/;
 
 /**
@@ -255,6 +273,7 @@ export function parseStory(text: string, style: TextStyle, styles: StoryStyles |
   const lastNumbers: number[] = [...(styles?.listStart ?? [])];
   if (out) out.lastNumbers = lastNumbers;
   const fn = { count: 0, en: 0, endnotes: [] as Footnote[] };
+  const ctxKey = contextId(JSON.stringify(style) + JSON.stringify(styles?.char ?? null));
   let afterBreak = true;
   let pendingBreak: Paragraph['breakBefore'] = null;
   for (const rawLine of text.replace(/\r\n?/g, '\n').split('\n')) {
@@ -319,8 +338,20 @@ export function parseStory(text: string, style: TextStyle, styles: StoryStyles |
       } else marker = list.bullet || '•';
     }
 
-    body = applyRuleStyles(body, eff, cmap);
-    const { words, footnotes, hasTabs } = parseInline(body, eff, cmap, fn);
+    // A keystroke in a long story re-reads only the paragraph it changed (see inlineCache).
+    const ckey = `${ctxKey}|${pstyle ? JSON.stringify(pstyle) : ''}|${fn.count}|${fn.en}|${body}`;
+    let hit = inlineCache.get(ckey);
+    if (hit) {
+      fn.count = hit.count; fn.en = hit.en;
+      fn.endnotes.push(...hit.endnotes);
+    } else {
+      const n0 = fn.endnotes.length;
+      const r = parseInline(applyRuleStyles(body, eff, cmap), eff, cmap, fn);
+      hit = { ...r, count: fn.count, en: fn.en, endnotes: fn.endnotes.slice(n0) };
+      inlineCache.set(ckey, hit);
+      if (inlineCache.size > 30000) inlineCache.delete(inlineCache.keys().next().value!);
+    }
+    const { words, footnotes, hasTabs } = hit;
     const lone = words.length === 1 && words[0].pieces.length === 1 ? words[0].pieces[0].st.obj : undefined;
     const only = lone && !lone.anchor ? lone : undefined;
     paras.push({ kind, words, first: afterBreak, style: eff, pstyle, list, marker, level, breakBefore: pendingBreak, footnotes, hasTabs, figure: only ?? null, styleNames: styleNames.length ? styleNames : undefined });

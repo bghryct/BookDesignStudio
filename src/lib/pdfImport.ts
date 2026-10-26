@@ -29,10 +29,15 @@ function pdfjs(): Promise<PdfJs> {
   return lib;
 }
 
-/** Open a PDF (the bytes are copied: pdf.js hands its buffer to its worker). `close` frees the worker. */
-export async function openPdf(bytes: Uint8Array): Promise<{ doc: PDFDocumentProxy; close: () => Promise<void> }> {
+/**
+ * Open a PDF (the bytes are copied: pdf.js hands its buffer to its worker). `close` frees the worker.
+ * `textOnly` leaves every image out of the page operator lists, so none is decoded: for reading
+ * text and fonts, never for rendering.
+ */
+export async function openPdf(bytes: Uint8Array, opts: { textOnly?: boolean } = {}): Promise<{ doc: PDFDocumentProxy; close: () => Promise<void> }> {
   const m = await pdfjs();
-  const task = m.getDocument({ data: bytes.slice(), fontExtraProperties: true });
+  // maxImageSize 0: pdf.js drops any image over 0 pixels before decoding it (with a warning).
+  const task = m.getDocument({ data: bytes.slice(), fontExtraProperties: true, ...(opts.textOnly ? { maxImageSize: 0 } : {}) });
   try {
     return { doc: await task.promise, close: () => task.destroy() };
   } catch (e) {
@@ -75,34 +80,65 @@ interface Line { runs: Run[]; x: number; end: number; y: number; size: number; p
 const esc = (t: string) => t.replace(/([\\*^{}<>])/g, '\\$1');
 const median = (v: number[]) => { if (!v.length) return 0; const s = [...v].sort((a, b) => a - b); return s[Math.floor(s.length / 2)]; };
 
-/** Italic and bold for each font of the page, so emphasis survives (from pdf.js's font flags and name). */
-async function fontLooks(page: PDFPageProxy, ids: Set<string>): Promise<Map<string, { italic: boolean; bold: boolean }>> {
-  const out = new Map<string, { italic: boolean; bold: boolean }>();
+type Look = { italic: boolean; bold: boolean };
+
+/** A resolved font's italic and bold, from pdf.js's font flags and name; null when it never resolved. */
+function readLook(page: PDFPageProxy, id: string): Look | null {
   try {
-    await page.getOperatorList();
-    for (const id of ids) {
-      try {
-        if (!page.commonObjs.has(id)) continue;
-        const f = page.commonObjs.get(id) as { name?: string; italic?: boolean; bold?: boolean; black?: boolean } | null;
-        if (!f) continue;
-        const name = (f.name ?? '').replace(/^[A-Z]{6}\+/, '');
-        out.set(id, { italic: !!f.italic || /italic|oblique|-it$/i.test(name), bold: !!f.bold || !!f.black || /bold|black|heavy|semibold|demi/i.test(name) });
-      } catch { /* font not resolved */ }
-    }
-  } catch { /* no operator list: styles stay plain */ }
-  return out;
+    if (!page.commonObjs.has(id)) return null;
+    const f = page.commonObjs.get(id) as { name?: string; italic?: boolean; bold?: boolean; black?: boolean } | null;
+    if (!f) return null;
+    const name = (f.name ?? '').replace(/^[A-Z]{6}\+/, '');
+    return { italic: !!f.italic || /italic|oblique|-it$/i.test(name), bold: !!f.bold || !!f.black || /bold|black|heavy|semibold|demi/i.test(name) };
+  } catch {
+    return null; // font not resolved
+  }
 }
 
-async function pageLines(page: PDFPageProxy, pageNo: number): Promise<Line[]> {
+/**
+ * Italic and bold for each font of the page, so emphasis survives. `known` carries the fonts
+ * already read across pages: a font is the same object (same id) on every page that uses it.
+ *
+ * getTextContent loads fonts in pdf.js's worker but never sends them here; only building an
+ * operator list does. So only a page that brings a font not seen before builds one (with the
+ * document opened `textOnly`, its images are skipped rather than decoded).
+ */
+async function fontLooks(page: PDFPageProxy, ids: Set<string>, known: Map<string, Look | null>): Promise<void> {
+  const fresh = [...ids].filter((id) => !known.has(id));
+  if (!fresh.length) return;
+  const pending = fresh.filter((id) => !page.commonObjs.has(id));
+  if (pending.length) {
+    try {
+      const { AnnotationMode } = await pdfjs();
+      // Annotations' own fonts never reach the text layer.
+      await page.getOperatorList({ annotationMode: AnnotationMode.DISABLE });
+    } catch {
+      return; // no operator list: styles stay plain on this page (a later page may try again)
+    }
+    // A font arrives with the list but resolves once the browser has loaded it: give it a moment.
+    await Promise.all(pending.map((id) => new Promise<void>((done) => {
+      const timer = setTimeout(done, 1500);
+      try {
+        page.commonObjs.get(id, () => { clearTimeout(timer); done(); });
+      } catch {
+        clearTimeout(timer);
+        done();
+      }
+    })));
+  }
+  for (const id of fresh) known.set(id, readLook(page, id));
+}
+
+async function pageLines(page: PDFPageProxy, pageNo: number, known: Map<string, Look | null>): Promise<Line[]> {
   const tc = await page.getTextContent();
   const items = tc.items.filter((i): i is TextItem => 'str' in i && i.str.length > 0 && i.dir !== 'ttb');
-  const looks = await fontLooks(page, new Set(items.map((i) => i.fontName)));
+  await fontLooks(page, new Set(items.map((i) => i.fontName)), known);
   const lines: Line[] = [];
   let cur: Line | null = null;
   for (const it of items) {
     const [a, b, c, d, x, y] = it.transform as number[];
     const size = Math.hypot(c, d) || Math.hypot(a, b) || it.height || 10;
-    const look = looks.get(it.fontName);
+    const look = known.get(it.fontName);
     const run: Run = { text: it.str, x, y, w: it.width, size, italic: !!look?.italic, bold: !!look?.bold };
     if (!run.text.trim() && cur) { cur.runs.push(run); continue; }
     if (!cur || Math.abs(y - cur.y) > Math.min(size, cur.size) * 0.45) {
@@ -149,12 +185,13 @@ function lineMarkup(l: Line): string {
 export interface PdfTextResult { text: string; pages: number; paragraphs: number; headings: number; dropped: number }
 
 export async function pdfToStory(bytes: Uint8Array, onProgress?: (page: number, pages: number) => void): Promise<PdfTextResult> {
-  const { doc, close: closeDoc } = await openPdf(bytes);
+  const { doc, close: closeDoc } = await openPdf(bytes, { textOnly: true });
   const pages: Line[][] = [];
+  const looks = new Map<string, Look | null>();
   try {
     for (let n = 1; n <= doc.numPages; n++) {
       const page = await doc.getPage(n);
-      try { pages.push(await pageLines(page, n)); } finally { page.cleanup(); }
+      try { pages.push(await pageLines(page, n, looks)); } finally { page.cleanup(); }
       onProgress?.(n, doc.numPages);
     }
   } finally {

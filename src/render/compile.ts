@@ -477,7 +477,8 @@ function layoutTextUnsafe(el: TextElement, ctx: CompileContext): FrameLayout {
   const hit = m.get(key);
   if (hit) return hit;
   const [layout] = layoutStory(el.text, el.style, [frameFor(el, grid, wraps, ctx.surface.startsWith('page:') ? ctx.pageIndex : null)], tokens, stylesWithList(ss.styles, project, el));
-  if (m.size > 24) m.clear();
+  // A master's folio is set once per page: keep a book's worth of them.
+  if (m.size > 600) m.clear();
   m.set(key, layout);
   return layout;
 }
@@ -643,15 +644,20 @@ export function saneElement(el: Element): Element {
   return result;
 }
 
+const filledText = new WeakMap<FrameLayout, { fill: string; w: number; h: number; prims: Prim[] }>();
+
 export function compileElementLocal(el0: Element, ctx: CompileContext): Prim[] {
   const el = saneElement(el0);
   switch (el.type) {
     case 'text': {
+      // An unchanged layout gives the same prims (thumbnails compare them to skip redrawing).
       const layout = layoutText(el, ctx);
-      const out: Prim[] = [];
-      if (el.fill) out.push({ t: 'path', d: rectPath(0, 0, el.w, el.h), fill: el.fill });
-      out.push(...layout.prims);
-      return out;
+      if (!el.fill) return layout.prims;
+      const hit = filledText.get(layout);
+      if (hit && hit.fill === el.fill && hit.w === el.w && hit.h === el.h) return hit.prims;
+      const prims: Prim[] = [{ t: 'path', d: rectPath(0, 0, el.w, el.h), fill: el.fill }, ...layout.prims];
+      filledText.set(layout, { fill: el.fill, w: el.w, h: el.h, prims });
+      return prims;
     }
     case 'image': return compileImage(el, ctx.project);
     case 'shape':

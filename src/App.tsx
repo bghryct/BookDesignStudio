@@ -50,8 +50,10 @@ export default function App() {
       }
       useStore.setState({ ready: true });
       startAutosave();
-      // The book is on screen (two frames after it was set): opening finished.
-      requestAnimationFrame(() => requestAnimationFrame(() => markOpening(false)));
+      // Opening finished once the book has been drawn: a timer runs after React's render, and only
+      // if that render didn't freeze the page. (Not an animation frame: those never come in a
+      // background tab, and a book opened there would look like one that never finished.)
+      setTimeout(() => markOpening(false), 1000);
     })();
     // Warm the default text faces and hyphenation patterns.
     void ensureFamily('eb-garamond');

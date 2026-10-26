@@ -22,11 +22,11 @@ import fontkit from '@pdf-lib/fontkit';
 import type { BlendMode, Element, Finish, Project } from '../model/types';
 import type { Paint, Prim, TextRun, Matrix, PathPrim, GradientStop } from '../render/primitives';
 import { multiply, runMatrix } from '../render/primitives';
-import { compileElement, elementMatrix, type CompileContext } from '../render/compile';
+import { compileElement, compilePage, elementMatrix, type CompileContext } from '../render/compile';
 import { renderToCanvas, preloadImages } from '../render/canvasBackend';
 import { parsePath } from '../lib/pathData';
 import { parseColor, rgbToCmyk, findSwatchCmyk } from '../lib/color';
-import { shape, glyphPath, canOutline, faceBytes, getFace, glyphKerns } from '../engine/fonts';
+import { shape, glyphPath, canOutline, faceBytes, getFace, glyphKerns, fontsSettled } from '../engine/fonts';
 import { computeBinding, computeJacket } from '../engine/binding';
 import { contentsEntries } from '../ui/contents';
 import { pageNumbers } from '../model/sections';
@@ -768,6 +768,15 @@ async function pageInfo(w: PageWriter, text: string, x: number, y: number) {
 /* Entry point                                                                  */
 /* -------------------------------------------------------------------------- */
 
+/**
+ * Compile once so the pages ask for every font they use, then wait for those fonts: a page never
+ * shown on screen may use one nobody has loaded yet, and would be set with stand-in metrics.
+ */
+async function loadFonts(compileAll: () => void): Promise<void> {
+  try { compileAll(); } catch { /* the real pass reports what fails */ }
+  await fontsSettled();
+}
+
 export async function exportPdf(project: Project, opts: PdfOptions): Promise<Uint8Array> {
   const doc = await PDFDocument.create();
   doc.registerFontkit(fontkit);
@@ -805,6 +814,7 @@ export async function exportPdf(project: Project, opts: PdfOptions): Promise<Uin
     }
     const ctx: CompileContext = { project, surface: 'jacket', pageIndex: null, side: 'right' };
     const els = project.jacket?.elements ?? [];
+    await loadFonts(() => { for (const el of els) compileElement(el, ctx); });
     for (const [i, el] of els.entries()) {
       opts.onProgress?.(i / Math.max(1, els.length), 'Jacket');
       await emitElement(w, el, ctx, el.anchor ? jc.panels.find((p) => p.id === el.anchor)?.x ?? 0 : 0);
@@ -838,6 +848,7 @@ export async function exportPdf(project: Project, opts: PdfOptions): Promise<Uin
       w.push(moveTo(-wrap, -wrap), lineTo(W + wrap, -wrap), lineTo(W + wrap, H + wrap), lineTo(-wrap, H + wrap), closePath(), fill());
     }
     const ctx: CompileContext = { project, surface: 'cover', pageIndex: null, side: 'right' };
+    await loadFonts(() => { for (const el of project.cover.elements) compileElement(el, ctx); });
     for (const [i, el] of project.cover.elements.entries()) {
       opts.onProgress?.(i / Math.max(1, project.cover.elements.length), 'Cover');
       await emitElement(w, el, ctx, el.anchor ? calc.panels.find((p) => p.id === el.anchor)?.x ?? 0 : 0);
@@ -887,6 +898,7 @@ export async function exportPdf(project: Project, opts: PdfOptions): Promise<Uin
 
   // Nothing to write: say so, rather than saving pdf-lib's blank A4 page as the "export".
   if (!sheets.length) throw new Error(opts.scope === 'spread' ? 'that spread no longer exists.' : 'no pages in that range.');
+  await loadFonts(() => { for (const sh of sheets) for (const pi of sh.pages) if (pi != null) compilePage(project, pi); });
 
   const allLinks: { page: PDFPage; links: PageWriter['links'] }[] = [];
   // Text-only pages never wait on anything: give the browser a moment now and then, so the

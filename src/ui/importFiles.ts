@@ -104,8 +104,15 @@ const imageSize = (src: string) => new Promise<{ w: number; h: number } | null>(
 });
 
 const FONT_EXT = /\.(ttf|otf|woff2?|ttc)$/i;
-/** Largest table a dropped CSV / TSV may make (cells). */
-const MAX_TABLE_CELLS = 10000;
+/**
+ * Largest table a dropped CSV / TSV may make (cells). The table engine now redraws a large table
+ * in well under a second after an edit, but the first setting of new cells costs 0.1–0.2 ms each
+ * (font shaping; again on every reload), and the new table arrives as one frame as tall as all
+ * its rows, which every redraw of its page paints whole until it is threaded over pages. At this
+ * size (1,600 rows × 30 columns, 5,000 × 10) a placement takes several seconds and a redraw of the
+ * unthreaded frame one to two.
+ */
+const MAX_TABLE_CELLS = 50_000;
 
 /** Import dropped/picked files: images, SVG, fonts, text, project files. */
 export async function importFiles(files: File[], opts: ImportOptions = {}): Promise<{ messages: string[]; errors: string[] }> {
@@ -138,10 +145,10 @@ export async function importFiles(files: File[], opts: ImportOptions = {}): Prom
         const place = opts.place ?? (dp && { surfaceKey: dp.surfaceKey, x: dp.x + dp.w / 2, y: dp.y + dp.h / 2 });
         if (!place) { errors.push(`${file.name}: open a page to place the table on.`); continue; }
         const el = tableFromText(await file.text(), place, file.name.replace(/\.[^.]+$/, ''));
-        // Thousands of rows in one frame take the table engine many seconds per redraw, and the
-        // autosave would bring the freeze back on every reload: refuse instead of hanging.
+        // Beyond this a first placement (and every reload of the autosave) holds the tab for many
+        // seconds: refuse with the reason instead of hanging.
         const cells = el ? el.rows.length * el.cols.length : 0;
-        if (el && cells > MAX_TABLE_CELLS) { errors.push(`${file.name}: ${el.rows.length.toLocaleString()} rows × ${el.cols.length} columns is more than one table can hold (${MAX_TABLE_CELLS.toLocaleString()} cells). Split the file and place the parts on separate pages.`); continue; }
+        if (el && cells > MAX_TABLE_CELLS) { errors.push(`${file.name}: ${el.rows.length.toLocaleString()} rows × ${el.cols.length} columns is ${cells.toLocaleString()} cells — more than one table can take without stalling the app (${MAX_TABLE_CELLS.toLocaleString()} cells). Split the file into parts of fewer rows (or drop unneeded columns) and place each part as its own table.`); continue; }
         if (el) { s.addElement(place.surfaceKey, el); messages.push(`Table made from ${file.name}: ${el.rows.length} rows × ${el.cols.length} columns.`); }
         else errors.push(`${file.name}: no rows found.`);
         continue;

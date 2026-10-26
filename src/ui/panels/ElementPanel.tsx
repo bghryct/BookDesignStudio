@@ -26,6 +26,7 @@ import { spacingReport } from '../canvas/SpacingOverlay';
 import { getMotif } from '../../engine/motifs';
 import type { MotifElement } from '../../model/types';
 import { parsePath, pathBounds, serialize, transformSegs } from '../../lib/pathData';
+import { multiply, type Matrix, type Paint, type PathPrim, type Prim } from '../../render/primitives';
 import { computeGrid, textBlock } from '../../engine/grid';
 import { pageSide, facingOf } from '../../model/surfaces';
 
@@ -497,20 +498,33 @@ function TypeSpecific({ el, project }: { el: Element; project: Project }) {
             const prims = svgPrims(parsed, e.w, e.h, e.fillOverride, e.strokeOverride);
             const loc = findElement(s().project, e.id);
             if (!loc) return;
-            const paths = prims.filter((p) => p.t === 'path').map((p) => {
-              if (p.t !== 'path') throw new Error();
-              const segs = parsePath(p.d);
+            // Paths inside groups (elliptical gradients are drawn that way) take the group's matrix;
+            // gradients become their middle colour, as a path holds one fill. Text has no path to keep.
+            const flat: { p: PathPrim; m: Matrix }[] = [];
+            let texts = 0;
+            const walk = (list: Prim[], m: Matrix) => {
+              for (const p of list) {
+                if (p.t === 'path') flat.push({ p, m });
+                else if (p.t === 'group') walk(p.children, p.matrix ? multiply(m, p.matrix) : m);
+                else if (p.t === 'text') texts++;
+              }
+            };
+            walk(prims, [1, 0, 0, 1, 0, 0]);
+            const solid = (paint: Paint | null | undefined) => (typeof paint === 'string' ? paint : paint?.stops?.length ? paint.stops[Math.floor(paint.stops.length / 2)].color : null);
+            const paths = flat.map(({ p, m }) => {
+              const segs = transformSegs(parsePath(p.d), m);
               const b = pathBounds(segs);
               const d = serialize(transformSegs(segs, [1, 0, 0, 1, -b.x, -b.y]));
+              const scale = Math.sqrt(Math.abs(m[0] * m[3] - m[1] * m[2])) || 1;
               return makePath({ name: 'Path', x: e.x + b.x, y: e.y + b.y, w: Math.max(0.5, b.w), h: Math.max(0.5, b.h), vw: Math.max(0.5, b.w), vh: Math.max(0.5, b.h), d,
-                fill: typeof p.fill === 'string' ? p.fill : null, stroke: typeof p.stroke === 'string' ? p.stroke : null, strokeWidth: p.strokeWidth ?? 1, fillRule: p.fillRule ?? 'nonzero', rotation: 0 });
+                fill: solid(p.fill), stroke: solid(p.stroke), strokeWidth: (p.strokeWidth ?? 1) * scale, fillRule: p.fillRule ?? 'nonzero', rotation: 0 });
             });
             s().update((d) => {
               const arr = surfaceElementsDraft(d as Project, loc.key)!;
               arr.splice(loc.index, 1, ...(paths as Draft<Element>[]));
             });
             s().select(paths.map((p) => p.id));
-            s().notify(`Exploded into ${paths.length} editable paths.`);
+            s().notify(`Exploded into ${paths.length} editable paths.${texts ? ' Its text has no paths and was left out.' : ''}`);
           }}>Explode into editable paths</Button>
         </Section>
       );

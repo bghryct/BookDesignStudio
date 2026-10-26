@@ -339,7 +339,7 @@ function prepare(text: string, style: TextStyle, firstWidth: number, styles: Sto
     const special = (i === 0 && (!!dropCap || style.firstLineSmallCaps)) || !!pst.lineStyles?.length;
     // The measure only matters for runs too long to fit it (they may then break anywhere).
     const measure = Math.round(Math.max(1, firstWidth - ps.left - ps.right));
-    const ik = special ? '' : `${ctxId}|${jsonOf(pst)}|${para.kind}|${para.first}|${para.marker}|${para.level}|${measure < 12 * pst.fontSize ? measure : ''}|${JSON.stringify(para.words)}`;
+    const ik = special ? '' : `${ctxId}|${jsonOf(pst)}|${para.kind}|${para.first}|${para.marker}|${para.level}|${measure < 12 * pst.fontSize ? measure : ''}|${jsonOf(para.words)}`;
     let items = special ? undefined : itemCache.get(ik);
     if (!items) {
       items = buildItems(para, pst, ps, 0, ragged, dict, styles?.images, measure);
@@ -1280,15 +1280,57 @@ export function layoutStory(text: string, style0: TextStyle, frames0: FrameSpec[
   const useStyles = styles && (styles.para.length || styles.char.length || styles.hyphenation?.length || styles.hiddenConditions?.length || styles.listStart?.length || /\{img:/.test(expanded)) ? styles : null;
   const prep = prepare(expanded, style, firstColW, useStyles);
   const out: FrameLayout[] = [];
+  // Long threads reuse the frames a change did not reach (see threadMemo).
+  const memoKey = frames.length >= 3 ? `${JSON.stringify(style)}|${frames.length}` : null;
+  const frameKeys = memoKey ? frames.map((f) => JSON.stringify(f)) : [];
+  const old = memoKey ? threadMemo.get(memoKey) : undefined;
+  const memos: FrameMemo[] = [];
   let cursor: Cursor | null = { para: 0, item: 0 };
   frames.forEach((frame, i) => {
     if (!cursor) {
       out.push({ prims: [], lineCount: 0, overflow: false, baselines: [], lines: [] });
       return;
     }
+    const m = old?.[i];
+    if (m && m.frame === frameKeys[i] && m.start.para === cursor.para && m.start.item === cursor.item && sameParas(m, prep)) {
+      out.push(m.layout);
+      memos[i] = m;
+      cursor = m.end;
+      return;
+    }
     const { layout, cursor: next } = layoutFrameBalanced(prep, style, frame, cursor, i === 0);
     out.push(layout);
+    if (memoKey) {
+      // What the frame read: its paragraphs, and the next one (keep with next looks ahead).
+      const last = Math.min(prep.paras.length - 1, (next?.para ?? prep.paras.length - 1) + 1);
+      const read = prep.paras.slice(cursor.para, last + 1);
+      memos[i] = { frame: frameKeys[i], start: cursor, end: next, count: prep.paras.length, items: read.map((pp) => pp.items), notes: read.map((pp) => pp.para.footnotes), layout };
+    }
     cursor = next;
   });
+  if (memoKey) {
+    threadMemo.delete(memoKey);
+    threadMemo.set(memoKey, memos);
+    if (threadMemo.size > 12) threadMemo.delete(threadMemo.keys().next().value!);
+  }
   return out;
+}
+
+/*
+ * A keystroke changes one paragraph and, usually, only the frame that holds it. A frame keeps its
+ * last layout when it has the same shape, starts at the same place, and every paragraph it read
+ * is unchanged: the same measured items (shared through the item cache while a paragraph's words,
+ * style and context are the same) and the same footnotes. The story's frame style and frame count
+ * key the memo.
+ */
+interface FrameMemo { frame: string; start: Cursor; end: Cursor | null; count: number; items: Item[][]; notes: Footnote[][]; layout: FrameLayout }
+const threadMemo = new Map<string, FrameMemo[]>();
+function sameParas(m: FrameMemo, prep: Prepared): boolean {
+  // A frame that reached the end of the story would continue if paragraphs were added after it.
+  if (!m.end && m.count !== prep.paras.length) return false;
+  for (let k = 0; k < m.items.length; k++) {
+    const pp = prep.paras[m.start.para + k];
+    if (!pp || pp.items !== m.items[k] || pp.para.footnotes !== m.notes[k]) return false;
+  }
+  return true;
 }

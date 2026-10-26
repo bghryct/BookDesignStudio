@@ -9,6 +9,7 @@ import { renderToCanvas, preloadImages } from '../render/canvasBackend';
 import { spreadsOf, findElement } from '../model/surfaces';
 import { computeBinding, computeJacket } from '../engine/binding';
 import type { Prim } from '../render/primitives';
+import { fontsSettled, useFontStore } from '../engine/fonts';
 
 export interface SvgExportOptions {
   target: 'spread' | 'page' | 'cover' | 'jacket' | 'selection';
@@ -62,8 +63,16 @@ function build(project: Project, o: SvgExportOptions): Built {
   return { prims, box: { x: -bleed, y: -bleed, w: b.trimW * slots.length + 2 * bleed, h: b.trimH + 2 * bleed }, name: `spread-${nums}` };
 }
 
+/** The art, built again if building it asked for fonts that were not loaded yet. */
+async function buildWithFonts(project: Project, o: SvgExportOptions) {
+  const v0 = useFontStore.getState().version;
+  const art = build(project, o);
+  await fontsSettled();
+  return useFontStore.getState().version === v0 ? art : build(project, o);
+}
+
 export async function exportSvg(project: Project, o: SvgExportOptions): Promise<{ blob: Blob; name: string }> {
-  const { prims, box, name } = build(project, o);
+  const { prims, box, name } = await buildWithFonts(project, o);
   await preloadImages(prims);
   const body = primsToSvg(prims, { pxPerPt: o.rasterScale, idPrefix: 'bds', outlineText: o.outlineText, hidePlaceholders: true });
   const pt = (v: number) => +v.toFixed(3);
@@ -77,7 +86,7 @@ ${body}
 }
 
 export async function exportPng(project: Project, o: SvgExportOptions & { dpi: number }): Promise<{ blob: Blob; name: string }> {
-  const { prims, box, name } = build(project, o);
+  const { prims, box, name } = await buildWithFonts(project, o);
   await preloadImages(prims);
   const ppp = Math.min(o.dpi / 72, 12000 / Math.max(box.w, box.h));
   const canvas = renderToCanvas(prims, box, ppp, { hideDieLines: true, background: '#ffffff' });

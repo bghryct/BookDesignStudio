@@ -236,7 +236,7 @@ async function loadFace(def: FamilyDef, state: FaceState): Promise<void> {
     state.error = (e as Error).message;
   } finally {
     useFontStore.setState((s) => ({ loading: s.loading - 1 }));
-    shapeCache.clear();
+    clearShapes();
     useFontStore.getState().bump();
   }
 }
@@ -252,6 +252,19 @@ export function ensureFamily(id: string): Promise<void> {
     familyLoads.set(def.id, p);
   }
   return p;
+}
+
+/**
+ * Wait for every family load started so far, and for those they start in turn (an export compiles
+ * its pages once, which asks for the fonts they use, then waits here before compiling for real).
+ */
+export async function fontsSettled(): Promise<void> {
+  for (let round = 0; round < 4; round++) {
+    const pending = [...familyLoads.values()];
+    await Promise.allSettled(pending);
+    await Promise.resolve();
+    if (familyLoads.size === pending.length) return;
+  }
 }
 
 /* -------------------------------------------------------------------------- */
@@ -350,7 +363,7 @@ export async function registerUploadedFont(raw: Uint8Array, fileName: string, id
   await registerWithDocument(def, faceDef, bytes);
   state.status = 'ready';
   familyLoads.set(familyId, Promise.resolve());
-  shapeCache.clear();
+  clearShapes();
   useFontStore.getState().bump();
   await idbSet('fonts', faceKey, { bytes, fileName }).catch(() => undefined);
   return { familyId, family: familyName, faceKey, weight, italic, variable };
@@ -392,6 +405,9 @@ export function resolveFont(req: FontRequest): FontRef {
   const pool = candidates.length ? candidates : fam.faces;
   const face = pool.reduce((best, f) => (faceWeightDistance(f, weight) < faceWeightDistance(best, weight) ? f : best), pool[0]);
   const state = faces.get(face.key);
+  // A family asked for anywhere (inline markup, a placed SVG's text, a generator) loads itself:
+  // the text is set again when it arrives (the font store's version changes).
+  if (!fam.system && state?.status === 'idle') void ensureFamily(fam.id);
   const axes: Record<string, number> = {};
   if (state && state.axes.length) {
     for (const a of state.axes) {
@@ -480,7 +496,14 @@ export interface Shaped {
   complete: boolean;
 }
 
-const shapeCache = new Map<string, Shaped>();
+/*
+ * Shaped runs in two generations: when the current one fills, it becomes the old one (still read,
+ * and hits move back), so a book with more distinct runs than fit is not re-shaped from scratch
+ * on every redraw, as clearing it all at once did.
+ */
+let shapeCache = new Map<string, Shaped>();
+let shapeOld = new Map<string, Shaped>();
+function clearShapes() { shapeCache.clear(); shapeOld.clear(); }
 const featKey = (f: Record<string, boolean>) => Object.keys(f).sort().map((k) => (f[k] ? k : `-${k}`)).join(',');
 
 export function shape(text: string, ref: FontRef): Shaped | null {
@@ -489,6 +512,8 @@ export function shape(text: string, ref: FontRef): Shaped | null {
   const key = `${ref.face}|${axesKey(ref.axes)}|${featKey(ref.features)}|${text}`;
   const hit = shapeCache.get(key);
   if (hit) return hit;
+  const old = shapeOld.get(key);
+  if (old) { remember(key, old); return old; }
   const upm = fk.unitsPerEm;
   let complete = true;
   for (const ch of text) {
@@ -506,9 +531,13 @@ export function shape(text: string, ref: FontRef): Shaped | null {
     units: (g.codePoints ?? []).reduce((n: number, cp: number) => n + (cp > 0xffff ? 2 : 1), 0),
   }));
   const shaped: Shaped = { advance: glyphs.reduce((s, g) => s + g.xAdvance, 0), glyphs, complete };
-  shapeCache.set(key, shaped);
-  if (shapeCache.size > 60000) shapeCache.clear();
+  remember(key, shaped);
   return shaped;
+}
+
+function remember(key: string, shaped: Shaped) {
+  shapeCache.set(key, shaped);
+  if (shapeCache.size > 60000) { shapeOld = shapeCache; shapeCache = new Map(); }
 }
 
 let measureCtx: CanvasRenderingContext2D | null = null;
